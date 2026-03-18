@@ -43,7 +43,7 @@ class EnvironmentState:
                 "mutation_service": Rate(3, Duration.SECOND),
             }
             self._limiters = {
-                k: Limiter(v, max_delay=1000) for k, v in rate_configs.items()
+                k: Limiter(v) for k, v in rate_configs.items()
             }
         return self._limiters
 
