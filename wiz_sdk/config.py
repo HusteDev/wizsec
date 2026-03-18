@@ -28,8 +28,8 @@ except ImportError:
     # Python <3.8 fallback (not typical in modern environments, but just in case)
     from importlib_metadata import version as get_version
 
-from wiz_sdk.version import __version__ as wiz_sdk_version
-from wiz_sdk.version import __sdk_name__ as sdk_name
+from .version import __version__ as wiz_sdk_version
+from .version import __sdk_name__ as sdk_name
 
 LIBRARY_NAME = sdk_name
 CURRENT_VERSION = wiz_sdk_version
@@ -627,130 +627,6 @@ def generate_default_config(file_path=(DEFAULT_WIZ_DIR / "wiz.config")):
 
     return True
 
-
-'''def _build_library_logger_for_lambda(level: int) -> logging.Logger:
-    """
-    Dedicated logger for Lambda: its own StreamHandler to stdout,
-    explicit level, no propagation to root (to avoid root's WARNING filter),
-    and an idempotent init so we don't duplicate handlers on warm starts.
-    """
-
-    logger = logging.getLogger(BASE_LOGGER_NAME)
-
-    if getattr(logger, "_baselogger_initialized", False):
-        logger.setLevel(level)
-        return logger
-
-    logger.setLevel(level)
-    logger.propagate = False
-
-    h = logging.StreamHandler(sys.stdout)
-    h.setLevel(level)
-    fmt = "%(asctime)s %(levelname)s [%(name)s] %(message)s"
-    h.setFormatter(logging.Formatter(fmt))
-
-    logger.handlers.clear()        # own handler, independent of root
-    logger.addHandler(h)
-
-    logger._baselogger_initialized = True
-    return logger
-
-
-def _build_library_logger_for_local(level: int) -> logging.Logger:
-    """
-    Non-serverless: still create a dedicated base logger.
-    If you also want file logging, you can add a FileHandler here behind your existing flags.
-    """
-
-    logger = logging.getLogger(BASE_LOGGER_NAME)
-    if getattr(logger, "_baselogger_initialized", False):
-        logger.setLevel(level)
-        return logger
-    
-    if not Config.logging_enabled():
-        logger.addHandler(logging.NullHandler())  # No-op logger, ignores all log calls
-        return logger
-
-    logger.setLevel(level)
-    logger.propagate = False
-
-
-    if Config.console_handler_enabled():
-        console_handler = logging.StreamHandler(stream=sys.stdout)
-        console_log_level_str = Config.console_handler_logging_level().upper()
-        console_log_level = getattr(logging, console_log_level_str, Config.logger_min_level())
-        # Override with verbose if enabled and higher precedence
-        if Config.verbose_mode() and console_log_level > logging.VERBOSE:
-            console_log_level = logging.VERBOSE
-        console_handler.setLevel(console_log_level)
-
-        date_format = '%H:%M:%S'
-        console_log_format = '\r%(asctime)s [%(name)s::%(levelname)s]:   %(message)s\033[K'
-        console_formatter = logging.Formatter(fmt=console_log_format, datefmt=date_format)
-        console_handler.setFormatter(console_formatter)
-        logger.addHandler(console_handler)
-        logger.console_handler = console_handler
-
-    if Config.file_logging_enabled() and not Config.serverless():
-        log_path_from_config_str = Config.get("logging", "file_handler", "log_directory", default="")
-        if not log_path_from_config_str: # If empty, use DEFAULT_WIZ_DIR
-            log_path_from_config = DEFAULT_WIZ_DIR
-        else:
-            log_path_from_config, _ = parse_filepath(log_path_from_config_str)
-
-        log_directory = log_path_from_config / 'logs'
-        if Config.file_handler_create_log_dir() and not log_directory.is_dir():
-            log_directory.mkdir(parents=True, exist_ok=True)
-
-        log_filename = f'{date.today().strftime("%Y%m%d")}_{datetime.now().strftime("%H%M%S")}_{Path(sys.argv[0]).stem}.log'        
-        log_path = log_directory / log_filename
-
-        logger.log_directory = log_directory
-
-        file_handler = logging.FileHandler(filename=log_path, mode="w")
-        file_log_level_str = Config.file_handler_logging_level().upper()
-        file_log_level = getattr(logging, file_log_level_str, logging.DEBUG)
-        file_handler.setLevel(file_log_level)
-
-        date_format = '%d-%b-%y %H:%M:%S.%f'
-        if Config.file_handler_markdown_enabled():    
-            file_log_format = '| %(asctime)s | %(levelname)s | %(filename)s | %(funcName)s | %(lineno)d | %(thread)d | %(threadName)s | %(message)s |'
-            file_formatter = MarkdownFormatter(fmt=file_log_format, datefmt=date_format)
-        else:
-            file_log_format = '%(asctime)s  [%(levelname)s] - (%(name)s):  %(message)s'
-            file_formatter = CustomFormatter(fmt=file_log_format, datefmt=date_format)
-        file_handler.setFormatter(file_formatter)
-        logger.addHandler(file_handler)
-
-        logger.file_handler = file_handler
-
-    logger._baselogger_initialized = True
-    return logger
-
-
-def logging_init(name: str = BASE_LOGGER_NAME, default_level=logging.INFO) -> logging.Logger:
-
-    if not hasattr(logging, "VERBOSE"):
-        logging.addLevelName(VERBOSE_LEVEL, "VERBOSE")
-
-        def _verbose(self, message, *args, **kwargs):
-            if self.isEnabledFor(VERBOSE_LEVEL):
-                self._log(VERBOSE_LEVEL, message, args, **kwargs)
-
-        logging.Logger.verbose = _verbose
-        logging.VERBOSE = VERBOSE_LEVEL
-
-    try:
-        cfg_level = Config.logger_min_level()
-        level = int(cfg_level) if isinstance(cfg_level, int) else getattr(logging, str(cfg_level).upper(), logging.INFO)
-    except Exception:
-        level = default_level
-
-    if Config.serverless():
-        return _build_library_logger_for_lambda(level)
-    else:
-        return _build_library_logger_for_local(level)
-'''
 
 def _ensure_verbose_console_level(level: int) -> int:
     # If verbose mode on, prefer VERBOSE over a higher level

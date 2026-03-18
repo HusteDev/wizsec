@@ -29,13 +29,13 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from functools import wraps
 from typing import Optional, Dict, Any, List, Union, Tuple
-from wiz_sdk.config import Config, parse_filepath, logging_init, DEFAULT_TEMP_FOLDER
+from .config import Config, parse_filepath, logging_init, DEFAULT_TEMP_FOLDER
 
 import pickle
 mimetypes.add_type('application/python-pickle', '.pkl')
 mimetypes.add_type('application/python-pickle', '.pickle')
 
-from wiz_sdk.exceptions import WizFileError, WizConfigurationError
+from .exceptions import WizFileError, WizConfigurationError
 
 def disable_in_serverless(func):
     @wraps(func)

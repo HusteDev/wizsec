@@ -24,10 +24,10 @@ from typing import Optional, Dict, Any, List, Union, Callable, Iterator
 from graphql import parse, GraphQLError
 import asyncio
 import aiohttp
-from wiz_sdk.utils import parse_query_metadata
-from wiz_sdk.config import Config
-from wiz_sdk.client import WizClient
-from wiz_sdk.exceptions import WizQueryError, WizAPIError, WizReportError, WizTimeoutError
+from .utils import parse_query_metadata
+from .config import Config
+from .client import WizClient
+from .exceptions import WizQueryError, WizAPIError, WizReportError, WizTimeoutError
 
 class WizRequest:
     def __init__(

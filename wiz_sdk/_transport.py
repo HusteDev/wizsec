@@ -18,8 +18,8 @@ import requests
 import threading
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, Union, List, Callable
-from wiz_sdk.config import Config
-from wiz_sdk.exceptions import WizAPIError, WizTimeoutError
+from .config import Config
+from .exceptions import WizAPIError, WizTimeoutError
 
 
 class TransportProtocol(ABC):
