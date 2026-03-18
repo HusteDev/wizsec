@@ -24,17 +24,17 @@ from pyrate_limiter import Duration, Limiter, Rate
 import asyncio
 import aiohttp
 from contextlib import contextmanager
-from wiz_sdk.config import Config
-import wiz_sdk.utils as utils
+from .config import Config
+from . import utils
 import webbrowser
-from wiz_sdk.exceptions import (
+from .exceptions import (
     WizAuthenticationError, WizAPIError, WizCredentialsError, 
     WizConfigurationError, WizTimeoutError, WizError
 )
 
 if TYPE_CHECKING:
-    from wiz_sdk._request import WizRequest
-    from wiz_sdk._request import WizResponse
+    from ._request import WizRequest
+    from ._request import WizResponse
 
 class WizClient:
     _tokens = {}
@@ -220,7 +220,7 @@ class WizClient:
         **kwargs
     ) -> "WizResponse":
         self._logger.debug(f"Creating request with query: {query[:50] if query else 'None'}...")
-        from wiz_sdk._request import WizRequest, WizResponse
+        from ._request import WizRequest, WizResponse
         request = WizRequest(client=self, queryCollection=queryCollection, query=query, vars=vars, **kwargs)
         return WizResponse(request)
     
@@ -238,7 +238,7 @@ class WizClient:
             results = batch.submit()
         """
         self._logger.debug("Creating batch request")
-        from wiz_sdk._request import WizBatchRequest
+        from ._request import WizBatchRequest
         return WizBatchRequest(client=self)
     
     # ========== ASYNC METHODS ==========
@@ -260,7 +260,7 @@ class WizClient:
                 result = await response.submit()
         """
         self._logger.debug(f"Creating async request with query: {query[:50] if query else 'None'}...")
-        from wiz_sdk._request import AsyncWizRequest, AsyncWizResponse
+        from ._request import AsyncWizRequest, AsyncWizResponse
         request = AsyncWizRequest(client=self, queryCollection=queryCollection, query=query, vars=vars, **kwargs)
         return AsyncWizResponse(request)
     
@@ -276,7 +276,7 @@ class WizClient:
                 results = await batch.submit(max_concurrent=50)
         """
         self._logger.debug("Creating async batch request")
-        from wiz_sdk._request import AsyncWizBatchRequest
+        from ._request import AsyncWizBatchRequest
         return AsyncWizBatchRequest(client=self)
     
     @contextmanager

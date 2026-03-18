@@ -37,19 +37,19 @@ def __getattr__(name):
     if name == "WizClient":
         from .client import WizClient
     elif name == "dump_to_json":
-        from wiz_sdk.utils import dump_to_json
+        from .utils import dump_to_json
     elif name == "load_file_if_in_last_x_interval":
-        from wiz_sdk.utils import load_file_if_in_last_x_interval
+        from .utils import load_file_if_in_last_x_interval
     elif name == "Config":
-        from wiz_sdk.config import Config
+        from .config import Config
     elif name in ["WizBatchRequest", "WizBatchResponse"]:
-        from wiz_sdk._request import WizBatchRequest, WizBatchResponse
+        from ._request import WizBatchRequest, WizBatchResponse
     elif name in [
         "WizError", "WizAuthenticationError", "WizAPIError", "WizConfigurationError",
         "WizCredentialsError", "WizRateLimitError", "WizQueryError", "WizReportError",
         "WizTimeoutError", "WizFileError", "WizServerlessError"
     ]:
-        from wiz_sdk.exceptions import (
+        from .exceptions import (
             WizError, WizAuthenticationError, WizAPIError, WizConfigurationError,
             WizCredentialsError, WizRateLimitError, WizQueryError, WizReportError,
             WizTimeoutError, WizFileError, WizServerlessError
