@@ -12,7 +12,7 @@
 ##
 
 # client.py
-import requests
+import httpx
 import threading
 import time
 import os
@@ -21,7 +21,6 @@ import json
 import queue
 from typing import TYPE_CHECKING, Optional, Dict, Any, Union
 import asyncio
-import aiohttp
 from contextlib import contextmanager
 from .config import Config
 from . import utils
@@ -276,10 +275,9 @@ class WizClient:
         from ._request import AsyncWizBatchRequest
         return AsyncWizBatchRequest(client=self)
 
-    @contextmanager
-    def async_session(self, session: Optional[aiohttp.ClientSession] = None):
+    def async_session(self, client: Optional[httpx.AsyncClient] = None):
         """
-        Context manager for async operations. Manages aiohttp session lifecycle.
+        Context manager for async operations. Manages httpx.AsyncClient lifecycle.
 
         Example:
             async with client.async_session() as async_client:
@@ -287,27 +285,30 @@ class WizClient:
                 result = await response.submit()
         """
         class AsyncEnabledClient:
-            def __init__(self, sync_client, session):
+            def __init__(self, sync_client, async_client):
                 self._sync_client = sync_client
-                self._session = session
-                self._owns_session = session is None
+                self._async_client = async_client
+                self._owns_client = async_client is None
 
             async def __aenter__(self):
-                if self._owns_session:
-                    self._session = aiohttp.ClientSession(
-                        timeout=aiohttp.ClientTimeout(total=Config.api_timeout()),
-                        connector=aiohttp.TCPConnector(limit=100)
+                if self._owns_client:
+                    ca_bundle = os.environ.get('REQUESTS_CA_BUNDLE')
+                    verify = ca_bundle if ca_bundle else True
+                    self._async_client = httpx.AsyncClient(
+                        timeout=httpx.Timeout(Config.api_timeout()),
+                        limits=httpx.Limits(max_connections=100),
+                        verify=verify,
                     )
-                self._sync_client._async_session = self._session
+                self._sync_client._async_session = self._async_client
                 return self._sync_client
 
             async def __aexit__(self, exc_type, exc_val, exc_tb):
-                if self._owns_session and self._session:
-                    await self._session.close()
+                if self._owns_client and self._async_client:
+                    await self._async_client.aclose()
                 if hasattr(self._sync_client, '_async_session'):
                     delattr(self._sync_client, '_async_session')
 
-        return AsyncEnabledClient(self, session)
+        return AsyncEnabledClient(self, client)
 
     # ========== HTTP & API ==========
 
@@ -327,9 +328,11 @@ class WizClient:
         self._logger.debug(f"POST to {self._api_endpoint()}")
         self._logger.debug(f"POST data: {kwargs.get('json', {})}")
         try:
-            response = requests.post(
-                proxies=self._proxies,
-                verify=os.environ.get('REQUESTS_CA_BUNDLE', None),
+            ca_bundle = os.environ.get('REQUESTS_CA_BUNDLE')
+            verify = ca_bundle if ca_bundle else True
+            response = httpx.post(
+                proxy=self._proxies.get("https") or self._proxies.get("http"),
+                verify=verify,
                 timeout=Config.api_timeout(),
                 **kwargs
             )
@@ -477,7 +480,7 @@ class WizClient:
         self._logger.verbose("Starting device code authentication")
         auth_url = f"https://auth.{self._domain}/api/token/device"
         try:
-            response = requests.post(url=auth_url, timeout=Config.api_timeout())
+            response = httpx.post(url=auth_url, timeout=Config.api_timeout())
             response.raise_for_status()
             device_code_data = response.json()
             uri = device_code_data.get("verification_uri_complete")
@@ -489,7 +492,7 @@ class WizClient:
             interval = device_code_data.get("interval", Config.auth_poll_time())
             elapsed = 0
             while elapsed < Config.api_timeout():
-                token_response = requests.post(
+                token_response = httpx.post(
                     url=auth_url,
                     headers=self._headers_auth,
                     data={"device_code": device_code},
@@ -509,7 +512,7 @@ class WizClient:
                 time.sleep(interval)
                 elapsed += interval
             raise WizTimeoutError("Timeout waiting for device code authentication")
-        except requests.RequestException as e:
+        except httpx.HTTPError as e:
             self._logger.error(f"Network error during device code authentication: {e}", exc_info=True)
             raise WizAPIError("Network error during device code authentication", original_error=e)
         except Exception as e:
@@ -526,7 +529,8 @@ class WizClient:
             'client_secret': self._profile_state.client_secret
         }
         try:
-            response = requests.post(auth_url, data=auth_payload, headers=self._headers_auth, proxies=self._proxies)
+            proxy = self._proxies.get("https") or self._proxies.get("http")
+            response = httpx.post(auth_url, data=auth_payload, headers=self._headers_auth, proxy=proxy)
             if response.status_code != 200:
                 self._logger.error(f"Failed to authenticate: {response.status_code} - {response.text}", exc_info=True)
                 raise WizAuthenticationError(
@@ -542,7 +546,7 @@ class WizClient:
             self._decode_access_token(access_token)
             self._logger.verbose("Client credentials authentication successful")
             return True
-        except requests.RequestException as e:
+        except httpx.HTTPError as e:
             self._logger.error(f"Network error during authentication: {e}", exc_info=True)
             raise WizAPIError("Network error during authentication", original_error=e)
         except WizAuthenticationError:

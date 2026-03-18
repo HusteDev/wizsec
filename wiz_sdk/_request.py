@@ -17,13 +17,12 @@ import traceback
 import random
 import codecs
 import csv
-import requests
+import httpx
 import json
 import threading
 from typing import Optional, Dict, Any, List, Union, Callable, Iterator
 from graphql import parse, GraphQLError
 import asyncio
-import aiohttp
 from .utils import parse_query_metadata
 from .config import Config
 from .client import WizClient
@@ -214,7 +213,7 @@ class WizRequest(_RequestBase):
                     self._handle_failed_response(response)
                     self._logger.debug(f"Payload: {payload}")
                     
-            except requests.RequestException as e:
+            except httpx.HTTPError as e:
                 self._handle_network_error(e)
             except Exception as e:
                 self._handle_unexpected_error(e)
@@ -312,7 +311,7 @@ class WizRequest(_RequestBase):
         self.errors.append({"message": response.text})
         self._logger.warning(error_msg)
     
-    def _handle_network_error(self, e: requests.RequestException) -> None:
+    def _handle_network_error(self, e: httpx.HTTPError) -> None:
         """Handle network-related errors."""
         error_msg = f"Network error executing query: {e}"
         self.errors.append({"message": str(e), "trace": traceback.format_exc()})
@@ -386,35 +385,34 @@ class WizRequest(_RequestBase):
 
     def _stream_report_generator(self, download_url, report_name, on_page_event=None, chunk_size=8192):
         self._logger.info(f"Streaming report: {report_name}")
-        response = requests.get(download_url, stream=True)
-        if response.status_code == 200:
-            content_type = response.headers.get("Content-Type")
-            total_size = int(response.headers.get("content-length", 0))
-            downloaded = 0
+        with httpx.stream("GET", download_url) as response:
+            if response.status_code == 200:
+                content_type = response.headers.get("Content-Type", "")
+                total_size = int(response.headers.get("content-length", 0))
+                downloaded = 0
 
-            if "application/json" in content_type:
-                decoded_lines = codecs.iterdecode(response.iter_lines(chunk_size), "utf-8")
-                for line in decoded_lines:
-                    if line:
-                        data = json.loads(line)
-                        downloaded += len(line)
-                        yield data
-                        if on_page_event:
-                            on_page_event({"name": report_name, "total_size": total_size, "downloaded": downloaded, "status": "In Progress"})
-            elif "text/csv" in content_type or "application/csv" in content_type:
-                decoded_lines = codecs.iterdecode(response.iter_lines(chunk_size), "utf-8")
-                reader = csv.reader(decoded_lines)
-                for row in reader:
-                    downloaded += len(",".join(row).encode("utf-8"))
-                    yield row
+                if "application/json" in content_type:
+                    for line in response.iter_lines():
+                        if line:
+                            data = json.loads(line)
+                            downloaded += len(line.encode("utf-8"))
+                            yield data
+                            if on_page_event:
+                                on_page_event({"name": report_name, "total_size": total_size, "downloaded": downloaded, "status": "In Progress"})
+                elif "text/csv" in content_type or "application/csv" in content_type:
+                    for line in response.iter_lines():
+                        if line:
+                            row = next(csv.reader([line]))
+                            downloaded += len(line.encode("utf-8"))
+                            yield row
+                else:
+                    self._logger.error(f"Unsupported content type: {content_type}")
             else:
-                self._logger.error(f"Unsupported content type: {content_type}")
-        else:
-            self._logger.error(f"Failed to retrieve report: HTTP {response.status_code}")
+                self._logger.error(f"Failed to retrieve report: HTTP {response.status_code}")
 
     def _download_report(self, download_url):
         try:
-            response = requests.get(download_url)
+            response = httpx.get(download_url)
             response.raise_for_status()
             return response.content
         except Exception as e:
@@ -731,34 +729,33 @@ class AsyncWizRequest(_RequestBase):
         """Async version of page execution"""
         if not hasattr(self._client, '_async_session'):
             raise RuntimeError("Async session not initialized. Use client.async_session() context manager.")
-        
-        session = self._client._async_session
+
+        client = self._client._async_session
         retries = 0
         url = self._client._api_endpoint()
         headers = self._client._get_headers()
         payload = {"query": self.query, "variables": self.vars}
-        
+
         while retries <= self._client._max_retries:
             try:
-                # Rate limiting with semaphore
                 semaphore = getattr(self._client, '_async_semaphore', asyncio.Semaphore(10))
-                
+
                 async with semaphore:
-                    async with session.post(url=url, json=payload, headers=headers) as response:
-                        if response.status == 200:
-                            response_data = await response.json()
-                            self.errors.extend(response_data.get("errors", []))
-                            page_data = response_data.get("data", {})
-                            self._merge_page(page_data)
-                            
-                            if not self.errors:
-                                await self._handle_pagination(page_data, url, headers, session)
-                            return
-                        else:
-                            error_msg = f"Query failed with status {response.status}"
-                            self.errors.append({"message": await response.text()})
-                            self._logger.warning(error_msg)
-                            
+                    response = await client.post(url=url, json=payload, headers=headers)
+                    if response.status_code == 200:
+                        response_data = response.json()
+                        self.errors.extend(response_data.get("errors", []))
+                        page_data = response_data.get("data", {})
+                        self._merge_page(page_data)
+
+                        if not self.errors:
+                            await self._handle_pagination(page_data)
+                        return
+                    else:
+                        error_msg = f"Query failed with status {response.status_code}"
+                        self.errors.append({"message": response.text})
+                        self._logger.warning(error_msg)
+
             except asyncio.TimeoutError:
                 self._logger.error("Request timed out")
                 self.errors.append({"message": "Request timed out"})
@@ -766,37 +763,32 @@ class AsyncWizRequest(_RequestBase):
                 error_msg = f"Async request error: {e}"
                 self.errors.append({"message": str(e)})
                 self._logger.error(error_msg)
-            
+
             retries += 1
             if retries <= self._client._max_retries:
                 await asyncio.sleep(self._client._query_retry_time * retries)
-    
-    async def _handle_pagination(self, page_data: Dict[str, Any], url: str, headers: Dict[str, str], session: aiohttp.ClientSession) -> None:
+
+    async def _handle_pagination(self, page_data: Dict[str, Any]) -> None:
         """Handle async pagination"""
         if not self._paginate:
             self.data = page_data
             return
-            
-        # Trigger page event
+
         if self._page_event:
             self._page_event({
                 "page_data": page_data,
                 "page_info": {"per_page": self.vars.get("first", 0), "page": self._page},
                 "errors": self.errors
             })
-        
-        # Check for more pages
+
         page_info = self._page_info(page_data)
         if page_info and page_info.get("hasNextPage"):
             self.vars["after"] = page_info.get("endCursor")
             self._page += 1
-            await self._execute_page()  # Recursive call for next page
+            await self._execute_page()
         else:
-            # Finalize pagination
             self.data = self._aggregated_data
             self._clean_page_info()
-    
-    # _merge_page, _page_info, _clean_page_info, success inherited from _RequestBase
 
 
 class AsyncWizResponse:
