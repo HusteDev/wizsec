@@ -1,9 +1,13 @@
-"""
-Logging setup for wiz-sdk.
-
-Provides the VERBOSE log level, custom formatters, and the logging_init()
-function that Config.get_logger() delegates to.
-"""
+##
+##
+##   L        OOOOO    GGGGG    GGGGG   IIIIIII  N     N    GGGGG
+##   L       O     O  G        G           I     NN    N   G
+##   L       O     O  G   GGG  G   GGG     I     N N   N   G   GGG
+##   L       O     O  G     G  G     G     I     N  N  N   G     G
+##   LLLLLL   OOOOO    GGGGG    GGGGG   IIIIIII  N     N    GGGGG
+##
+##
+##
 
 import logging
 import sys
