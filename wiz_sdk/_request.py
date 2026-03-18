@@ -29,13 +29,15 @@ from .config import Config
 from .client import WizClient
 from .exceptions import WizQueryError, WizAPIError, WizReportError, WizTimeoutError
 
-class WizRequest:
-    def __init__(
-        self, 
-        client: "WizClient", 
+class _RequestBase:
+    """Shared logic for sync and async request classes."""
+
+    def _init_common(
+        self,
+        client: "WizClient",
         queryCollection: Optional[Union[str, Any]] = None,
-        query: Optional[str] = None, 
-        vars: Optional[Dict[str, Any]] = None, 
+        query: Optional[str] = None,
+        vars: Optional[Dict[str, Any]] = None,
         paginate: bool = True,
         report_request: Optional[Dict[str, Any]] = None,
         on_page_event: Optional[Callable] = None
@@ -44,23 +46,22 @@ class WizRequest:
         self._client = client
         self.vars = vars or {}
         self._response = None
-        self.errors = []
-        self.data = None
+        self.errors: List[Dict[str, Any]] = []
+        self.data: Optional[Dict[str, Any]] = None
         self._status_code = None
         self._paginate = paginate and not Config.serverless()
         self._report_request = report_request or {}
         self._page_event = on_page_event
-        self._done_event = threading.Event()
         self._page = 0
+        self._aggregated_data: Optional[Dict[str, Any]] = None
 
         self._queryCollection = None
         if queryCollection:
             self.queryCollection = queryCollection
 
-        # Set query after checking for queryCollection
         if query is not None:
             self.query = query
-            
+
         self._limiter_key = self._client._limiter_key(self)
 
     @property
@@ -97,40 +98,87 @@ class WizRequest:
         if not isinstance(QUERY, str):
             self._logger.warning("Query must be a string, got: %s", type(QUERY))
             raise WizQueryError(f"Query must be a string, got: {type(QUERY)}")
-        
+
         resolved = None
         try:
             parse(QUERY)
-            # self._query = QUERY
             resolved = QUERY
         except GraphQLError:
-            # Check for a queryCollection and resolve
             if self.queryCollection:
                 try:
-                    # resolved_query = getattr(self.queryCollection, QUERY)
                     resolved = getattr(self.queryCollection, QUERY)
                     self._logger.debug(f"Resolved query '{QUERY}' from queryCollection")
-                    # self._query = resolved_query
                 except AttributeError:
                     self._logger.debug(f"Query '{QUERY}' not found in queryCollection. Using raw query.")
-                    # self._query = QUERY
                     resolved = QUERY
             else:
-                # self._query = QUERY
                 resolved = QUERY
 
         self._query = resolved
-
-        # Parse query metadata
         self._current_query_info = parse_query_metadata(self._query)
 
-        # Check for report workflow
         if (
             self._current_query_info["request_type"] == "mutation" and
             self._current_query_info["source"].lower() in ["createreport", "rerunreport"]
         ):
             self._logger.debug("__current_query = %s", self._current_query_info)
             self._report = True
+
+    def _merge_page(self, page_data: Optional[Dict[str, Any]]) -> None:
+        """Merge a page of data into the aggregated results."""
+        if self._aggregated_data is None:
+            self._aggregated_data = page_data or {}
+            return
+
+        for key, value in (page_data or {}).items():
+            if (isinstance(value, dict)
+                and "nodes" in value
+                and key in self._aggregated_data
+                and isinstance(self._aggregated_data[key], dict)):
+
+                if "nodes" not in self._aggregated_data[key]:
+                    self._aggregated_data[key]["nodes"] = []
+                self._aggregated_data[key]["nodes"].extend(value.get("nodes", []))
+                if "pageInfo" in value:
+                    self._aggregated_data[key]["pageInfo"] = value["pageInfo"]
+            else:
+                self._aggregated_data[key] = value
+
+    def _page_info(self, data: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Extract pageInfo from the first field that has it."""
+        for _, value in (data or {}).items():
+            if isinstance(value, dict) and "pageInfo" in value:
+                page_info = value["pageInfo"]
+                return {
+                    "hasNextPage": page_info.get("hasNextPage", False),
+                    "endCursor": page_info.get("endCursor")
+                }
+        return None
+
+    def _clean_page_info(self) -> None:
+        """Remove pageInfo from final data."""
+        if self.data:
+            first_key = next(iter(self.data), None)
+            if first_key and isinstance(self.data[first_key], dict) and "pageInfo" in self.data[first_key]:
+                del self.data[first_key]["pageInfo"]
+
+    def success(self) -> bool:
+        return self.data is not None and not self.errors
+
+
+class WizRequest(_RequestBase):
+    def __init__(
+        self,
+        client: "WizClient",
+        queryCollection: Optional[Union[str, Any]] = None,
+        query: Optional[str] = None,
+        vars: Optional[Dict[str, Any]] = None,
+        paginate: bool = True,
+        report_request: Optional[Dict[str, Any]] = None,
+        on_page_event: Optional[Callable] = None
+    ) -> None:
+        self._init_common(client, queryCollection, query, vars, paginate, report_request, on_page_event)
+        self._done_event = threading.Event()
 
     def submit(self) -> "WizRequest":
         """Enqueue this request and wait for completion."""
@@ -258,11 +306,6 @@ class WizRequest:
         self._clean_page_info()
         self._set_done_event()
     
-    def _clean_page_info(self) -> None:
-        """Remove pageInfo from final data."""
-        if self.data and "pageInfo" in self.data[next(iter(self.data))]:
-            del self.data[next(iter(self.data))]["pageInfo"]
-    
     def _handle_failed_response(self, response) -> None:
         """Handle failed HTTP response."""
         error_msg = f"Query failed with status {response.status_code}: {response.text}"
@@ -377,38 +420,7 @@ class WizRequest:
         except Exception as e:
             self._logger.error(f"Error downloading report: {e}", exc_info=True)
             self.errors.append({"message": str(e)})
-            return None       
-
-    def _merge_page(self, page_data):
-        """Merge a page of data into the aggregated results."""
-        if not hasattr(self, "_aggregated_data") or self._aggregated_data is None:
-            self._aggregated_data = page_data or {}
-            return
-        
-        for key, value in (page_data or {}).items():
-            if (isinstance(value, dict)
-                and "nodes" in value
-                and key in self._aggregated_data
-                and isinstance(self._aggregated_data[key], dict)):
-
-                self._aggregated_data[key]["nodes"].extend(value.get("nodes", []))
-                if "pageInfo" in value:
-                    self._aggregated_data[key]["pageInfo"] = value.get("pageInfo")
-            else:
-                self._aggregated_data[key] = value
-
-    def _page_info(self, data):
-        for _, value in (data or {}).items():
-            if isinstance(value, dict) and "pageInfo" in value:
-                page_info = value.get("pageInfo")
-                return {
-                    "hasNextPage": page_info.get("hasNextPage", False),
-                    "endCursor": page_info.get("endCursor")
-                }
-        return None
-
-    def success(self) -> bool:
-        return self.data is not None and not self.errors
+            return None
 
     def __repr__(self) -> str:
         return f"<WizRequest status={self._status_code} success={self.success()}>"
@@ -695,9 +707,9 @@ class WizBatchResponse:
 # ========== ASYNC CLASSES ==========
 # These classes provide async functionality using the same business logic
 
-class AsyncWizRequest:
-    """Async version of WizRequest - shares most logic with sync version"""
-    
+class AsyncWizRequest(_RequestBase):
+    """Async version of WizRequest — shares query/pagination logic via _RequestBase."""
+
     def __init__(
         self,
         client: "WizClient",
@@ -708,21 +720,7 @@ class AsyncWizRequest:
         report_request: Optional[Dict[str, Any]] = None,
         on_page_event: Optional[Callable] = None
     ) -> None:
-        # Reuse initialization logic from WizRequest
-        sync_request = WizRequest(client, queryCollection, query, vars, paginate, report_request, on_page_event)
-        
-        # Copy all the setup
-        self._client = sync_request._client
-        self._logger = sync_request._logger
-        self.vars = sync_request.vars
-        self.query = sync_request.query
-        self._paginate = sync_request._paginate
-        self._page_event = sync_request._page_event
-        self._report_request = sync_request._report_request
-        self.errors: List[Dict[str, Any]] = []
-        self.data: Optional[Dict[str, Any]] = None
-        self._aggregated_data: Optional[Dict[str, Any]] = None
-        self._page = 1
+        self._init_common(client, queryCollection, query, vars, paginate, report_request, on_page_event)
     
     async def submit(self) -> "AsyncWizRequest":
         """Submit request asynchronously"""
@@ -796,50 +794,9 @@ class AsyncWizRequest:
         else:
             # Finalize pagination
             self.data = self._aggregated_data
-            if self.data and "pageInfo" in self.data.get(next(iter(self.data)), {}):
-                del self.data[next(iter(self.data))]["pageInfo"]
+            self._clean_page_info()
     
-    def _merge_page(self, page_data: Dict[str, Any]) -> None:
-        """Reuse merge logic from sync version"""
-        if not hasattr(self, "_aggregated_data") or self._aggregated_data is None:
-            self._aggregated_data = page_data or {}
-            return
-
-        if not page_data:
-            return
-
-        for key, value in page_data.items():
-            if key not in self._aggregated_data:
-                self._aggregated_data[key] = value
-            elif isinstance(value, dict) and "nodes" in value:
-                # Merge paginated results
-                if key not in self._aggregated_data:
-                    self._aggregated_data[key] = {"nodes": []}
-                if "nodes" not in self._aggregated_data[key]:
-                    self._aggregated_data[key]["nodes"] = []
-                
-                self._aggregated_data[key]["nodes"].extend(value.get("nodes", []))
-                
-                # Update pageInfo
-                if "pageInfo" in value:
-                    self._aggregated_data[key]["pageInfo"] = value["pageInfo"]
-    
-    def _page_info(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Reuse page info extraction from sync version"""
-        if not data:
-            return None
-            
-        for key, value in data.items():
-            if isinstance(value, dict) and "pageInfo" in value:
-                return {
-                    "hasNextPage": value["pageInfo"].get("hasNextPage", False),
-                    "endCursor": value["pageInfo"].get("endCursor")
-                }
-        return None
-    
-    def success(self) -> bool:
-        """Check if request was successful"""
-        return self.data is not None and not self.errors
+    # _merge_page, _page_info, _clean_page_info, success inherited from _RequestBase
 
 
 class AsyncWizResponse:
