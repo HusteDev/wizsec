@@ -7,8 +7,6 @@
 ##   EEEEE   X   X   CCCCC   EEEEE   P           T      IIIIIII   OOOOO   N     N   SSSSS
 ##
 ##
-## Author: James Husted             Email: james@husted.dev
-## Repo: https://github.com/HusteDev/wiz-sdk
 ##
 
 # exceptions.py

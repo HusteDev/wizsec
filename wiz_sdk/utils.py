@@ -7,8 +7,6 @@
 ##    UUUUU     T    IIIIIII  LLLLLLL  SSSSSSS
 ##
 ##
-## Author: James Husted             Email: james@husted.dev
-## Repo: https://github.com/HusteDev/wiz-sdk
 ##
 
 # utils.py
