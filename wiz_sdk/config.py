@@ -13,7 +13,6 @@
 
 # config.py
 from pathlib import Path
-import argparse
 import yaml
 import sys
 import os
@@ -49,19 +48,10 @@ class Config:
     _loaded = False
 
     @classmethod
-    def load(cls):
+    def load(cls, config_path: str = None, overrides: dict = None,
+             client_id: str = None, client_secret: str = None):
         if cls._CONFIG is None:
-            parser = argparse.ArgumentParser(description="Load configuration for Wiz SDK")
-            parser.add_argument('--config', type=str, help='Path to the configuration file')
-            parser.add_argument('--client_id', type=str, help='Client ID for authentication')
-            parser.add_argument('--client_secret', type=str, help='Client secret for authentication')
-            parser.add_argument(
-                '--set', action='append', default=[],
-                help='Override configuration values using key=value syntax with dot notation'
-            )
-            args, _ = parser.parse_known_args()
-
-            config_path = args.config if args.config else DEFAULT_WIZ_DIR / "wiz.config"
+            config_path = config_path or str(DEFAULT_WIZ_DIR / "wiz.config")
             path, filename = parse_filepath(str(config_path))
             if  all([path, path.is_dir(), os.path.exists(path / filename), filename, isinstance(filename, str)]):
                 with open(path / filename, "r") as file:
@@ -75,12 +65,15 @@ class Config:
                 else:
                     raise Exception("Create config file at /var/task/.wiz for all Serverless executions")
 
-            # Apply command line overrides
-            for item in args.set:
-                if '=' not in item:
+            # Apply overrides via dot-notation keys
+            for item in (overrides or {}):
+                if isinstance(item, str) and '=' in item:
+                    key, value = item.split('=', 1)
+                    value = yaml.safe_load(value)
+                elif isinstance(item, str):
                     continue
-                key, value = item.split('=', 1)
-                value = yaml.safe_load(value)
+                else:
+                    continue
                 keys = key.split('.')
                 d = cls._CONFIG
                 for k in keys[:-1]:
@@ -89,11 +82,11 @@ class Config:
                     d = d[k]
                 d[keys[-1]] = value
 
-            if args.client_id:
-                os.environ['WIZ_CLIENT_ID'] = args.client_id
-            if args.client_secret:
-                os.environ['WIZ_CLIENT_SECRET'] = args.client_secret
-            
+            if client_id:
+                os.environ['WIZ_CLIENT_ID'] = client_id
+            if client_secret:
+                os.environ['WIZ_CLIENT_SECRET'] = client_secret
+
             if not cls.serverless():
                 config_version = cls._CONFIG.get("app", {}).get("release")
                 try:
@@ -105,11 +98,6 @@ class Config:
                     sys.stdout.write(f"Error checking library version: {str(e)}\n")
                     sys.stdout.flush()
 
-                # Working Directory
-                custom_cwd_path, _ = parse_filepath(cls._CONFIG.get("app", {}).get("working_directory", f"{CWD}"))
-                if custom_cwd_path:
-                    os.chdir(str(custom_cwd_path))
-                
                 # CA Certificate
                 ca_file_path, filename = parse_filepath(cls._CONFIG.get("auth", {}).get("ca_cert", ""))
                 if ca_file_path and filename:
@@ -927,10 +915,6 @@ def parse_filepath(path_str: str = None) -> Path:
     path = Path(expanded_path_str)
     if not path.is_absolute():
         path = Path.cwd() / path
-
-    str_path = str(path)
-    if str_path not in sys.path:
-        sys.path.append(str_path)
 
     if path.suffix:
         # In serverless mode, don't try to create directories

@@ -322,7 +322,8 @@ class WizClient:
 
     def _get_headers(self) -> Dict[str, str]:
         headers = WizClient._headers.get(self.environment, {})
-        self._logger.debug(f"Headers fetched: {headers}")
+        safe_keys = {k: ("***" if k == "Authorization" else v) for k, v in headers.items()}
+        self._logger.debug(f"Headers fetched: {safe_keys}")
         return headers
 
     def _post(self, **kwargs):
