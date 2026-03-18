@@ -54,10 +54,17 @@ repository = "https://github.com/HusteDev/wiz-sdk"
 
 [project.optional-dependencies]
 dev = [
-    "pytest",
+    "pytest>=7.0",
+    "pytest-asyncio",
     "black",
     "mypy"
 ]
 
 [tool.setuptools_scm]
 version_file = "wiz_sdk/version.py"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
