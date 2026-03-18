@@ -1,13 +1,13 @@
-"""
-Per-environment and per-profile shared state registries.
-
-Wiz enforces API rate limits at the environment level. All WizClient instances
-targeting the same environment (app, gov, fedramp) MUST share a single queue,
-rate limiter set, and worker thread to stay within those limits.
-
-Per-profile state (tokens, credentials) is separate — multiple profiles can
-coexist within the same environment.
-"""
+##
+##
+##   RRRRR   EEEEE    GGGGG   IIIIIII   SSSSS   TTTTTTT  RRRRR   Y     Y
+##   R   R   E       G           I     S          T      R   R    Y   Y
+##   RRRRR   EEEEE   G   GGG     I     SSSSS      T      RRRRR     Y
+##   R  R    E       G     G     I         S      T      R  R      Y
+##   R   R   EEEEE    GGGGG   IIIIIII  SSSSS      T      R   R     Y
+##
+##
+##
 
 import queue
 import threading
