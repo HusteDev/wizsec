@@ -1,0 +1,487 @@
+##
+## 
+##   U     U TTTTTTT IIIIIII  L        SSSSSSS
+##   U     U    T       I     L        S
+##   U     U    T       I     L        SSSSSSS
+##   U     U    T       I     L              S
+##    UUUUU     T    IIIIIII  LLLLLLL  SSSSSSS
+##
+##
+## Author: James Husted             Email: james@husted.dev
+## Repo: https://github.com/HusteDev/wiz-sdk
+##
+
+# utils.py
+import sys
+import json
+import csv
+import shutil
+import traceback
+import time
+import itertools
+import os
+import logging
+import configparser
+import mimetypes
+from graphql import parse
+from datetime import datetime, timedelta, timezone
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from functools import wraps
+from typing import Optional, Dict, Any, List, Union, Tuple
+from wiz_sdk.config import Config, parse_filepath, logging_init, DEFAULT_TEMP_FOLDER
+
+import pickle
+mimetypes.add_type('application/python-pickle', '.pkl')
+mimetypes.add_type('application/python-pickle', '.pickle')
+
+from wiz_sdk.exceptions import WizFileError, WizConfigurationError
+
+def disable_in_serverless(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        if Config.serverless():
+            Config.get_logger().debug(f"{func.__name__} disabled in serverless mode.")
+            return None  # or raise, or return original input
+        return func(*args, **kwargs)
+    return wrapper
+
+def resource_path(relative_path: str) -> str:
+    """Get the absolute path to the resource."""
+    if hasattr(sys, "_MEIPASS"):
+        return os.path.join(sys._MEIPASS, relative_path)
+    return os.path.join(os.path.abspath("."), relative_path)
+
+def safe_write_json(
+    data: Any, 
+    filename: str, 
+    save_path: Path, 
+    temp_path: Path = DEFAULT_TEMP_FOLDER
+) -> None:
+    logger = Config.get_logger()
+    original = Path(filename)
+    temp_filename = f"{original.stem}_temp{original.suffix}"
+    temp_file = temp_path / temp_filename
+
+    def serialize_object(obj):
+        try:
+            # Attempt to use __dict__ or vars() to get a dictionary representation of the object
+            return vars(obj) if hasattr(obj, '__dict__') else str(obj)
+        except TypeError:
+            # Fallback for objects that cannot be serialized
+            return str(obj)
+    
+    try:
+        with open(temp_file, 'w+') as file:
+            json.dump(data, file, indent=2, default=serialize_object)
+        shutil.move(temp_file, save_path / filename)
+    except Exception as e:
+        _, exc_value, exc_traceback = sys.exc_info()
+        tb = traceback.extract_tb(exc_traceback)
+        last_call = tb[-1]
+        logger.error('Safe Write Error - at line %s', last_call.lineno)
+        raise
+    finally:
+        temp_file = Path(temp_file)
+        if temp_file.exists():
+            temp_file.unlink()
+
+@disable_in_serverless
+def dump_to_json(
+    data: Any, 
+    filename: Optional[str] = None, 
+    filepath: Optional[str] = None, 
+    retry: bool = True
+) -> None:
+    logger = Config.get_logger()
+    try:
+        logger.verbose('Attempting to dump_to_json')
+    except AttributeError:
+        if logger is None:
+            logger = logging_init()
+    if data:
+        allow_saved_data = Config.saved_data_enabled()
+        allow_pickle = Config.get("saved_data", "pickle", default=False)
+
+        if allow_saved_data:
+            configs_save, _ = parse_filepath(Config.saved_data_directory())
+            save_directory, extracted_filename = parse_filepath(filepath) if filepath else (configs_save, None)
+            if not save_directory.exists():
+                save_directory.mkdir(parents=True, exist_ok=True)
+
+            configs_temp, _ = parse_filepath(Config.get("saved_data", "temp", default=DEFAULT_TEMP_FOLDER))
+            temp_directory = Path(configs_temp) if all([configs_temp, configs_temp.is_dir()]) else DEFAULT_TEMP_FOLDER
+            if not Path(temp_directory).exists():
+                Path(temp_directory).mkdir(parents=True, exist_ok=True)
+            
+            if save_directory.is_file() and filename:
+                save_directory = save_directory.parents
+                temp_directory = temp_directory if temp_directory else save_directory / "temp"
+
+            if filename and not filepath:
+                save_directory = configs_save
+                temp_directory = temp_directory if temp_directory else save_directory / "temp"
+            
+            file_name = filename if filename else extracted_filename
+            if not file_name:
+                file_name = 'dumpFile.json'
+
+            basename = Path(file_name).stem
+
+            start = time.perf_counter()
+            while True:
+                try:
+                    if Path(file_name).suffix == ".json" or sys.getsizeof(data) <= 100000 or not allow_pickle:
+                        result = None
+                        if isinstance(data, (list, tuple)):
+                            if all([isinstance(row, list) for row in data]) and (len(data[0]) < len(set(data[0]))):
+                                header_count = {}
+                                unique_headers = [\
+                                    header if header_count.setdefault(header, 0) == 0 \
+                                    else f"{header}_{header_count[header]}" \
+                                    for header in data[0] \
+                                    for header_count[header] in [header_count.get(header,0) + 1]]
+                                result = [dict(itertools.zip_longest(unique_headers, row, fillvalue=None)) for row in data[1:]]
+                            data = {"data": result if result else data}
+                        safe_write_json(data, file_name, save_directory, temp_directory)
+                        logger.verbose('%s.json created', basename)
+                    else:
+                        if allow_pickle:
+                            logger.verbose("Object too large, saving as pickle instead")
+                            data = store_data(data, save_directory / f'{file_name}.pkl')
+                            logger.verbose('%s.pkl created', file_name)
+                        else:
+                            logger.warning("File is very large [%s KB]. \n Recommend enabling pickle from the configuration file to save this file." % sys.getsizeof(data)/1024)
+                    break
+
+                except PermissionError as pe:
+                    logger.error(f"Permission denied writing to {file_name}: {pe}", exc_info=True)
+                    raise WizFileError(f"Permission denied writing to {file_name}", pe)
+
+                except (IOError, OSError) as e:
+                    logger.error(f"I/O error writing {file_name}: {e}", exc_info=True)
+                    raise WizFileError(f"Failed to write {file_name}", e)
+
+                except Exception as e:
+                    logger.error(f"Unexpected error writing {file_name}: {e}", exc_info=True)
+                    raise WizFileError(f"Unexpected error writing {file_name}", e)
+            
+            duration = return_formatted_duration(time.perf_counter() - start)
+            logger.debug(f'{file_name} export completed (Duration: {duration})')
+        else:
+            logger.info("saved_data not enabled")
+    else:
+        logger.debug("No Data to save")
+
+def store_data(data, file_path: str = None):
+    import pickle
+    import mimetypes
+    mimetypes.add_type('application/python-pickle', '.pkl')
+    mimetypes.add_type('application/python-pickle', '.pickle')
+    if file_path is None:
+        file_path = Path.cwd() / 'data.pkl'
+    try:
+        with open(file_path, 'wb') as pickle_file:
+            pickle.dump(data, pickle_file)
+            return data
+    except Exception as e:
+        logging.error(f'Data not saved due to error: {e}', exc_info=True)
+
+def return_formatted_duration(duration):
+    """
+    Takes in a number of seconds and converts it to a string for hours, minutes, seconds.
+    """
+    formatted_duration = {"hour": "",
+                          "minute": "",
+                          "second": "",
+                          "millisecond": ""}
+    hours = duration // 3600
+    remaining_duration = duration % 3600
+
+    minutes = remaining_duration // 60
+    remaining_duration = remaining_duration % 60
+
+    seconds = remaining_duration // 1
+    milliseconds = (remaining_duration - seconds) * 1000
+
+    if hours > 0:
+        formatted_duration["hour"] = int(hours)
+    if minutes > 0:
+        formatted_duration["minute"] = int(minutes)
+    if seconds > 0:
+        formatted_duration["second"] = int(seconds)
+    if milliseconds > 0:
+        formatted_duration["millisecond"] = int(milliseconds)
+
+    formatted_parts = []
+    for key, value in formatted_duration.items():
+        if value:
+            formatted_parts.append(f"{value} {key}{'s' if value > 1 else ''}")
+
+    return ', '.join(formatted_parts)
+
+def extract_fields(selection_set):
+    """Recursively extracts fields from a selection set."""
+    fields = {}
+    for selection in selection_set.selections:
+        if selection.kind == "field":
+            name = selection.name.value
+            if selection.selection_set:
+                # Recurse into nested fields
+                fields[name] = extract_fields(selection.selection_set)
+            else:
+                fields[name] = None
+        elif selection.kind == "fragment_spread":
+            # Handle fragment spreads if needed
+            fields[selection.name.value] = "FRAGMENT"
+        elif selection.kind == "inline_fragment":
+            # Handle inline fragments if needed
+            if selection.selection_set:
+                fields.update(extract_fields(selection.selection_set))
+    return fields
+
+def parse_query_metadata(query: str) -> Dict[str, Any]:
+    document = parse(query)
+    request_type = ""
+    request_name = ""
+    fields: Dict[str, Any] = {}
+
+    for definition in document.definitions:
+        if definition.kind == "operation_definition":
+            request_type = str(definition.operation).split(".")[-1]
+            request_name = definition.name.value if definition.name else ""
+            fields = extract_fields(definition.selection_set)
+            break  # Usually just one operation
+
+    return {
+        "request_type": request_type,
+        "request_name": request_name,
+        "fields": fields,
+        "source": next(iter(fields))
+    }
+
+@disable_in_serverless
+def load_credentials_from_file(profile: str, credentials_file: str) -> Dict[str, Optional[str]]:
+    logger = Config.get_logger()
+    config = configparser.ConfigParser()
+    path = Path(credentials_file)
+    if not path.exists():
+        logger.debug(f"Credentials file {credentials_file} does not exist.")
+        return {}
+    config.read(path)
+    if profile in config:
+        logger.debug(f"Loading credentials for profile: {profile}")
+        client_id = config[profile].get("client_id")
+        client_secret = config[profile].get("client_secret")
+        environment = config[profile].get("environment", None)
+        return {"client_id": client_id, "client_secret": client_secret, "environment": environment}
+    logger.debug(f"Profile {profile} not found in credentials file.")
+    return {}
+
+@disable_in_serverless
+def write_credentials_to_file(profile: str, client_id: str, client_secret: str, credentials_file: str, environment: str = None) -> None:
+    config = configparser.ConfigParser()
+    path = Path(credentials_file)
+    try:
+        if path.exists():
+            config.read(path)
+        if profile not in config:
+            config.add_section(profile)
+        config[profile]["client_id"] = client_id
+        config[profile]["client_secret"] = client_secret
+        if environment:
+            config[profile]["environment"] = environment
+        with open(path, "w") as f:
+            config.write(f)
+        Config.get_logger().debug(f"Credentials for profile {profile} written to {credentials_file}")
+    except (IOError, OSError) as e:
+        Config.get_logger().error(f"Failed to write credentials to {credentials_file}: {e}", exc_info=True)
+        raise WizFileError(f"Failed to write credentials to {credentials_file}", e)
+    except Exception as e:
+        Config.get_logger().error(f"Unexpected error writing credentials to {credentials_file}: {e}", exc_info=True)
+        raise WizFileError(f"Unexpected error writing credentials to {credentials_file}", e)
+
+def is_in_last_x_intervals(timestamp_str, interval_value=1, interval_type="days") -> bool:
+    if interval_type not in ['days', 'minutes', 'seconds']:
+        raise ValueError("Invalid interval type. Use 'days', 'minutes', or 'seconds'.")
+
+    if interval_value <= 0:
+        return True
+    
+    time_difference = timedelta(**{interval_type: interval_value})
+    current_time = datetime.now(timezone.utc)
+
+    if isinstance(timestamp_str, str):
+        time_format = determine_time_format(timestamp_str)
+        given_time = datetime.strptime(timestamp_str, time_format)
+        if given_time.tzinfo is None:
+            given_time = given_time.replace(tzinfo=timezone.utc)
+    else:
+        given_time = timestamp_str
+        if given_time.tzinfo is None:
+            given_time = given_time.replace(tzinfo=timezone.utc)
+
+    return given_time >= (current_time - time_difference).replace(hour=0, minute=0, second=0, microsecond=0)
+
+def determine_time_format(date_str):
+    possible_formats = [
+        # ISO 8601 with microseconds
+        '%Y-%m-%dT%H:%M:%S.%f%z',       # ISO 8601 with microseconds and timezone offset
+        '%Y-%m-%dT%H:%M:%S.%f',         # ISO 8601 with microseconds, no timezone or offset
+        '%Y-%m-%dT%H:%M:%S.%fZ',        # ISO 8601 with microseconds and 'Z' for UTC
+        
+        # ISO 8601 without microseconds
+        '%Y-%m-%dT%H:%M:%S%z',          # ISO 8601 without microseconds, timezone offset
+        '%Y-%m-%dT%H:%M:%SZ',           # ISO 8601 without microseconds, 'Z' for UTC
+        '%Y-%m-%d %H:%M:%S.%f%z',       # ISO 8601 with space instead of 'T', microseconds and timezone
+        '%Y-%m-%d %H:%M:%S.%f',         # ISO 8601 with space instead of 'T', microseconds, no timezone
+        '%Y-%m-%d %H:%M:%S%z',          # ISO 8601 with space instead of 'T', no microseconds, timezone offset
+        '%Y-%m-%d %H:%M:%SZ',           # ISO 8601 with space instead of 'T', no microseconds, 'Z' for UTC
+        
+        # ISO 8601 Week-based date format
+        '%G-W%V-%u',                    # ISO 8601 week-based date format (e.g., "2024-W31-3")
+
+        # RFC 822/2822 formats
+        '%a, %d %b %Y %H:%M:%S %z',     # RFC 822 / RFC 2822 format (e.g., "Tue, 31 Jul 2024 16:14:51 +0000")
+        
+        # Full date and time with various precision
+        '%Y-%m-%d %H:%M:%S.%f %z %Z',   # Full date and time with microseconds, timezone offset, and abbreviation (UTC) 
+        '%Y-%m-%d %H:%M:%S.%f',         # Full date and time with microseconds, no timezone or offset
+        '%Y-%m-%d %H:%M:%S',            # Full date and time without microseconds or timezone
+
+        # Compact date and time formats
+        '%Y%m%d%H%M%S',                 # Compact date and time format (e.g., "20240731161451")
+        '%Y%m%d',                       # Compact date format (e.g., "20240731")
+
+        # Date only formats
+        '%Y-%m-%d',                     # Date only in YYYY-MM-DD format
+        '%d/%m/%Y',                     # Date only in DD/MM/YYYY format (European style)
+        '%m/%d/%Y',                     # Date only in MM/DD/YYYY format (US style)
+        '%Y/%m/%d',                     # Date only in YYYY/MM/DD format
+
+        # Date and time with different regions
+        '%d/%m/%Y %H:%M:%S',            # Date and time in DD/MM/YYYY HH:MM:SS format (European style)
+        '%m/%d/%Y %H:%M:%S',            # Date and time in MM/DD/YYYY HH:MM:SS format (US style)
+        '%Y/%m/%d %H:%M:%S',            # Date and time in YYYY/MM/DD HH:MM:SS format
+        '%Y-%m-%d %I:%M %p',            # Date and time in YYYY-MM-DD with 12-hour time and AM/PM
+        
+        # Time-only formats
+        '%H:%M:%S',                     # Time only in HH:MM:SS format (24-hour clock)
+        '%I:%M %p',                     # Time only in HH:MM AM/PM format (12-hour clock)
+        '%H:%M:%S.%f',                  # Time only with microseconds (HH:MM:SS.microseconds)
+
+        # Date and time with full day and month names
+        '%d %b %Y',                     # Date with day, abbreviated month, and year (e.g., "31 Jul 2024")
+        '%A, %d %B %Y %H:%M:%S',        # Full day name, date, full month name, year, and time (e.g., "Wednesday, 31 July 2024 16:14:51")
+    ]
+    
+    for fmt in possible_formats:
+        try:
+            datetime.strptime(date_str, fmt)
+            return fmt
+        except ValueError:
+            continue
+    
+    return None
+
+def find_file_with_extension(filepath: str, extension_order: list) -> str:
+    """Finds the first existing file with the specified extensions."""
+    path_dir, file_name = os.path.split(filepath)
+    filename, extension = os.path.splitext(file_name)
+    
+    if extension:
+        full_path = os.path.join(path_dir, f'{filename}{extension}')
+        if os.path.exists(full_path):
+            return full_path
+    else:
+        for ext in extension_order:
+            full_path = os.path.join(path_dir, f'{filename}{ext}')
+            if os.path.exists(full_path):
+                return full_path
+    return ""
+
+def load_file_if_in_last_x_interval(
+    filepath: str, 
+    interval_value: int = None, 
+    interval_type: str = "days",
+    extension_order: list = [".pkl", ".json", ".csv"]) -> dict:
+    
+    if interval_value:
+        if interval_value < 0:
+            return {}
+    else:
+        full_path = find_file_with_extension(filepath, extension_order)
+        return load_file(full_path)
+    
+    full_path = find_file_with_extension(filepath, extension_order)
+    
+    if not full_path or os.path.getsize(full_path) <= 1000:
+        return {}
+
+    last_modified_time = datetime.fromtimestamp(os.path.getmtime(full_path))
+    
+    if is_in_last_x_intervals(last_modified_time, interval_value=interval_value, interval_type=interval_type):
+        return load_file(full_path)
+    
+    return {}
+
+def load_file(full_path: str):
+    """Loads a file based on its MIME type."""
+    mime_type, _ = mimetypes.guess_type(full_path)
+    
+    if mime_type == 'application/json':
+        return load_json(full_path)
+    elif mime_type == 'text/csv':
+        return load_csv(full_path)
+    elif mime_type in ['application/xml', 'text/xml']:
+        return load_xml(full_path)
+    elif mime_type == 'text/plain':
+        return load_text(full_path)
+    elif mime_type == 'application/python-pickle':
+        return load_data(full_path)
+    else:
+        return {}
+        # raise ValueError(f"Unsupported file type for {full_path}")
+
+def load_json(full_path: str) -> dict:
+    """Loads and normalizes a JSON file."""
+    with open(full_path, 'r') as f:
+        file_data = json.load(f)
+        
+        if isinstance(file_data, dict) and len(file_data) == 1 and isinstance(next(iter(file_data.values())), list):
+            data = next(iter(file_data.values()))
+            unique_keys = {key for item in data for key in item.keys()}
+            for item in data:
+                for key in unique_keys:
+                    if key not in item:
+                        item[key] = None
+            return {next(iter(file_data)): data}
+        
+        return file_data
+
+def load_csv(full_path: str) -> list:
+    """Loads a CSV file into a list of dictionaries."""
+    with open(full_path, 'r') as f:
+        reader = csv.DictReader(f)
+        return list(reader)
+
+def load_xml(full_path: str):
+    """Loads an XML file."""
+    tree = ET.parse(full_path)
+    return tree.getroot()
+
+def load_text(full_path: str) -> str:
+    """Loads a plain text file."""
+    with open(full_path, 'r') as f:
+        return f.read()
+
+def load_data(file_path):
+    try:
+        with open(file_path, 'rb') as pickled_data:  
+            dataFile = pickle.load(pickled_data)
+            logging.info(f'Data dated {datetime.fromtimestamp(os.path.getmtime(file_path))} loaded.')
+        return dataFile
+    except (IOError, OSError, pickle.PickleError) as e1:
+        message = f'Unable to open saved data due to error: {e1}'
+        logging.error(message, exc_info=True)
+        raise WizFileError(f"Failed to load data from {file_path}", e1)

@@ -1,0 +1,63 @@
+[build-system]
+requires = [
+    "setuptools>=61",
+    "setuptools_scm[toml]>=6.0"
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wiz-sdk"
+dynamic = ["version"]
+description = "A custom SDK for the Wiz API"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+keywords = ["Wiz", "SDK", "API", "Security"]
+
+authors = [
+    { name = "James Husted", email = "james@husted.dev" }
+]
+
+dependencies = [
+    "aiohappyeyeballs",
+    "aiohttp",
+    "aiosignal",
+    "attrs",
+    "certifi",
+    "charset-normalizer",
+    "frozenlist",
+    "idna",
+    "multidict",
+    "propcache",
+    "pyodbc",
+    "pyrate-limiter",
+    "python-dotenv",
+    "PyYAML",
+    "requests",
+    "setuptools",
+    "urllib3",
+    "yarl",
+    "graphql-core"
+]
+
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Libraries :: Python Modules"
+]
+
+[project.urls]
+homepage = "https://github.com/HusteDev/wiz-sdk"
+repository = "https://github.com/HusteDev/wiz-sdk"
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "black",
+    "mypy"
+]
+
+[tool.setuptools_scm]
+version_file = "wiz_sdk/version.py"
