@@ -19,24 +19,10 @@ authors = [
 ]
 
 dependencies = [
-    "aiohappyeyeballs",
-    "aiohttp",
-    "aiosignal",
-    "attrs",
-    "certifi",
-    "charset-normalizer",
-    "frozenlist",
-    "idna",
-    "multidict",
-    "propcache",
-    "pyodbc",
+    "httpx",
     "pyrate-limiter",
     "python-dotenv",
     "PyYAML",
-    "requests",
-    "setuptools",
-    "urllib3",
-    "yarl",
     "graphql-core"
 ]
 
