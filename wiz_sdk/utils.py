@@ -29,7 +29,8 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from functools import wraps
 from typing import Optional, Dict, Any, List, Union, Tuple
-from .config import Config, parse_filepath, logging_init, DEFAULT_TEMP_FOLDER
+from .config import Config, parse_filepath, DEFAULT_TEMP_FOLDER
+from ._logging import logging_init
 
 import pickle
 mimetypes.add_type('application/python-pickle', '.pkl')
@@ -98,7 +99,8 @@ def dump_to_json(
         logger.verbose('Attempting to dump_to_json')
     except AttributeError:
         if logger is None:
-            logger = logging_init()
+            from .config import DEFAULT_WIZ_DIR
+            logger = logging_init(Config, DEFAULT_WIZ_DIR, parse_filepath)
     if data:
         allow_saved_data = Config.saved_data_enabled()
         allow_pickle = Config.get("saved_data", "pickle", default=False)
