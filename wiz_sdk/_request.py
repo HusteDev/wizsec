@@ -7,8 +7,6 @@
 ##   R   R   EEEEE    QQQQQ    UUUUU    EEEEE   SSSSS      T   
 ##
 ##
-## Author: James Husted             Email: james@husted.dev
-## Repo: https://github.com/HusteDev/wiz-sdk
 ##
 
 # _request.py
@@ -17,7 +15,6 @@ import traceback
 import random
 import codecs
 import csv
-import httpx
 import json
 import threading
 from typing import Optional, Dict, Any, List, Union, Callable, Iterator
@@ -27,6 +24,7 @@ from .utils import parse_query_metadata
 from .config import Config
 from .client import WizClient
 from .exceptions import WizQueryError, WizAPIError, WizReportError, WizTimeoutError
+from ._transport import stream_get, get as transport_get, TransportError
 
 class _RequestBase:
     """Shared logic for sync and async request classes."""
@@ -213,7 +211,7 @@ class WizRequest(_RequestBase):
                     self._handle_failed_response(response)
                     self._logger.debug(f"Payload: {payload}")
                     
-            except httpx.HTTPError as e:
+            except TransportError as e:
                 self._handle_network_error(e)
             except Exception as e:
                 self._handle_unexpected_error(e)
@@ -311,7 +309,7 @@ class WizRequest(_RequestBase):
         self.errors.append({"message": response.text})
         self._logger.warning(error_msg)
     
-    def _handle_network_error(self, e: httpx.HTTPError) -> None:
+    def _handle_network_error(self, e: TransportError) -> None:
         """Handle network-related errors."""
         error_msg = f"Network error executing query: {e}"
         self.errors.append({"message": str(e), "trace": traceback.format_exc()})
@@ -385,7 +383,7 @@ class WizRequest(_RequestBase):
 
     def _stream_report_generator(self, download_url, report_name, on_page_event=None, chunk_size=8192):
         self._logger.info(f"Streaming report: {report_name}")
-        with httpx.stream("GET", download_url) as response:
+        with stream_get(download_url) as response:
             if response.status_code == 200:
                 content_type = response.headers.get("Content-Type", "")
                 total_size = int(response.headers.get("content-length", 0))
@@ -412,7 +410,7 @@ class WizRequest(_RequestBase):
 
     def _download_report(self, download_url):
         try:
-            response = httpx.get(download_url)
+            response = transport_get(download_url)
             response.raise_for_status()
             return response.content
         except Exception as e:

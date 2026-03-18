@@ -7,12 +7,9 @@
 ##   CCCCC   LLLLLL   IIIIIII   EEEEE   N     N      T
 ##
 ##
-## Author: James Husted             Email: james@husted.dev
-## Repo: https://github.com/HusteDev/wiz-sdk
 ##
 
 # client.py
-import httpx
 import threading
 import time
 import os
@@ -30,6 +27,7 @@ from .exceptions import (
     WizConfigurationError, WizTimeoutError, WizError
 )
 from ._registry import EnvironmentRegistry, ProfileRegistry
+from ._transport import post as transport_post, create_async_client, TransportError
 
 if TYPE_CHECKING:
     from ._request import WizRequest
@@ -275,9 +273,9 @@ class WizClient:
         from ._request import AsyncWizBatchRequest
         return AsyncWizBatchRequest(client=self)
 
-    def async_session(self, client: Optional[httpx.AsyncClient] = None):
+    def async_session(self, client: Optional[Any] = None):
         """
-        Context manager for async operations. Manages httpx.AsyncClient lifecycle.
+        Context manager for async operations. Manages async HTTP client lifecycle.
 
         Example:
             async with client.async_session() as async_client:
@@ -294,9 +292,8 @@ class WizClient:
                 if self._owns_client:
                     ca_bundle = os.environ.get('REQUESTS_CA_BUNDLE')
                     verify = ca_bundle if ca_bundle else True
-                    self._async_client = httpx.AsyncClient(
-                        timeout=httpx.Timeout(Config.api_timeout()),
-                        limits=httpx.Limits(max_connections=100),
+                    self._async_client = create_async_client(
+                        timeout=Config.api_timeout(),
                         verify=verify,
                     )
                 self._sync_client._async_session = self._async_client
@@ -330,7 +327,7 @@ class WizClient:
         try:
             ca_bundle = os.environ.get('REQUESTS_CA_BUNDLE')
             verify = ca_bundle if ca_bundle else True
-            response = httpx.post(
+            response = transport_post(
                 proxy=self._proxies.get("https") or self._proxies.get("http"),
                 verify=verify,
                 timeout=Config.api_timeout(),
@@ -338,7 +335,7 @@ class WizClient:
             )
             self._logger.verbose(f"Response status code: {response.status_code}")
             return response
-        except Exception as e:
+        except TransportError as e:
             self._logger.error(f"POST request failed: {e}", exc_info=True)
             raise
 
@@ -480,7 +477,7 @@ class WizClient:
         self._logger.verbose("Starting device code authentication")
         auth_url = f"https://auth.{self._domain}/api/token/device"
         try:
-            response = httpx.post(url=auth_url, timeout=Config.api_timeout())
+            response = transport_post(url=auth_url, timeout=Config.api_timeout())
             response.raise_for_status()
             device_code_data = response.json()
             uri = device_code_data.get("verification_uri_complete")
@@ -492,7 +489,7 @@ class WizClient:
             interval = device_code_data.get("interval", Config.auth_poll_time())
             elapsed = 0
             while elapsed < Config.api_timeout():
-                token_response = httpx.post(
+                token_response = transport_post(
                     url=auth_url,
                     headers=self._headers_auth,
                     data={"device_code": device_code},
@@ -512,7 +509,7 @@ class WizClient:
                 time.sleep(interval)
                 elapsed += interval
             raise WizTimeoutError("Timeout waiting for device code authentication")
-        except httpx.HTTPError as e:
+        except TransportError as e:
             self._logger.error(f"Network error during device code authentication: {e}", exc_info=True)
             raise WizAPIError("Network error during device code authentication", original_error=e)
         except Exception as e:
@@ -530,7 +527,7 @@ class WizClient:
         }
         try:
             proxy = self._proxies.get("https") or self._proxies.get("http")
-            response = httpx.post(auth_url, data=auth_payload, headers=self._headers_auth, proxy=proxy)
+            response = transport_post(auth_url, data=auth_payload, headers=self._headers_auth, proxy=proxy)
             if response.status_code != 200:
                 self._logger.error(f"Failed to authenticate: {response.status_code} - {response.text}", exc_info=True)
                 raise WizAuthenticationError(
@@ -546,7 +543,7 @@ class WizClient:
             self._decode_access_token(access_token)
             self._logger.verbose("Client credentials authentication successful")
             return True
-        except httpx.HTTPError as e:
+        except TransportError as e:
             self._logger.error(f"Network error during authentication: {e}", exc_info=True)
             raise WizAPIError("Network error during authentication", original_error=e)
         except WizAuthenticationError:
