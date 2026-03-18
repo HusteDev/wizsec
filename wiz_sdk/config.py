@@ -7,8 +7,6 @@
 ##   CCCCC    OOOOO   N     N   F        IIIIIII   GGGGG
 ##
 ##
-## Author: James Husted             Email: james@husted.dev
-## Repo: https://github.com/HusteDev/wiz-sdk
 ##
 
 # config.py
