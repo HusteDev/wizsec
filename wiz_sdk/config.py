@@ -20,7 +20,6 @@ import logging
 import tempfile
 import inspect
 from functools import wraps
-from datetime import date, datetime
 from typing import Optional, Union
 try:
     from importlib.metadata import version as get_version
@@ -30,6 +29,7 @@ except ImportError:
 
 from .version import __version__ as wiz_sdk_version
 from .version import __sdk_name__ as sdk_name
+from ._logging import logging_init as _logging_init, parse_level as _parse_level, BASE_LOGGER_NAME
 
 LIBRARY_NAME = sdk_name
 CURRENT_VERSION = wiz_sdk_version
@@ -39,9 +39,6 @@ SERVERLESS = str(os.environ.get("WIZ_SERVERLESS", "")).lower() in ("1", "true", 
 DEFAULT_WIZ_DIR = Path("/var/task/.wiz") if SERVERLESS else Path.home() / ".wiz"
 DEFAULT_TEMP_FOLDER = "/tmp" if SERVERLESS else Path(tempfile.gettempdir())
 CWD = "/tmp" if SERVERLESS else str(os.getcwd()).replace("\\", "/")
-VERBOSE_LEVEL = 15  # Between INFO (20) and DEBUG (10)
-BASE_LOGGER_NAME = "wiz_sdk"
-
 class Config:
     _CONFIG = None
     _logger = None
@@ -118,7 +115,7 @@ class Config:
                         os.environ['REQUESTS_CA_BUNDLE'] = existing_cert
         cls._loaded = True
         if cls._logger is None:
-            cls._logger = logging_init(name="wiz_sdk")
+            cls._logger = _logging_init(cls, DEFAULT_WIZ_DIR, parse_filepath, name="wiz_sdk")
 
     def ensure_loaded(func):
         @wraps(func)
@@ -132,7 +129,7 @@ class Config:
     @classmethod
     @ensure_loaded
     def get_logger(cls) -> logging.Logger:
-        base_logger = cls._logger or logging_init()
+        base_logger = cls._logger or _logging_init(cls, DEFAULT_WIZ_DIR, parse_filepath)
 
         # Determine caller’s module to create a child-like name
         stack = inspect.stack()
@@ -196,10 +193,10 @@ class Config:
         Returns the effective base level as an int.
         """
         # Make sure base logger exists
-        base_logger = cls._logger or logging_init()
+        base_logger = cls._logger or _logging_init(cls, DEFAULT_WIZ_DIR, parse_filepath)
         base_logger_name = getattr(base_logger, "name", BASE_LOGGER_NAME)
 
-        new_level = _parse_level(level, default=logging.INFO)
+        new_level = _parse_level(level, default=logging.INFO)  # from _logging module
         new_hlevel = _parse_level(handler_level, default=new_level)
 
         # 1) Update base logger + its handlers
@@ -508,34 +505,6 @@ class Config:
         return cls.get("logging", "console_handler", "logging_level", default="INFO")
 
 
-class CustomFormatter(logging.Formatter):
-    def formatTime(self, record, datefmt=None):
-        ct = datetime.fromtimestamp(record.created)
-        if datefmt:
-            return ct.strftime(datefmt)
-        else:
-            return ct.strftime('%Y-%m-%d %H:%M:%S.%f')
-
-class MarkdownFormatter(CustomFormatter):
-    header_written = False
-
-    def format(self, record):
-
-        formatted_message = super().format(record)
-        
-        # Wrap the message in markdown table row format
-        markdown_message = formatted_message
-        
-        # Add header if not already added
-        if not MarkdownFormatter.header_written:
-            header = (
-                '| Timestamp | Level | File | Function | Line | Thread ID | Thread Name | Message |\n'
-                '| --- | --- | --- | --- | --- | --- | --- | --- |\n'
-            )
-            MarkdownFormatter.header_written = True
-            markdown_message = header + markdown_message
-        
-        return markdown_message
 
 def generate_default_config(file_path=(DEFAULT_WIZ_DIR / "wiz.config")):
     if SERVERLESS:
@@ -628,153 +597,6 @@ def generate_default_config(file_path=(DEFAULT_WIZ_DIR / "wiz.config")):
     return True
 
 
-def _ensure_verbose_console_level(level: int) -> int:
-    # If verbose mode on, prefer VERBOSE over a higher level
-    if Config.verbose_mode() and level > logging.VERBOSE:
-        return logging.VERBOSE
-    return level
-
-
-def _init_lambda_logger(level: int) -> logging.Logger:
-    # Keep lambda path minimal and non-propagating with a clean stdout format
-    logger = logging.getLogger(BASE_LOGGER_NAME)
-    if getattr(logger, "_baselogger_initialized", False):
-        logger.setLevel(level)
-        return logger
-
-    logger.handlers.clear()
-    h = logging.StreamHandler(sys.stdout)
-    h.setLevel(level)
-    h.setFormatter(logging.Formatter('[%(levelname)s] %(name)s: %(message)s'))
-    logger.addHandler(h)
-    logger.setLevel(level)
-    logger.propagate = False
-    logger._baselogger_initialized = True
-    return logger
-
-
-def _maybe_attach_console_handler(logger: logging.Logger) -> None:
-    if not Config.console_handler_enabled():
-        return
-    lvl_name = str(Config.console_handler_logging_level()).upper()
-    lvl = getattr(logging, lvl_name, Config.logger_min_level())
-    lvl = _ensure_verbose_console_level(lvl)
-
-    h = logging.StreamHandler(stream=sys.stdout)
-    h.setLevel(lvl)
-    fmt = '\r%(asctime)s [%(name)s::%(levelname)s]:   %(message)s\033[K'
-    h.setFormatter(logging.Formatter(fmt=fmt, datefmt='%H:%M:%S'))
-    logger.addHandler(h)
-    logger.console_handler = h  # parity with your original
-
-
-def _maybe_attach_file_handler(logger: logging.Logger) -> None:
-    if not (Config.file_logging_enabled() and not Config.serverless()):
-        return
-
-    cfg_dir = Config.get("logging", "file_handler", "log_directory", default="")
-    base_dir = DEFAULT_WIZ_DIR if not cfg_dir else parse_filepath(cfg_dir)[0]
-    log_dir = base_dir / "logs"
-
-    if Config.file_handler_create_log_dir() and not log_dir.is_dir():
-        log_dir.mkdir(parents=True, exist_ok=True)
-
-    fname = f'{date.today():%Y%m%d}_{datetime.now():%H%M%S}_{Path(sys.argv[0]).stem}.log'
-    path = log_dir / fname
-
-    logger.log_directory = log_dir
-
-    h = logging.FileHandler(filename=path, mode="w")
-    lvl_name = str(Config.file_handler_logging_level()).upper()
-    lvl = getattr(logging, lvl_name, logging.DEBUG)
-    h.setLevel(lvl)
-
-    datefmt = '%d-%b-%y %H:%M:%S.%f'
-    if Config.file_handler_markdown_enabled():
-        fmt = '| %(asctime)s | %(levelname)s | %(filename)s | %(funcName)s | %(lineno)d | %(thread)d | %(threadName)s | %(message)s |'
-        h.setFormatter(MarkdownFormatter(fmt=fmt, datefmt=datefmt))
-    else:
-        fmt = '%(asctime)s  [%(levelname)s] - (%(name)s):  %(message)s'
-        h.setFormatter(CustomFormatter(fmt=fmt, datefmt=datefmt))
-
-    logger.addHandler(h)
-    logger.file_handler = h  # parity
-
-
-def logging_init(name: str = __name__, default_level=None) -> logging.Logger:
-
-    if not hasattr(logging, "VERBOSE"):
-        logging.addLevelName(VERBOSE_LEVEL, "VERBOSE")
-
-        def _verbose(self, message, *args, **kwargs):
-            if self.isEnabledFor(VERBOSE_LEVEL):
-                self._log(VERBOSE_LEVEL, message, args, **kwargs)
-
-        logging.Logger.verbose = _verbose
-        logging.VERBOSE = VERBOSE_LEVEL
-
-    # Resolve base level from config
-    try:
-        cfg_level = Config.logger_min_level()
-        base_level = int(cfg_level) if isinstance(cfg_level, int) else getattr(logging, str(cfg_level).upper(), logging.INFO)
-    except Exception:
-        base_level = logging.INFO
-
-    # Lambda path
-    if Config.serverless():
-        return _init_lambda_logger(base_level)
-
-    # Use requested logger name, but respect pre-configured loggers
-    logger = logging.getLogger(name)
-    if logger.hasHandlers():
-        # Caller already configured; keep their setup
-        return logger
-
-    # Otherwise use the library logger to centralize behavior
-    logger = logging.getLogger(BASE_LOGGER_NAME)
-
-    if not Config.logging_enabled():
-        # No-op logger
-        logger.handlers.clear()
-        logger.addHandler(logging.NullHandler())
-        logger.setLevel(logging.CRITICAL)
-        logger.propagate = False
-        return logger
-
-    # Clean slate init only once
-    if not getattr(logger, "_baselogger_initialized", False):
-        logger.handlers.clear()
-        logger.setLevel(base_level)
-        logger.propagate = False
-        _maybe_attach_console_handler(logger)
-        _maybe_attach_file_handler(logger)
-        logger._baselogger_initialized = True
-    else:
-        # If re-entering, at least honor level changes
-        logger.setLevel(base_level)
-
-    logger.verbose(
-        "Logging enabled: %s | Root Level: %s | Debug Mode: %s | Verbose Logging: %s | File Logging: %s",
-        Config.logging_enabled(), Config.logger_min_level(), Config.debug_mode(),
-        Config.verbose_mode(), Config.file_logging_enabled()
-    )
-    return logger
-
-def _parse_level(level: Union[int, str, None], default=logging.INFO) -> int:
-    if level is None:
-        return default
-    if isinstance(level, int):
-        return level
-    try:
-        # allow "15" as string too
-        if str(level).isdigit():
-            return int(level)
-        name = str(level).upper()
-        if name == "VERBOSE":
-            return getattr(logging, "VERBOSE", 15)
-        return getattr(logging, name, default)
-    except Exception:
-        return default
 
 def expand_all_vars(path_str: str) -> str:
     path_str = str(path_str)  # ensure it's a string
