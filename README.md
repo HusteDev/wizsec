@@ -14,16 +14,13 @@ A Python SDK for the [Wiz](https://www.wiz.io/) Cloud Security GraphQL API. Prov
 - **Multi-environment / multi-profile** — connect to `app`, `gov`, or custom Wiz tenants with separate credential profiles
 - **Serverless support** — optimized for AWS Lambda and similar environments
 - **YAML configuration** via `~/.wiz/wiz.config`
+- **Client-side schema validation** — catch query typos before they hit the API
 - **Custom query libraries** — resolve query names from importable Python modules
 - **PEP 561 typed** (`py.typed` marker included)
 
 ## Installation
 
-```bash
-pip install wiz-sdk
-```
-
-Or install from source:
+Install from source:
 
 ```bash
 git clone https://github.com/HusteDev/wiz-sdk.git
@@ -100,21 +97,59 @@ response = client.create_request(query="...", vars={"first": 100})
 result = response.submit()
 ```
 
-Pagination is handled automatically — results from all pages are merged into `result.data`.
+Pagination is handled automatically — the SDK detects queries using the [Relay connection pattern](https://relay.dev/graphql/connections.htm) (`nodes` + `pageInfo { hasNextPage endCursor }`) and injects the `$after` cursor variable for you. Results from all pages are merged into `result.data`.
+
+You don't need to declare `$after` in your query — the SDK adds it when:
+- The operation is a **query** (not a mutation)
+- The query selects both `nodes` and `pageInfo` subfields
+- `$after` isn't already declared
+
+If you set `paginate=False`, no injection occurs and only the first page is returned.
 
 ### Query Collections
 
-Resolve query names from a Python module instead of passing raw GraphQL strings:
+Organize reusable GraphQL queries in a Python module and reference them by name. This keeps queries out of your application logic and makes them shareable across scripts.
+
+**`queries.py`** — define queries as module-level constants:
 
 ```python
-import my_queries  # module with GraphQL strings as attributes
+ListUsers = """
+    query ListUsers($first: Int) {
+        users(first: $first) {
+            nodes { id name email role }
+            pageInfo { hasNextPage endCursor }
+        }
+    }
+"""
 
+GetProject = """
+    query GetProject($id: ID!) {
+        project(id: $id) { id name slug riskProfile { businessImpact } }
+    }
+"""
+```
+
+**`main.py`** — resolve by name or pass the string directly:
+
+```python
+import queries
+
+# Resolve by attribute name from the collection
 response = client.create_request(
-    queryCollection=my_queries,
-    query="ListUsers",  # resolves to my_queries.ListUsers
+    queryCollection=queries,
+    query="ListUsers",  # resolves to queries.ListUsers
     vars={"first": 50}
 )
+
+# Or pass the query string directly (no collection needed)
+response = client.create_request(
+    query=queries.GetProject,
+    vars={"id": "some-project-id"},
+    paginate=False,
+)
 ```
+
+See [`examples/query_collection/`](examples/query_collection/) for a complete working example.
 
 ### Batch Requests (Sync)
 
@@ -165,6 +200,39 @@ async with client.async_session() as async_client:
     print(results.success_rate())
 ```
 
+### Sync vs Async: When to Use Each
+
+The SDK provides both synchronous and asynchronous interfaces. Choose based on your use case:
+
+| Approach  | Best For                                                                 |
+| --------- | ------------------------------------------------------------------------ |
+| **Sync**  | Simple scripts, single queries, CLI tools, quick prototypes              |
+| **Async** | Multiple independent queries, high-throughput applications, web services |
+
+**Performance comparison** (3 queries fetching Projects, Users, and Service Accounts):
+
+```
+SYNC (sequential)    2.57s   — queries run one after another
+ASYNC (concurrent)   0.60s   — queries run in parallel
+```
+
+Async achieves ~4x speedup here because all three API calls happen concurrently instead of waiting for each to complete.
+
+**Use sync when:**
+
+- Running a single query or a few dependent queries
+- Writing simple scripts or one-off tools
+- Code simplicity matters more than throughput
+
+**Use async when:**
+
+- Fetching data from multiple independent queries
+- Building web applications or services that need to handle concurrent requests
+- Performance is critical and queries don't depend on each other
+- Working with `asyncio`-based frameworks (FastAPI, aiohttp, etc.)
+
+See [`examples/sync_vs_async.py`](examples/sync_vs_async.py) for a runnable comparison.
+
 ### Report Generation
 
 ```python
@@ -180,16 +248,67 @@ report_rows = result.data.get("report_data", [])
 
 ### Progress Tracking
 
+Monitor pagination progress with a callback that fires after each page is fetched:
+
 ```python
 def on_page(event):
-    print(f"Page {event['page_info']['page']} received")
+    page = event["page_info"]["page"]
+    total = event["page_info"]["total_items_received"]
+    print(f"Page {page} — {total} items so far")
 
 response = client.create_request(
     query="...",
     vars={"first": 500},
     on_page_event=on_page
 )
+result = response.submit()
 ```
+
+This is useful for long-running paginated queries where you want to show the user that work is happening. The callback receives page number, items received, and whether more pages remain.
+
+See [`examples/progress_tracking.py`](examples/progress_tracking.py) for sync and async progress examples.
+
+### Schema Validation
+
+Validate GraphQL queries against the Wiz schema before they hit the API. Catches typos and invalid fields early with helpful suggestions:
+
+```python
+from wiz_sdk import WizClient, Config, SchemaValidator, WizSchemaValidationError
+
+Config.load()
+Config._CONFIG.setdefault("api", {})["validate_queries"] = True  # or set in wiz.config
+
+client = WizClient()
+
+# Typos are caught before the request is sent
+try:
+    client.create_request(query="query { projectz { nodes { id } } }")
+except WizSchemaValidationError as e:
+    print(e.validation_errors[0])
+    # "Cannot query field 'projectz' on type 'Query'. Did you mean 'project', 'projects', or 'projectTags'?"
+```
+
+Validate queries programmatically without creating a request:
+
+```python
+try:
+    SchemaValidator.validate_query("query { fakeEndpoint { data } }", "app")
+except WizSchemaValidationError as e:
+    print(e.validation_errors[0])
+    # "Cannot query field 'fakeEndpoint' on type 'Query'. Did you mean 'apiEndpoint'?"
+```
+
+The schema is cached locally at `~/.wiz/schema_<env>.json` and reloaded automatically.
+
+See [`examples/schema_validation.py`](examples/schema_validation.py) for more examples.
+
+## Rate Limiting
+
+The SDK automatically enforces Wiz's API rate limits so you don't have to think about throttling. Rate limiters are shared across all `WizClient` instances on the same environment — even if you create multiple clients, they coordinate through a single limiter.
+
+Limits are applied per request type (query vs. mutation) and account type (user vs. service account), matching [Wiz's published rate limits](https://docs.wiz.io/wiz-docs/docs/rate-limiting).
+
+If a rate limit is hit, the SDK waits and retries automatically. You only need to handle `WizRateLimitError` if retries are exhausted.
 
 ## Configuration
 
@@ -253,19 +372,20 @@ def handler(event, context):
 
 The SDK provides a structured exception hierarchy:
 
-| Exception | When |
-|---|---|
-| `WizError` | Base class for all SDK errors |
-| `WizAuthenticationError` | Auth flow fails |
-| `WizAPIError` | API returns an error (includes `status_code`) |
-| `WizCredentialsError` | Credentials missing or invalid |
-| `WizConfigurationError` | Config file missing or malformed |
-| `WizRateLimitError` | Rate limit exceeded (includes `retry_after`) |
-| `WizQueryError` | Invalid GraphQL query (includes `query`, `errors`) |
-| `WizReportError` | Report generation/download fails |
-| `WizTimeoutError` | Operation timed out |
-| `WizFileError` | File I/O error |
-| `WizServerlessError` | Serverless-specific failure |
+| Exception                    | When                                                         |
+| ---------------------------- | ------------------------------------------------------------ |
+| `WizError`                   | Base class for all SDK errors                                |
+| `WizAuthenticationError`     | Auth flow fails                                              |
+| `WizAPIError`                | API returns an error (includes `status_code`)                |
+| `WizCredentialsError`        | Credentials missing or invalid                               |
+| `WizConfigurationError`      | Config file missing or malformed                             |
+| `WizRateLimitError`          | Rate limit exceeded (includes `retry_after`)                 |
+| `WizQueryError`              | Invalid GraphQL query (includes `query`, `errors`)           |
+| `WizSchemaValidationError`   | Query fails schema validation (includes `validation_errors`) |
+| `WizReportError`             | Report generation/download fails                             |
+| `WizTimeoutError`            | Operation timed out                                          |
+| `WizFileError`               | File I/O error                                               |
+| `WizServerlessError`         | Serverless-specific failure                                  |
 
 ```python
 from wiz_sdk import WizAuthenticationError, WizRateLimitError
@@ -281,8 +401,18 @@ except WizAuthenticationError as e:
 ## Development
 
 ```bash
-pip install -e ".[dev]"
-python -m pytest tests/ -q
+pip install -e ".[dev]"     # install with dev + docs dependencies
+python -m pytest tests/ -q  # run tests
+```
+
+### Documentation
+
+API docs are built with [MkDocs Material](https://squidfunk.github.io/mkdocs-material/):
+
+```bash
+pip install -e ".[docs]"
+mkdocs serve                # live preview at http://127.0.0.1:8000
+mkdocs build                # static site in site/
 ```
 
 ## License

@@ -13,6 +13,7 @@
 import sys
 import json
 import csv
+import copy
 import shutil
 import traceback
 import time
@@ -22,6 +23,14 @@ import logging
 import configparser
 import mimetypes
 from graphql import parse
+from graphql.language import print_ast
+from graphql.language.ast import (
+    VariableDefinitionNode,
+    NamedTypeNode,
+    NameNode,
+    ArgumentNode,
+    VariableNode,
+)
 from datetime import datetime, timedelta, timezone
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -259,6 +268,80 @@ def parse_query_metadata(query: str) -> Dict[str, Any]:
         "fields": fields,
         "source": next(iter(fields))
     }
+
+def ensure_pagination_variables(query: str) -> str:
+    """Inject $after into a query if it uses the Relay connection pattern but is missing the variable.
+
+    Conditions for injection:
+    1. The operation is a query (not a mutation)
+    2. A top-level field contains both 'nodes' and 'pageInfo' subfields (Relay connection pattern)
+    3. '$after' is not already declared in the variable definitions
+
+    Returns the modified query string, or the original if no injection is needed.
+    """
+    try:
+        document = parse(query)
+    except Exception:
+        return query
+
+    for definition in document.definitions:
+        if definition.kind != "operation_definition":
+            continue
+        if str(definition.operation).split(".")[-1].lower() != "query":
+            continue
+
+        # Check if $after is already declared
+        existing_vars = {v.variable.name.value for v in (definition.variable_definitions or [])}
+        if "after" in existing_vars:
+            return query
+
+        # Find the paginated field (has both 'nodes' and 'pageInfo' subfields)
+        paginated_field = None
+        for selection in definition.selection_set.selections:
+            if selection.kind != "field" or not selection.selection_set:
+                continue
+            child_names = {
+                s.name.value for s in selection.selection_set.selections
+                if s.kind == "field"
+            }
+            if "nodes" in child_names and "pageInfo" in child_names:
+                paginated_field = selection
+                break
+
+        if paginated_field is None:
+            return query
+
+        # Check if the field already has an 'after' argument
+        existing_args = {a.name.value for a in (paginated_field.arguments or [])}
+        if "after" in existing_args:
+            return query
+
+        # Inject $after: String into variable definitions
+        after_var_def = VariableDefinitionNode(
+            variable=VariableNode(name=NameNode(value="after")),
+            type=NamedTypeNode(name=NameNode(value="String")),
+        )
+        new_var_defs = list(definition.variable_definitions or []) + [after_var_def]
+
+        # Inject after: $after into the paginated field's arguments
+        after_arg = ArgumentNode(
+            name=NameNode(value="after"),
+            value=VariableNode(name=NameNode(value="after")),
+        )
+        new_args = list(paginated_field.arguments or []) + [after_arg]
+
+        # Rebuild the AST with injected variable and argument
+        new_doc = copy.deepcopy(document)
+        new_defn = new_doc.definitions[document.definitions.index(definition)]
+        new_defn.variable_definitions = tuple(new_var_defs)
+        for sel in new_defn.selection_set.selections:
+            if sel.kind == "field" and sel.name.value == paginated_field.name.value:
+                sel.arguments = tuple(new_args)
+                break
+        return print_ast(new_doc)
+
+    return query
+
 
 @disable_in_serverless
 def load_credentials_from_file(profile: str, credentials_file: str) -> Dict[str, Optional[str]]:

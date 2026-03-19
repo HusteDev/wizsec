@@ -27,6 +27,8 @@ __all__ = [
     # Registries
     "EnvironmentRegistry",
     "ProfileRegistry",
+    # Schema
+    "SchemaValidator",
     # Exceptions
     "WizError",
     "WizAuthenticationError",
@@ -35,6 +37,7 @@ __all__ = [
     "WizCredentialsError",
     "WizRateLimitError",
     "WizQueryError",
+    "WizSchemaValidationError",
     "WizReportError",
     "WizTimeoutError",
     "WizFileError",
@@ -54,15 +57,17 @@ def __getattr__(name):
         from .utils import load_file_if_in_last_x_interval
     elif name in ("EnvironmentRegistry", "ProfileRegistry"):
         from ._registry import EnvironmentRegistry, ProfileRegistry
+    elif name == "SchemaValidator":
+        from ._schema import SchemaValidator
     elif name in (
         "WizError", "WizAuthenticationError", "WizAPIError", "WizConfigurationError",
-        "WizCredentialsError", "WizRateLimitError", "WizQueryError", "WizReportError",
-        "WizTimeoutError", "WizFileError", "WizServerlessError",
+        "WizCredentialsError", "WizRateLimitError", "WizQueryError", "WizSchemaValidationError",
+        "WizReportError", "WizTimeoutError", "WizFileError", "WizServerlessError",
     ):
         from .exceptions import (
             WizError, WizAuthenticationError, WizAPIError, WizConfigurationError,
-            WizCredentialsError, WizRateLimitError, WizQueryError, WizReportError,
-            WizTimeoutError, WizFileError, WizServerlessError,
+            WizCredentialsError, WizRateLimitError, WizQueryError, WizSchemaValidationError,
+            WizReportError, WizTimeoutError, WizFileError, WizServerlessError,
         )
     else:
         raise AttributeError(f"module {__name__} has no attribute {name}")

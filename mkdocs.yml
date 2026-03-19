@@ -1,0 +1,64 @@
+site_name: wiz-sdk
+site_description: Python SDK for the Wiz Cloud Security API
+repo_url: https://github.com/HusteDev/wiz-sdk
+
+theme:
+  name: material
+  palette:
+    - scheme: slate
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+    - scheme: default
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+  features:
+    - navigation.sections
+    - navigation.expand
+    - content.code.copy
+    - search.highlight
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            show_source: false
+            show_root_heading: true
+            heading_level: 2
+            members_order: source
+            docstring_style: google
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Configuration: configuration.md
+  - Usage:
+      - Basic Queries: usage/queries.md
+      - Async & Batch: usage/async-batch.md
+      - Reports: usage/reports.md
+      - Schema Validation: usage/schema-validation.md
+  - API Reference:
+      - WizClient: api/client.md
+      - Config: api/config.md
+      - Request & Response: api/request.md
+      - Schema Validator: api/schema.md
+      - Exceptions: api/exceptions.md
