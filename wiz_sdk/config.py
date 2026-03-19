@@ -26,10 +26,9 @@ except ImportError:
     from importlib_metadata import version as get_version
 
 from .version import __version__ as wiz_sdk_version
-from .version import __sdk_name__ as sdk_name
 from ._logging import logging_init as _logging_init, parse_level as _parse_level, BASE_LOGGER_NAME
 
-LIBRARY_NAME = sdk_name
+LIBRARY_NAME = "wiz-sdk"
 CURRENT_VERSION = wiz_sdk_version
 
 # _CONFIG = None
@@ -385,6 +384,11 @@ class Config:
     def api_timeout(cls):
         return cls.get("api", "timeout", default=180)
 
+    @classmethod
+    @ensure_loaded
+    def validate_queries(cls):
+        return cls.get("api", "validate_queries", default=False)
+
     ############
     # Reports
     ############
@@ -507,78 +511,11 @@ class Config:
 def generate_default_config(file_path=(DEFAULT_WIZ_DIR / "wiz.config")):
     if SERVERLESS:
         return False
-    wiz_dir = str(DEFAULT_WIZ_DIR).replace("\\", "/")
-    yaml_content = f'''app:
-  name: {LIBRARY_NAME}
-  release: {CURRENT_VERSION}
- # serverless: false                 # Enables additional functions to support Serverless execution | default = false
- # wiz_dir: ""      # Default directory for Wiz config, auth, and logging files
- # env_path: ""       # Custom directory for .env file | default = $CWD
 
-# saved_data:
-  # enabled: true                    # Allows application save data locally | default = true
-  # directory: ""    # Custom directory to save non-report exports | default = $CWD/saved-data
-  # temp: ""                        # Custom directory for Temp Files | default = tempfile.gettempdir()
-  # pickle: false                   # Allow use of pickle files for storing larger files | default = false
-
-# auth:
-  # grant_type: client_credentials    # Options [device_code, client_credentials] | NOTE: device_code requires WizCode license
-#   credentials:
-#     storage_method: file            # Options [env, file, prompt] | default = file (which will also check .env if no file found)
- #   file_path: ""  # Custom directory for credentials | default = $HOME/.wiz/
-
-#   device:
-#     quiet: true                     # Device Code logins automatically authorize on load | default = true
-#     poll_time: 5                    # Interval (in seconds) for checking if device auth is complete | default = 5
-  # proxy:                          # Custom Proxy Settings if necessary | default = use system settings
-  #   http: 
-  #     url: ""
-  #     port: 80
-  #   https: 
-  #     url: ""
-  #     port: 80
-  # ca_cert: ""                     # Path to Custom CA (.pem) file | example: "/cacert.pem"
-
-# domain:                             # Domains not enabled will be blocked from Authentication
-  # default: gov                      # Valid Options [app, gov, fedramp] | default = gov
-  # app:
-    # enabled: false
-  # gov:
-    # enabled: true
-  # fedramp:
-    # enabled: false
-
-# api:
-#   max_retries: 5                    # Max number of failures before query stops trying | default = 5
-#   retry_time: 1                     # Initial wait time for query retry attempts | default = 1
-#   timeout: 120                       # Wiz API queries timeout at 2 min, this just keeps the program from retrying
-  # auto_paginate: true               # Automatically paginate through results | default = true
-
-# reports:
-#   stream_by_default: true             # Streaming reports download reports automatically | default = true
-#  export_directory: ""                # Path to save report export files | default = working_directory
-#   export_type: json                   # Valid Options [json, csv]
-#   retry_time: 30                      # Time between attempts to generate a new report | default = 30
-#   max_retries: 3                      # Max attempts to run report before reporting failure | default = 3
-#   polling_time: 15                    # Time between attempts to check report status | default = 15
-#   auto_cleanup: false                 # Removes any reports sent to /temp. Deletes old Reports from Wiz 
-#   save_incomplete_reports: true       # Save partial reports if at least 1 page is successfully retrieved before error
-
-# logging:
-#   enabled: false                    # Enables logging for library | default = false
-#   verbose: false                    # Enable VERBOSE messages | default = false
-#   lowest_level: 10                  # If higher than 10, debug messages will not process for any handler | default = 10
-#   debug: false                      # Enable DEBUG messages | default = false
-#   file_handler:                     
-#     enabled: false                  # Enables logging to a file | default = false
-#     logging_level: DEBUG            # Log level for file handler. | default = DEBUG
-#     log_directory: ""               # Custom Filepath to save Log Files | default = "$HOME/.wiz" (adds /logs/ folder)
-#     create_log_dir: true            # Automatically create the log directory if it does not exist | default = true
-#     markdown: false                 # Use Markdown format to put log entries into table format | default = false
-#   console_handler:
-#     enabled: true                   # Enables logging to console (stdout) | default = true
-#     logging_level: INFO             # Log level for console handler. | default = INFO
-'''
+    template_path = Path(__file__).parent / "wiz.config.template"
+    yaml_content = template_path.read_text(encoding="utf-8")
+    yaml_content = yaml_content.replace("${SDK_NAME}", LIBRARY_NAME)
+    yaml_content = yaml_content.replace("${SDK_VERSION}", CURRENT_VERSION)
 
     if not DEFAULT_WIZ_DIR.exists():
         DEFAULT_WIZ_DIR.mkdir(parents=True, exist_ok=True)

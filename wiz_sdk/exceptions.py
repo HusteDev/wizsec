@@ -88,6 +88,18 @@ class WizFileError(WizError):
     """Raised when file operations fail."""
     pass
 
+class WizSchemaValidationError(WizQueryError):
+    """Raised when a query fails validation against the cached Wiz schema."""
+    def __init__(
+        self,
+        message: str,
+        query: Optional[str] = None,
+        validation_errors: Optional[List[str]] = None,
+        original_error: Optional[Exception] = None
+    ) -> None:
+        super().__init__(message, query=query, errors=None, original_error=original_error)
+        self.validation_errors = validation_errors or []
+
 class WizServerlessError(WizError):
     """Raised when serverless-specific operations fail."""
     pass

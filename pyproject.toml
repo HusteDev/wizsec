@@ -45,6 +45,16 @@ dev = [
     "black",
     "mypy"
 ]
+docs = [
+    "mkdocs-material",
+    "mkdocstrings[python]",
+]
+
+[tool.setuptools.packages.find]
+include = ["wiz_sdk", "wiz_sdk.*"]
+
+[tool.setuptools.package-data]
+wiz_sdk = ["py.typed", "wiz.config.template"]
 
 [tool.setuptools_scm]
 version_file = "wiz_sdk/version.py"

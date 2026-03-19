@@ -15,12 +15,14 @@ import traceback
 import random
 import codecs
 import csv
+import re
 import json
 import threading
 from typing import Optional, Dict, Any, List, Union, Callable, Iterator
 from graphql import parse, GraphQLError
 import asyncio
-from .utils import parse_query_metadata
+from .utils import parse_query_metadata, ensure_pagination_variables
+from ._schema import SchemaValidator
 from .config import Config
 from .client import WizClient
 from .exceptions import WizQueryError, WizAPIError, WizReportError, WizTimeoutError
@@ -111,11 +113,20 @@ class _RequestBase:
             else:
                 resolved = QUERY
 
+        if self._paginate:
+            resolved = ensure_pagination_variables(resolved)
         self._query = resolved
         self._current_query_info = parse_query_metadata(self._query)
 
+        if Config.validate_queries():
+            SchemaValidator.validate_query(
+                self._query,
+                self._client.environment,
+                client=self._client,
+            )
+
         if (
-            self._current_query_info["request_type"] == "mutation" and
+            self._current_query_info["request_type"].lower() == "mutation" and
             self._current_query_info["source"].lower() in ["createreport", "rerunreport"]
         ):
             self._logger.debug("__current_query = %s", self._current_query_info)
@@ -720,73 +731,81 @@ class AsyncWizRequest(_RequestBase):
     
     async def submit(self) -> "AsyncWizRequest":
         """Submit request asynchronously"""
+        self._client._check_token()
         await self._execute_page()
         return self
-    
+
     async def _execute_page(self) -> None:
-        """Async version of page execution"""
+        """Async version of page execution — iterative pagination (no recursion)."""
         if not hasattr(self._client, '_async_session'):
             raise RuntimeError("Async session not initialized. Use client.async_session() context manager.")
 
         client = self._client._async_session
-        retries = 0
-        url = self._client._api_endpoint()
-        headers = self._client._get_headers()
-        payload = {"query": self.query, "variables": self.vars}
+        semaphore = getattr(self._client, '_async_semaphore', asyncio.Semaphore(10))
+        limiter = self._client._get_limiter(self._limiter_key)
 
-        while retries <= self._client._max_retries:
-            try:
-                semaphore = getattr(self._client, '_async_semaphore', asyncio.Semaphore(10))
+        while True:
+            url = self._client._api_endpoint()
+            headers = self._client._get_headers()
+            payload = {"query": self.query, "variables": self.vars}
+            retries = 0
+            page_data = None
 
-                async with semaphore:
-                    response = await client.post(url=url, json=payload, headers=headers)
-                    if response.status_code == 200:
-                        response_data = response.json()
-                        self.errors.extend(response_data.get("errors", []))
-                        page_data = response_data.get("data", {})
-                        self._merge_page(page_data)
+            while retries <= self._client._max_retries:
+                try:
+                    await limiter.try_acquire_async(self._limiter_key)
+                    async with semaphore:
+                        response = await client.post(url=url, json=payload, headers=headers)
+                        if response.status_code == 200:
+                            response_data = response.json()
+                            self.errors.extend(response_data.get("errors", []))
+                            page_data = response_data.get("data", {})
+                            self._merge_page(page_data)
+                            break
+                        else:
+                            error_msg = f"Query failed with status {response.status_code}"
+                            self.errors.append({"message": response.text})
+                            self._logger.warning(error_msg)
 
-                        if not self.errors:
-                            await self._handle_pagination(page_data)
-                        return
-                    else:
-                        error_msg = f"Query failed with status {response.status_code}"
-                        self.errors.append({"message": response.text})
-                        self._logger.warning(error_msg)
+                except asyncio.TimeoutError:
+                    self._logger.error("Request timed out")
+                    self.errors.append({"message": "Request timed out"})
+                except Exception as e:
+                    error_msg = f"Async request error: {e}"
+                    self.errors.append({"message": str(e)})
+                    self._logger.error(error_msg)
 
-            except asyncio.TimeoutError:
-                self._logger.error("Request timed out")
-                self.errors.append({"message": "Request timed out"})
-            except Exception as e:
-                error_msg = f"Async request error: {e}"
-                self.errors.append({"message": str(e)})
-                self._logger.error(error_msg)
+                retries += 1
+                if retries <= self._client._max_retries:
+                    await asyncio.sleep(self._client._query_retry_time * retries)
+            else:
+                # All retries exhausted for this page
+                return
 
-            retries += 1
-            if retries <= self._client._max_retries:
-                await asyncio.sleep(self._client._query_retry_time * retries)
+            # If errors occurred, stop paginating
+            if self.errors:
+                return
 
-    async def _handle_pagination(self, page_data: Dict[str, Any]) -> None:
-        """Handle async pagination"""
-        if not self._paginate:
-            self.data = page_data
-            return
+            # Handle pagination decision
+            if not self._paginate:
+                self.data = page_data
+                return
 
-        if self._page_event:
-            self._page_event({
-                "page_data": page_data,
-                "page_info": {"per_page": self.vars.get("first", 0), "page": self._page},
-                "errors": self.errors
-            })
+            if self._page_event:
+                self._page_event({
+                    "page_data": page_data,
+                    "page_info": {"per_page": self.vars.get("first", 0), "page": self._page},
+                    "errors": self.errors
+                })
 
-        page_info = self._page_info(page_data)
-        if page_info and page_info.get("hasNextPage"):
-            self.vars["after"] = page_info.get("endCursor")
-            self._page += 1
-            await self._execute_page()
-        else:
-            self.data = self._aggregated_data
-            self._clean_page_info()
+            page_info = self._page_info(page_data)
+            if page_info and page_info.get("hasNextPage"):
+                self.vars["after"] = page_info.get("endCursor")
+                self._page += 1
+            else:
+                self.data = self._aggregated_data
+                self._clean_page_info()
+                return
 
 
 class AsyncWizResponse:
