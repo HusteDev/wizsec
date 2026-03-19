@@ -7,7 +7,7 @@ Demonstrates:
 - Graceful degradation patterns
 """
 
-from wiz_sdk import (
+from wizsec import (
     WizClient,
     Config,
     WizAuthenticationError,

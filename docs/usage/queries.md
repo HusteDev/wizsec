@@ -3,7 +3,7 @@
 ## Single Query
 
 ```python
-from wiz_sdk import WizClient, Config
+from wizsec import WizClient, Config
 
 Config.load()
 client = WizClient()

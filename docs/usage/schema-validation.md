@@ -20,7 +20,7 @@ api:
 If validation fails, a `WizSchemaValidationError` is raised with details:
 
 ```python
-from wiz_sdk import WizClient, Config, WizSchemaValidationError
+from wizsec import WizClient, Config, WizSchemaValidationError
 
 Config.load()
 client = WizClient()
@@ -49,7 +49,7 @@ except WizSchemaValidationError as e:
 The cached schema may become outdated when Wiz updates their API. To refresh:
 
 ```python
-from wiz_sdk import SchemaValidator
+from wizsec import SchemaValidator
 
 # Clear cached schema for a specific environment
 SchemaValidator.clear("gov")
@@ -69,7 +69,7 @@ rm ~/.wiz/schema_gov.json
 You can validate queries without creating a request:
 
 ```python
-from wiz_sdk import SchemaValidator
+from wizsec import SchemaValidator
 
 SchemaValidator.validate_query(
     "query { projects { nodes { id } pageInfo { hasNextPage endCursor } } }",

@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from wiz_sdk._logging import (
+from wizsec._logging import (
     BASE_LOGGER_NAME,
     VERBOSE_LEVEL,
     CustomFormatter,

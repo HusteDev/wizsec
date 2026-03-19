@@ -42,7 +42,7 @@ ListProjects = """
                 id
                 name
                 slug
-                businessImpact
+                riskProfile { businessImpact }
             }
             pageInfo { hasNextPage endCursor }
         }
@@ -55,7 +55,6 @@ GetProject = """
             id
             name
             slug
-            businessImpact
             riskProfile { businessImpact }
         }
     }

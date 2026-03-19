@@ -8,7 +8,7 @@ Demonstrates:
 - Page-level progress tracking for streamed reports
 """
 
-from wiz_sdk import WizClient, Config
+from wizsec import WizClient, Config
 
 Config.load()
 client = WizClient()

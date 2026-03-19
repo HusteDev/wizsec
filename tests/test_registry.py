@@ -4,7 +4,7 @@ import threading
 
 import pytest
 
-from wiz_sdk._registry import (
+from wizsec._registry import (
     EnvironmentRegistry,
     EnvironmentState,
     ProfileRegistry,

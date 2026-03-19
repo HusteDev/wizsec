@@ -8,7 +8,7 @@ Demonstrates:
 - Refreshing the cached schema
 """
 
-from wiz_sdk import WizClient, Config, SchemaValidator, WizSchemaValidationError
+from wizsec import WizClient, Config, SchemaValidator, WizSchemaValidationError
 
 Config.load()
 client = WizClient()

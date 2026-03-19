@@ -7,7 +7,7 @@ Demonstrates:
 - Mixing paginated and non-paginated queries from the same collection
 """
 
-from wiz_sdk import WizClient, Config
+from wizsec import WizClient, Config
 
 # Import the query collection module
 from . import queries

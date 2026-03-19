@@ -1,4 +1,12 @@
-# wiz-sdk
+# wizsec
+
+[![CI](https://github.com/HusteDev/wizsec/actions/workflows/ci.yml/badge.svg)](https://github.com/HusteDev/wizsec/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/HusteDev/wizsec/actions/workflows/codeql.yml/badge.svg)](https://github.com/HusteDev/wizsec/actions/workflows/codeql.yml)
+[![PyPI version](https://img.shields.io/pypi/v/wizsec)](https://pypi.org/project/wizsec/)
+[![Python versions](https://img.shields.io/pypi/pyversions/wizsec)](https://pypi.org/project/wizsec/)
+[![License](https://img.shields.io/pypi/l/wizsec)](https://github.com/HusteDev/wizsec/blob/main/LICENSE)
+[![codecov](https://codecov.io/gh/HusteDev/wizsec/graph/badge.svg)](https://codecov.io/gh/HusteDev/wizsec)
+[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
 A Python SDK for the [Wiz](https://www.wiz.io/) Cloud Security GraphQL API. Provides sync and async clients with automatic pagination, rate limiting, batch operations, and report generation.
 
@@ -23,8 +31,8 @@ A Python SDK for the [Wiz](https://www.wiz.io/) Cloud Security GraphQL API. Prov
 Install from source:
 
 ```bash
-git clone https://github.com/HusteDev/wiz-sdk.git
-cd wiz-sdk
+git clone https://github.com/HusteDev/wizsec.git
+cd wizsec
 pip install .
 ```
 
@@ -43,14 +51,25 @@ pip install -e ".[dev]"
 
 ### Authentication Setup
 
-**Option 1 — Environment variables (simplest):**
+The SDK supports two OAuth grant types:
+
+| Grant Type | Use Case | Requires |
+|---|---|---|
+| `client_credentials` | Service accounts, automation, CI/CD | Client ID + Secret |
+| `device_code` | Interactive / user-based sessions | Browser + WizCode license |
+
+#### Client Credentials (default)
+
+Provide your client ID and secret via environment variables, a credentials file, or constructor arguments.
+
+**Environment variables (simplest):**
 
 ```bash
 export WIZ_CLIENT_ID="your-client-id"
 export WIZ_CLIENT_SECRET="your-client-secret"
 ```
 
-**Option 2 — Credentials file** at `~/.wiz/wiz.credentials`:
+**Credentials file** at `~/.wiz/wiz.credentials`:
 
 ```ini
 [default]
@@ -59,19 +78,45 @@ client_secret = your-client-secret
 environment = app
 ```
 
-**Option 3 — Pass directly:**
+**Pass directly:**
 
 ```python
-from wiz_sdk import WizClient, Config
+from wizsec import WizClient, Config
 
 Config.load()
 client = WizClient(client_id="...", client_secret="...")
 ```
 
+#### Device Code (Interactive)
+
+Device code auth opens a browser for the user to authorize the session — no client secret needed. This is ideal for CLI tools, notebooks, or any context where a human is present.
+
+Set the grant type in `~/.wiz/wiz.config`:
+
+```yaml
+auth:
+  grant_type: device_code
+  device:
+    quiet: true       # auto-authorize without extra prompts (default: true)
+    poll_time: 5       # seconds between auth status checks (default: 5)
+```
+
+Then use the client normally — the browser will open automatically:
+
+```python
+from wizsec import WizClient, Config
+
+Config.load()
+client = WizClient(environment="app")  # opens browser for authorization
+result = client.create_request(query="...", vars={}).submit()
+```
+
+The SDK polls the auth endpoint until the user completes authorization or the request times out.
+
 ### Your First Query
 
 ```python
-from wiz_sdk import WizClient, Config
+from wizsec import WizClient, Config
 
 Config.load()
 client = WizClient(environment="app")
@@ -172,7 +217,7 @@ for request_id, response in results:
 
 ```python
 import asyncio
-from wiz_sdk import WizClient, Config
+from wizsec import WizClient, Config
 
 async def main():
     Config.load()
@@ -248,13 +293,23 @@ report_rows = result.data.get("report_data", [])
 
 ### Progress Tracking
 
-Monitor pagination progress with a callback that fires after each page is fetched:
+Monitor pagination progress with a callback that fires after each page is fetched. The `on_page_event` callback receives a dict with:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `page_data` | `dict` | Raw GraphQL data from the current page |
+| `page_info` | `dict` | `{"page": int, "per_page": int}` — current page number and page size |
+| `errors` | `list` | Any errors accumulated so far |
+
+**Simple progress logging:**
 
 ```python
 def on_page(event):
     page = event["page_info"]["page"]
-    total = event["page_info"]["total_items_received"]
-    print(f"Page {page} — {total} items so far")
+    per_page = event["page_info"]["per_page"]
+    key = next(iter(event["page_data"]), None)
+    count = len(event["page_data"][key]["nodes"]) if key else 0
+    print(f"Page {page}: received {count}/{per_page} items")
 
 response = client.create_request(
     query="...",
@@ -264,16 +319,50 @@ response = client.create_request(
 result = response.submit()
 ```
 
-This is useful for long-running paginated queries where you want to show the user that work is happening. The callback receives page number, items received, and whether more pages remain.
+**Spinner with live counter** (runs the query on the background thread while animating in the main thread):
 
-See [`examples/progress_tracking.py`](examples/progress_tracking.py) for sync and async progress examples.
+```python
+import sys, time, threading
+
+progress = {"pages": 0, "items": 0, "done": False}
+
+def on_page(event):
+    progress["pages"] = event["page_info"]["page"]
+    key = next(iter(event["page_data"]), None)
+    if key:
+        progress["items"] += len(event["page_data"][key].get("nodes", []))
+
+result_holder = {}
+
+def run_query():
+    result_holder["result"] = client.create_request(
+        query="...", vars={"first": 100}, on_page_event=on_page
+    ).submit()
+    progress["done"] = True
+
+thread = threading.Thread(target=run_query)
+thread.start()
+
+spinner = "|/-\\"
+i = 0
+while not progress["done"]:
+    sys.stdout.write(f"\r  {spinner[i % 4]} page {progress['pages']}, {progress['items']} items")
+    sys.stdout.flush()
+    i += 1
+    time.sleep(0.15)
+thread.join()
+```
+
+Progress tracking also works with async requests and report streaming. For reports, the callback receives `{"name", "total_size", "downloaded", "status"}` instead of page data.
+
+See [`examples/progress_tracking.py`](examples/progress_tracking.py) for complete sync, spinner, and async examples.
 
 ### Schema Validation
 
 Validate GraphQL queries against the Wiz schema before they hit the API. Catches typos and invalid fields early with helpful suggestions:
 
 ```python
-from wiz_sdk import WizClient, Config, SchemaValidator, WizSchemaValidationError
+from wizsec import WizClient, Config, SchemaValidator, WizSchemaValidationError
 
 Config.load()
 Config._CONFIG.setdefault("api", {})["validate_queries"] = True  # or set in wiz.config
@@ -316,7 +405,7 @@ The SDK reads `~/.wiz/wiz.config` (YAML). Example:
 
 ```yaml
 app:
-  name: wiz-sdk
+  name: wizsec
   release: "1.0.0"
 
 auth:
@@ -388,7 +477,7 @@ The SDK provides a structured exception hierarchy:
 | `WizServerlessError`         | Serverless-specific failure                                  |
 
 ```python
-from wiz_sdk import WizAuthenticationError, WizRateLimitError
+from wizsec import WizAuthenticationError, WizRateLimitError
 
 try:
     result = response.submit()

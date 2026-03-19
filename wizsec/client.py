@@ -16,7 +16,7 @@ import os
 import base64
 import json
 import queue
-from typing import TYPE_CHECKING, Optional, Dict, Any, Union
+from typing import TYPE_CHECKING, Optional, Dict, Any, Iterator, Union
 import asyncio
 from contextlib import contextmanager
 from .config import Config
@@ -108,40 +108,45 @@ class WizClient:
         self._profile_state.token_data["access_token"] = value
 
     @property
-    def is_service_account(self):
+    def is_service_account(self) -> bool:
+        """Whether this client authenticates as a service account."""
         return self._is_service_account
 
     @is_service_account.setter
-    def is_service_account(self, value):
+    def is_service_account(self, value: bool) -> None:
         self._is_service_account = value
 
     @property
-    def client_id(self):
+    def client_id(self) -> Optional[str]:
+        """OAuth client ID from profile state."""
         return self._profile_state.client_id
 
     @client_id.setter
-    def client_id(self, value):
+    def client_id(self, value: str) -> None:
         self._profile_state.client_id = value
 
     @property
-    def client_secret(self):
+    def client_secret(self) -> Optional[str]:
+        """OAuth client secret from profile state."""
         return self._profile_state.client_secret
 
     @client_secret.setter
-    def client_secret(self, value):
+    def client_secret(self, value: str) -> None:
         self._profile_state.client_secret = value
 
     @property
-    def dc(self):
+    def dc(self) -> Optional[str]:
+        """Data center identifier extracted from the JWT token."""
         return self._env_state.dc
 
     @dc.setter
-    def dc(self, value):
+    def dc(self, value: str) -> None:
         self._env_state.dc = value
 
     # ========== HEADERS ==========
 
-    def _initialize_headers(self):
+    def _initialize_headers(self) -> None:
+        """Set default HTTP headers on the environment state."""
         self._logger.debug("Initializing headers")
         user_agent = f'{Config.app_name()}/{Config.release_version()}'
         self._env_state.headers = {
@@ -153,7 +158,7 @@ class WizClient:
     # Queue and worker are per-environment so all clients on the same
     # environment share a single request pipeline and rate limiter.
 
-    def _enqueue_request(self, request: "WizRequest"):
+    def _enqueue_request(self, request: "WizRequest") -> None:
         """Add a request to the environment's query queue and start the worker."""
         self._logger.debug("Enqueuing request")
 
@@ -171,7 +176,8 @@ class WizClient:
         self._env_state.queue.put(request)
         self._start_worker()
 
-    def _start_worker(self):
+    def _start_worker(self) -> None:
+        """Start the background worker thread if not already running."""
         env = self._env_state
         with env.queue_lock:
             if env.worker_thread and env.worker_thread.is_alive():
@@ -182,7 +188,8 @@ class WizClient:
             )
             env.worker_thread.start()
 
-    def _process_queue(self):
+    def _process_queue(self) -> None:
+        """Drain the request queue, executing each request in sequence."""
         env = self._env_state
         while not env.stop_event.is_set():
             try:
@@ -197,7 +204,7 @@ class WizClient:
             finally:
                 env.queue.task_done()
 
-    def stop_worker(self):
+    def stop_worker(self) -> None:
         """Stop the background queue worker for this environment."""
         env = self._env_state
         env.stop_event.set()
@@ -273,7 +280,7 @@ class WizClient:
         from ._request import AsyncWizBatchRequest
         return AsyncWizBatchRequest(client=self)
 
-    def async_session(self, client: Optional[Any] = None):
+    def async_session(self, client: Optional[Any] = None) -> Any:
         """
         Context manager for async operations. Manages async HTTP client lifecycle.
 
@@ -283,12 +290,12 @@ class WizClient:
                 result = await response.submit()
         """
         class AsyncEnabledClient:
-            def __init__(self, sync_client, async_client):
+            def __init__(self, sync_client: "WizClient", async_client: Optional[Any]) -> None:
                 self._sync_client = sync_client
                 self._async_client = async_client
                 self._owns_client = async_client is None
 
-            async def __aenter__(self):
+            async def __aenter__(self) -> "WizClient":
                 if self._owns_client:
                     ca_bundle = os.environ.get('REQUESTS_CA_BUNDLE')
                     verify = ca_bundle if ca_bundle else True
@@ -299,7 +306,7 @@ class WizClient:
                 self._sync_client._async_session = self._async_client
                 return self._sync_client
 
-            async def __aexit__(self, exc_type, exc_val, exc_tb):
+            async def __aexit__(self, exc_type: Optional[type], exc_val: Optional[BaseException], exc_tb: Optional[Any]) -> None:
                 if self._owns_client and self._async_client:
                     await self._async_client.aclose()
                 if hasattr(self._sync_client, '_async_session'):
@@ -321,7 +328,8 @@ class WizClient:
         self._logger.debug(f"Headers fetched: {safe_keys}")
         return headers
 
-    def _post(self, **kwargs):
+    def _post(self, **kwargs: Any) -> Any:
+        """Send a POST request to the Wiz GraphQL API endpoint."""
         self._logger.debug(f"POST to {self._api_endpoint()}")
         self._logger.debug(f"POST data: {kwargs.get('json', {})}")
         try:
@@ -341,19 +349,22 @@ class WizClient:
 
     # ========== RATE LIMITING ==========
 
-    def _limiter_key(self, request: "WizRequest" = None):
+    def _limiter_key(self, request: Optional["WizRequest"] = None) -> str:
+        """Build the rate-limiter key based on request type and account type."""
         info = getattr(request, "_current_query_info", {}) or {}
         qtype = str(info.get("request_type", "query")).lower()
         source = "service" if self._is_service_account else "user"
         self._logger.debug("Limiter key: %s_%s", qtype, source)
         return f"{qtype}_{source}"
 
-    def _get_limiter(self, key):
+    def _get_limiter(self, key: str) -> Any:
+        """Return the rate limiter for the given key from the environment state."""
         return self._env_state.get_limiter(key)
 
     # ========== AUTHENTICATION ==========
 
-    def _check_token(self):
+    def _check_token(self) -> None:
+        """Ensure a valid access token exists, authenticating or refreshing as needed."""
         self._logger.debug("Checking token for profile: %s", self.profile)
         with self._profile_state.auth_lock:
             if Config.serverless():
@@ -466,14 +477,16 @@ class WizClient:
         except Exception:
             self._logger.warning("Failed to save credentials to file. Continuing without saving.")
 
-    def _authenticate(self, refresh=False):
+    def _authenticate(self, refresh: bool = False) -> None:
+        """Dispatch authentication to the appropriate grant-type handler."""
         self._logger.debug(f"Authenticating (refresh={refresh})")
         if self._grant_type == "device_code":
             self._authenticate_device_code()
         else:
             self._authenticate_client_credentials()
 
-    def _authenticate_device_code(self):
+    def _authenticate_device_code(self) -> bool:
+        """Perform interactive device-code OAuth flow via browser."""
         self._logger.verbose("Starting device code authentication")
         auth_url = f"https://auth.{self._domain}/api/token/device"
         try:
@@ -516,7 +529,8 @@ class WizClient:
             self._logger.error(f"Device code authentication failed: {e}", exc_info=True)
             raise WizAuthenticationError("Device code authentication failed", e)
 
-    def _authenticate_client_credentials(self):
+    def _authenticate_client_credentials(self) -> bool:
+        """Authenticate using client_id and client_secret credentials."""
         self._logger.verbose("Authenticating via client credentials")
         auth_url = f"https://auth.{self._domain}/oauth/token"
         auth_payload = {
@@ -552,7 +566,8 @@ class WizClient:
             self._logger.error(f"Client credentials authentication error: {e}", exc_info=True)
             raise WizAuthenticationError("Client credentials authentication failed", e)
 
-    def _decode_access_token(self, token):
+    def _decode_access_token(self, token: Optional[str]) -> bool:
+        """Decode a JWT access token to extract dc and service account info."""
         if token:
             self._logger.debug("Decoding access token")
             try:
@@ -571,7 +586,8 @@ class WizClient:
                 return False
         return False
 
-    def _token_expired(self):
+    def _token_expired(self) -> bool:
+        """Return True if the current access token has expired."""
         token_data = self._profile_state.token_data
         access_token = token_data.get("access_token")
         received = token_data.get("time_received", 0)
@@ -584,7 +600,8 @@ class WizClient:
     # ========== LOGGING UTILITIES ==========
 
     @contextmanager
-    def loud_logging(self):
+    def loud_logging(self) -> Iterator[None]:
+        """Temporarily raise console log level to VERBOSE within this context."""
         if self._verbose:
             try:
                 self._logger.debug("Loud Logging on")
@@ -600,14 +617,15 @@ class WizClient:
         else:
             yield
 
-    def set_log_level(self, level, handler_level=None, include_children=True):
+    def set_log_level(self, level: Union[str, int], handler_level: Optional[Union[str, int]] = None, include_children: bool = True) -> None:
+        """Update the SDK log level and refresh this client's logger reference."""
         Config.set_log_level(level, handler_level=handler_level, include_children=include_children)
         self._logger = Config.get_logger()
 
     # ========== CLEANUP ==========
 
-    def cleanup_for_lambda(self):
-        """Clean up resources after Lambda execution — scoped to this client only."""
+    def cleanup_for_lambda(self) -> None:
+        """Clean up resources after Lambda execution -- scoped to this client only."""
         if self.serverless:
             ProfileRegistry.cleanup(self.profile)
             EnvironmentRegistry.cleanup(self.environment)
