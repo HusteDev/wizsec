@@ -43,7 +43,8 @@ dev = [
     "pytest>=7.0",
     "pytest-asyncio",
     "black",
-    "mypy"
+    "mypy",
+    "types-PyYAML"
 ]
 docs = [
     "mkdocs-material",

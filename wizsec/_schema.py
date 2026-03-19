@@ -14,9 +14,15 @@ import json
 import logging
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 
-from graphql import parse as gql_parse, validate, build_client_schema, GraphQLSchema
+from graphql import (
+    parse as gql_parse,
+    validate,
+    build_client_schema,
+    GraphQLSchema,
+    IntrospectionQuery,
+)
 
 from .config import Config, DEFAULT_WIZ_DIR
 from .exceptions import WizSchemaValidationError
@@ -182,7 +188,7 @@ class SchemaValidator:
                 data = json.load(f)
             # Handle both {"__schema": {...}} and direct schema dict
             introspection = {"__schema": data} if "__schema" not in data else data
-            schema = build_client_schema(introspection)
+            schema = build_client_schema(cast(IntrospectionQuery, introspection))
             logger.info(
                 "Loaded cached schema for '%s' from %s", environment, cache_path
             )
