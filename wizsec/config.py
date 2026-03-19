@@ -160,8 +160,7 @@ class Config:
                 cls, DEFAULT_WIZ_DIR, parse_filepath, name="wizsec"
             )
 
-    @staticmethod
-    def ensure_loaded(func: Callable) -> Callable:
+    def ensure_loaded(func: Callable) -> Callable:  # type: ignore[misc]
         """Decorator that ensures Config.load() has been called before method execution."""
 
         @wraps(func)
