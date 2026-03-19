@@ -1,7 +1,7 @@
 ##
-## 
+##
 ##   CCCCC    OOOOO   N     N   FFFFFF   IIIIIII   GGGGG
-##  C        O     O  NN    N   F           I     G     
+##  C        O     O  NN    N   F           I     G
 ##  C        O     O  N N   N   FFFFF       I     G   GGG
 ##  C        O     O  N  N  N   F           I     G     G
 ##   CCCCC    OOOOO   N     N   F        IIIIIII   GGGGG
@@ -19,6 +19,7 @@ import tempfile
 import inspect
 from functools import wraps
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+
 try:
     from importlib.metadata import version as get_version
 except ImportError:
@@ -26,24 +27,39 @@ except ImportError:
     from importlib_metadata import version as get_version
 
 from .version import __version__ as wizsec_version
-from ._logging import logging_init as _logging_init, parse_level as _parse_level, BASE_LOGGER_NAME
+from ._logging import (
+    logging_init as _logging_init,
+    parse_level as _parse_level,
+    BASE_LOGGER_NAME,
+)
 
 LIBRARY_NAME = "wizsec"
 CURRENT_VERSION = wizsec_version
 
 # _CONFIG = None
-SERVERLESS = str(os.environ.get("WIZ_SERVERLESS", "")).lower() in ("1", "true", "yes") or bool(os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
+SERVERLESS = str(os.environ.get("WIZ_SERVERLESS", "")).lower() in (
+    "1",
+    "true",
+    "yes",
+) or bool(os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
 DEFAULT_WIZ_DIR = Path("/var/task/.wiz") if SERVERLESS else Path.home() / ".wiz"
 DEFAULT_TEMP_FOLDER = "/tmp" if SERVERLESS else Path(tempfile.gettempdir())
 CWD = "/tmp" if SERVERLESS else str(os.getcwd()).replace("\\", "/")
+
+
 class Config:
     _CONFIG = None
     _logger = None
     _loaded = False
 
     @classmethod
-    def load(cls, config_path: Optional[str] = None, overrides: Optional[Dict[str, str]] = None,
-             client_id: Optional[str] = None, client_secret: Optional[str] = None) -> None:
+    def load(
+        cls,
+        config_path: Optional[str] = None,
+        overrides: Optional[Dict[str, str]] = None,
+        client_id: Optional[str] = None,
+        client_secret: Optional[str] = None,
+    ) -> None:
         """Load configuration from YAML file, applying overrides and credential env vars.
 
         Args:
@@ -55,7 +71,15 @@ class Config:
         if cls._CONFIG is None:
             config_path = config_path or str(DEFAULT_WIZ_DIR / "wiz.config")
             path, filename = parse_filepath(str(config_path))
-            if  all([path, path.is_dir(), os.path.exists(path / filename), filename, isinstance(filename, str)]):
+            if all(
+                [
+                    path,
+                    path.is_dir(),
+                    os.path.exists(path / filename),
+                    filename,
+                    isinstance(filename, str),
+                ]
+            ):
                 with open(path / filename, "r") as file:
                     cls._CONFIG = yaml.safe_load(file)
             else:
@@ -65,18 +89,20 @@ class Config:
                         with open(str(config_path), "r") as file:
                             cls._CONFIG = yaml.safe_load(file)
                 else:
-                    raise Exception("Create config file at /var/task/.wiz for all Serverless executions")
+                    raise Exception(
+                        "Create config file at /var/task/.wiz for all Serverless executions"
+                    )
 
             # Apply overrides via dot-notation keys
-            for item in (overrides or {}):
-                if isinstance(item, str) and '=' in item:
-                    key, value = item.split('=', 1)
+            for item in overrides or {}:
+                if isinstance(item, str) and "=" in item:
+                    key, value = item.split("=", 1)
                     value = yaml.safe_load(value)
                 elif isinstance(item, str):
                     continue
                 else:
                     continue
-                keys = key.split('.')
+                keys = key.split(".")
                 d = cls._CONFIG
                 for k in keys[:-1]:
                     if k not in d or not isinstance(d[k], dict):
@@ -85,30 +111,39 @@ class Config:
                 d[keys[-1]] = value
 
             if client_id:
-                os.environ['WIZ_CLIENT_ID'] = client_id
+                os.environ["WIZ_CLIENT_ID"] = client_id
             if client_secret:
-                os.environ['WIZ_CLIENT_SECRET'] = client_secret
+                os.environ["WIZ_CLIENT_SECRET"] = client_secret
 
             if not cls.serverless():
                 config_version = cls._CONFIG.get("app", {}).get("release")
                 try:
                     library_version = get_version("wizsec")
                     if config_version != library_version:
-                        sys.stdout.write(f"Warning: Config file version [{config_version}] doesn't match the installed library version [{library_version}]\n")
+                        sys.stdout.write(
+                            f"Warning: Config file version [{config_version}] doesn't match the installed library version [{library_version}]\n"
+                        )
                         sys.stdout.flush()
                 except Exception as e:
                     sys.stdout.write(f"Error checking library version: {str(e)}\n")
                     sys.stdout.flush()
 
                 # CA Certificate
-                ca_file_path, filename = parse_filepath(cls._CONFIG.get("auth", {}).get("ca_cert", ""))
+                ca_file_path, filename = parse_filepath(
+                    cls._CONFIG.get("auth", {}).get("ca_cert", "")
+                )
                 if ca_file_path and filename:
                     cert_path = str(Path(ca_file_path) / filename)
-                    os.environ['REQUESTS_CA_BUNDLE'] = cert_path
+                    os.environ["REQUESTS_CA_BUNDLE"] = cert_path
                 else:
                     ca_env_vars = [
-                        'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE', 'SSL_CERT_FILE', 'PIP_CERT',
-                        'AWS_CA_BUNDLE', 'GIT_SSL_CAINFO', 'NODE_EXTRA_CA_CERTS'
+                        "REQUESTS_CA_BUNDLE",
+                        "CURL_CA_BUNDLE",
+                        "SSL_CERT_FILE",
+                        "PIP_CERT",
+                        "AWS_CA_BUNDLE",
+                        "GIT_SSL_CAINFO",
+                        "NODE_EXTRA_CA_CERTS",
                     ]
                     existing_cert = None
                     for var in ca_env_vars:
@@ -117,20 +152,23 @@ class Config:
                             existing_cert = val
                             break
                     if existing_cert:
-                        os.environ['REQUESTS_CA_BUNDLE'] = existing_cert
+                        os.environ["REQUESTS_CA_BUNDLE"] = existing_cert
         cls._loaded = True
         if cls._logger is None:
-            cls._logger = _logging_init(cls, DEFAULT_WIZ_DIR, parse_filepath, name="wizsec")
+            cls._logger = _logging_init(
+                cls, DEFAULT_WIZ_DIR, parse_filepath, name="wizsec"
+            )
 
     def ensure_loaded(func: Callable) -> Callable:
         """Decorator that ensures Config.load() has been called before method execution."""
+
         @wraps(func)
         def wrapper(cls: "Config", *args: Any, **kwargs: Any) -> Any:
             if not cls._loaded:
                 cls.load()
             return func(cls, *args, **kwargs)
+
         return wrapper
-            
 
     @classmethod
     @ensure_loaded
@@ -151,14 +189,14 @@ class Config:
         if not getattr(logger, "_baselogger_initialized", False):
             logger.handlers = list(base_logger.handlers)  # same handler objects
             logger.setLevel(base_logger.level)
-            logger.propagate = False                     # don’t bubble to root
+            logger.propagate = False  # don’t bubble to root
             logger._baselogger_initialized = True
         else:
             # keep level in sync with base, in case config changed on a warm start
             logger.setLevel(base_logger.level)
 
         return logger
-    
+
     @classmethod
     @ensure_loaded
     def load_dotenv(cls) -> None:
@@ -166,8 +204,9 @@ class Config:
         if cls.serverless():
             return  # skip loading files in serverless mode
         from dotenv import load_dotenv
+
         env_path, _ = parse_filepath(cls.env_path())
-        dotenv_file = str(env_path / '.env')
+        dotenv_file = str(env_path / ".env")
         if os.path.exists(dotenv_file):
             load_dotenv(dotenv_path=dotenv_file)
 
@@ -191,12 +230,12 @@ class Config:
     @classmethod
     @ensure_loaded
     def set_log_level(
-            cls,
-            level: Union[int, str],
-            *,
-            handler_level: Optional[Union[int, str]] = None,
-            include_children: bool = True
-        ) -> int:
+        cls,
+        level: Union[int, str],
+        *,
+        handler_level: Optional[Union[int, str]] = None,
+        include_children: bool = True,
+    ) -> int:
         """
         Change the library logging level at runtime.
 
@@ -259,22 +298,22 @@ class Config:
     def serverless(cls) -> bool:
         """Return whether the SDK is running in serverless mode."""
         return SERVERLESS
-    
+
     @classmethod
     @ensure_loaded
     def wiz_dir(cls) -> Path:
         """Return the resolved Wiz configuration directory path."""
         if cls.serverless():
             return Path("/tmp")
-        filepath, _ = parse_filepath( cls.get("app", "wiz_dir", default=DEFAULT_WIZ_DIR))
+        filepath, _ = parse_filepath(cls.get("app", "wiz_dir", default=DEFAULT_WIZ_DIR))
         cls.get_logger().debug(f"Resolved wiz_dir: {filepath}")
         return filepath
-    
+
     @classmethod
     @ensure_loaded
     def env_path(cls) -> Path:
         """Return the resolved path to the .env file directory."""
-        filepath, _ = parse_filepath( cls.get("app", "env_path", default=f"{CWD}"))
+        filepath, _ = parse_filepath(cls.get("app", "env_path", default=f"{CWD}"))
         cls.get_logger().debug(f"Resolved env_path: {filepath}")
         return filepath
 
@@ -295,7 +334,9 @@ class Config:
         """Return the resolved directory path for saved data output."""
         if cls.serverless():
             return Path("/tmp")
-        filepath, _ = parse_filepath(cls.get("saved_data", "directory", default=f"{CWD}/saved-data"))
+        filepath, _ = parse_filepath(
+            cls.get("saved_data", "directory", default=f"{CWD}/saved-data")
+        )
         return filepath
 
     @classmethod
@@ -304,7 +345,9 @@ class Config:
         """Return the resolved temporary directory path for saved data."""
         if cls.serverless():
             return Path("/tmp")
-        filepath, _ = parse_filepath(cls.get("saved_data", "temp", default=DEFAULT_TEMP_FOLDER))
+        filepath, _ = parse_filepath(
+            cls.get("saved_data", "temp", default=DEFAULT_TEMP_FOLDER)
+        )
         return filepath
 
     @classmethod
@@ -325,18 +368,20 @@ class Config:
         if cls.serverless():
             return "client_credentials"
         return cls.get("auth", "grant_type", default="client_credentials")
-    
+
     @classmethod
     @ensure_loaded
     def storage_method(cls) -> str:
         """Return the credential storage method (file, env, or prompt)."""
         return cls.get("auth", "credentials", "storage_method", default="file")
-    
+
     @classmethod
     @ensure_loaded
     def credential_file_path(cls) -> Path:
         """Return the resolved path to the credentials file directory."""
-        filepath, _ = parse_filepath(cls.get("auth", "credentials", "file_path", default=f"{DEFAULT_WIZ_DIR}"))
+        filepath, _ = parse_filepath(
+            cls.get("auth", "credentials", "file_path", default=f"{DEFAULT_WIZ_DIR}")
+        )
         cls.get_logger().debug(f"Resolved credential file path: {filepath}")
         return filepath
 
@@ -345,13 +390,13 @@ class Config:
     def ca_cert(cls) -> str:
         """Return the configured CA certificate path."""
         return cls.get("auth", "ca_cert", default="")
-    
+
     @classmethod
     @ensure_loaded
     def quiet_auth(cls) -> str:
         """Return whether device-code auth should suppress browser prompts."""
         return cls.get("auth", "device", "quiet", default="true")
-    
+
     @classmethod
     @ensure_loaded
     def auth_poll_time(cls) -> int:
@@ -368,11 +413,13 @@ class Config:
         return {
             "http": (
                 f'{proxy_config.get("http", {}).get("url", "")}:{proxy_config.get("http", {}).get("port", "")}'
-                if proxy_config else os.environ.get("HTTP_PROXY", None)
+                if proxy_config
+                else os.environ.get("HTTP_PROXY", None)
             ),
             "https": (
                 f'{proxy_config.get("https", {}).get("url", "")}:{proxy_config.get("https", {}).get("port", "")}'
-                if proxy_config else os.environ.get("HTTPS_PROXY", None)
+                if proxy_config
+                else os.environ.get("HTTPS_PROXY", None)
             ),
         }
 
@@ -384,7 +431,7 @@ class Config:
     def default_domain(cls) -> str:
         """Return the default Wiz domain identifier."""
         return cls.get("domain", "default", default="gov")
-    
+
     @classmethod
     @ensure_loaded
     def domain_enabled(cls, domain: str) -> bool:
@@ -396,10 +443,10 @@ class Config:
     def domain_root(cls, env: str) -> Optional[str]:
         """Return the root domain string for the given environment identifier."""
         root_domains = {
-            "app"       :   "app.wiz.io",
-            "gov"       :   "gov.wiz.io",
-            "fedramp"   :   "app.wiz.us"
-            }
+            "app": "app.wiz.io",
+            "gov": "gov.wiz.io",
+            "fedramp": "app.wiz.us",
+        }
         return root_domains.get(env, root_domains.get(cls.default_domain()))
 
     ############
@@ -410,7 +457,7 @@ class Config:
     def api_max_retries(cls) -> int:
         """Return the maximum number of API request retries."""
         return cls.get("api", "max_retries", default=5)
-    
+
     @classmethod
     @ensure_loaded
     def api_retry(cls) -> int:
@@ -442,7 +489,9 @@ class Config:
     @ensure_loaded
     def report_export_directory(cls) -> Path:
         """Return the resolved directory path for report exports."""
-        filepath, _ = parse_filepath(cls.get("reports", "export_directory", default=f"{CWD}"))
+        filepath, _ = parse_filepath(
+            cls.get("reports", "export_directory", default=f"{CWD}")
+        )
         cls.get_logger().debug(f"Resolved report export directory: {filepath}")
         return filepath
 
@@ -491,7 +540,7 @@ class Config:
         """Return whether logging is enabled."""
         val = cls.get("logging", "enabled", default=True)
         return val
-    
+
     @classmethod
     @ensure_loaded
     def logger_min_level(cls) -> int:
@@ -521,7 +570,7 @@ class Config:
             return False
         val = cls.get("logging", "file_handler", "enabled", default=False)
         return val
-    
+
     @classmethod
     @ensure_loaded
     def file_handler_logging_level(cls) -> str:
@@ -535,7 +584,7 @@ class Config:
         if cls.serverless():
             return "/tmp"
         path_str = cls.get("logging", "file_handler", "log_directory", default="")
-        if not path_str: # if empty string from config
+        if not path_str:  # if empty string from config
             return DEFAULT_WIZ_DIR
         filepath, _ = parse_filepath(path_str)
         return filepath
@@ -556,7 +605,9 @@ class Config:
     @ensure_loaded
     def console_handler_enabled(cls) -> bool:
         """Return whether console log output is enabled."""
-        return cls.get("logging", "console_handler", "enabled", default=cls.logging_enabled())
+        return cls.get(
+            "logging", "console_handler", "enabled", default=cls.logging_enabled()
+        )
 
     @classmethod
     @ensure_loaded
@@ -565,8 +616,9 @@ class Config:
         return cls.get("logging", "console_handler", "logging_level", default="INFO")
 
 
-
-def generate_default_config(file_path: Union[str, Path] = (DEFAULT_WIZ_DIR / "wiz.config")) -> bool:
+def generate_default_config(
+    file_path: Union[str, Path] = (DEFAULT_WIZ_DIR / "wiz.config"),
+) -> bool:
     """Generate a default config file from the bundled template.
 
     Args:
@@ -598,7 +650,6 @@ def generate_default_config(file_path: Union[str, Path] = (DEFAULT_WIZ_DIR / "wi
     return True
 
 
-
 def expand_all_vars(path_str: str) -> str:
     """Expand $CWD, $HOME, ~, and environment variables in a path string."""
     path_str = str(path_str)  # ensure it's a string
@@ -607,6 +658,7 @@ def expand_all_vars(path_str: str) -> str:
     expanded = os.path.expanduser(path_str)
     expanded = os.path.expandvars(expanded)
     return expanded
+
 
 def parse_filepath(path_str: Optional[str] = None) -> Tuple[Path, Optional[str]]:
     """Parse and resolve a path string into a directory and optional filename.
@@ -634,4 +686,3 @@ def parse_filepath(path_str: Optional[str] = None) -> Tuple[Path, Optional[str]]
         if not Config.serverless() and not path.is_dir():
             path.mkdir(parents=True, exist_ok=True)
         return path, None
-    

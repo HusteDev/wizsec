@@ -38,12 +38,13 @@ from wizsec.utils import (
 )
 from wizsec.exceptions import WizFileError
 
-
 # ── extract_fields ──────────────────────────────────────────────────
+
 
 class TestExtractFields:
     def test_simple_fields(self):
         from graphql import parse
+
         doc = parse("{ user { id name email } }")
         selection_set = doc.definitions[0].selection_set.selections[0].selection_set
         fields = extract_fields(selection_set)
@@ -54,6 +55,7 @@ class TestExtractFields:
 
     def test_nested_fields(self):
         from graphql import parse
+
         doc = parse("{ user { id profile { bio avatar } } }")
         selection_set = doc.definitions[0].selection_set.selections[0].selection_set
         fields = extract_fields(selection_set)
@@ -64,6 +66,7 @@ class TestExtractFields:
 
 
 # ── parse_query_metadata ────────────────────────────────────────────
+
 
 class TestParseQueryMetadata:
     def test_named_query(self):
@@ -98,6 +101,7 @@ class TestParseQueryMetadata:
 
 
 # ── ensure_pagination_variables ─────────────────────────────────────
+
 
 class TestEnsurePaginationVariables:
     def test_injects_after_when_missing(self):
@@ -146,6 +150,7 @@ class TestEnsurePaginationVariables:
 
 # ── return_formatted_duration ───────────────────────────────────────
 
+
 class TestReturnFormattedDuration:
     def test_seconds_only(self):
         result = return_formatted_duration(5.5)
@@ -168,6 +173,7 @@ class TestReturnFormattedDuration:
 
 # ── resource_path ───────────────────────────────────────────────────
 
+
 class TestResourcePath:
     def test_returns_absolute_path(self):
         result = resource_path("some/file.txt")
@@ -176,12 +182,14 @@ class TestResourcePath:
     def test_with_meipass(self):
         """PyInstaller sets sys._MEIPASS."""
         import sys
+
         with patch.object(sys, "_MEIPASS", "/tmp/meipass", create=True):
             result = resource_path("data/config.yml")
             assert "/tmp/meipass" in result or "\\tmp\\meipass" in result
 
 
 # ── safe_write_json ─────────────────────────────────────────────────
+
 
 class TestSafeWriteJson:
     def test_writes_and_moves(self, tmp_path, mock_config):
@@ -213,6 +221,7 @@ class TestSafeWriteJson:
 
 # ── disable_in_serverless ──────────────────────────────────────────
 
+
 class TestDisableInServerless:
     def test_runs_normally_when_not_serverless(self, mock_config):
         @disable_in_serverless
@@ -240,6 +249,7 @@ class TestDisableInServerless:
 
 # ── dump_to_json ───────────────────────────────────────────────────
 
+
 class TestDumpToJson:
     def test_writes_json_file(self, tmp_path, mock_config):
         save_dir = tmp_path / "saved-data"
@@ -247,9 +257,11 @@ class TestDumpToJson:
         mock_config._CONFIG["saved_data"]["enabled"] = True
         mock_config._CONFIG["saved_data"]["directory"] = str(save_dir)
 
-        with patch.object(mock_config, "serverless", return_value=False), \
-             patch.object(mock_config, "saved_data_enabled", return_value=True), \
-             patch.object(mock_config, "saved_data_directory", return_value=save_dir):
+        with (
+            patch.object(mock_config, "serverless", return_value=False),
+            patch.object(mock_config, "saved_data_enabled", return_value=True),
+            patch.object(mock_config, "saved_data_directory", return_value=save_dir),
+        ):
             dump_to_json({"key": "val"}, filename="test_dump.json")
 
         output = save_dir / "test_dump.json"
@@ -262,14 +274,17 @@ class TestDumpToJson:
             dump_to_json(None, filename="empty.json")
 
     def test_saved_data_disabled_does_not_write(self, tmp_path, mock_config):
-        with patch.object(mock_config, "serverless", return_value=False), \
-             patch.object(mock_config, "saved_data_enabled", return_value=False):
+        with (
+            patch.object(mock_config, "serverless", return_value=False),
+            patch.object(mock_config, "saved_data_enabled", return_value=False),
+        ):
             dump_to_json({"data": 1}, filename="no_write.json")
 
         assert not (tmp_path / "no_write.json").exists()
 
 
 # ── store_data ─────────────────────────────────────────────────────
+
 
 class TestStoreData:
     def test_pickle_round_trip(self, tmp_path):
@@ -297,6 +312,7 @@ class TestStoreData:
 
 # ── load_credentials_from_file ─────────────────────────────────────
 
+
 class TestLoadCredentialsFromFile:
     def test_loads_existing_profile(self, tmp_path, mock_config):
         cred_file = tmp_path / "creds.ini"
@@ -318,7 +334,9 @@ class TestLoadCredentialsFromFile:
 
     def test_missing_file_returns_empty(self, tmp_path, mock_config):
         with patch.object(mock_config, "serverless", return_value=False):
-            result = load_credentials_from_file("default", str(tmp_path / "nonexistent.ini"))
+            result = load_credentials_from_file(
+                "default", str(tmp_path / "nonexistent.ini")
+            )
         assert result == {}
 
     def test_missing_profile_returns_empty(self, tmp_path, mock_config):
@@ -352,6 +370,7 @@ class TestLoadCredentialsFromFile:
 
 # ── write_credentials_to_file ──────────────────────────────────────
 
+
 class TestWriteCredentialsToFile:
     def test_creates_new_file_with_profile(self, tmp_path, mock_config):
         cred_file = tmp_path / "new_creds.ini"
@@ -383,7 +402,9 @@ class TestWriteCredentialsToFile:
         cred_file = tmp_path / "creds.ini"
 
         with patch.object(mock_config, "serverless", return_value=False):
-            write_credentials_to_file("prod", "id", "secret", str(cred_file), environment="us1")
+            write_credentials_to_file(
+                "prod", "id", "secret", str(cred_file), environment="us1"
+            )
 
         config = configparser.ConfigParser()
         config.read(cred_file)
@@ -407,18 +428,29 @@ class TestWriteCredentialsToFile:
 
 # ── is_in_last_x_intervals ────────────────────────────────────────
 
+
 class TestIsInLastXIntervals:
     def test_recent_datetime_within_interval(self):
         recent = datetime.now(timezone.utc) - timedelta(hours=1)
-        assert is_in_last_x_intervals(recent, interval_value=1, interval_type="days") is True
+        assert (
+            is_in_last_x_intervals(recent, interval_value=1, interval_type="days")
+            is True
+        )
 
     def test_old_datetime_outside_interval(self):
         old = datetime.now(timezone.utc) - timedelta(days=10)
-        assert is_in_last_x_intervals(old, interval_value=1, interval_type="days") is False
+        assert (
+            is_in_last_x_intervals(old, interval_value=1, interval_type="days") is False
+        )
 
     def test_string_input_iso_format(self):
-        recent = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        assert is_in_last_x_intervals(recent, interval_value=1, interval_type="days") is True
+        recent = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        assert (
+            is_in_last_x_intervals(recent, interval_value=1, interval_type="days")
+            is True
+        )
 
     def test_invalid_interval_type_raises(self):
         with pytest.raises(ValueError, match="Invalid interval type"):
@@ -426,22 +458,34 @@ class TestIsInLastXIntervals:
 
     def test_zero_or_negative_interval_returns_true(self):
         old = datetime.now(timezone.utc) - timedelta(days=100)
-        assert is_in_last_x_intervals(old, interval_value=0, interval_type="days") is True
+        assert (
+            is_in_last_x_intervals(old, interval_value=0, interval_type="days") is True
+        )
 
     def test_minutes_interval(self):
         recent = datetime.now(timezone.utc) - timedelta(minutes=2)
-        assert is_in_last_x_intervals(recent, interval_value=5, interval_type="minutes") is True
+        assert (
+            is_in_last_x_intervals(recent, interval_value=5, interval_type="minutes")
+            is True
+        )
 
     def test_seconds_interval(self):
         old = datetime.now(timezone.utc) - timedelta(days=1)
-        assert is_in_last_x_intervals(old, interval_value=10, interval_type="seconds") is False
+        assert (
+            is_in_last_x_intervals(old, interval_value=10, interval_type="seconds")
+            is False
+        )
 
     def test_naive_datetime_treated_as_utc(self):
         recent = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1)
-        assert is_in_last_x_intervals(recent, interval_value=1, interval_type="days") is True
+        assert (
+            is_in_last_x_intervals(recent, interval_value=1, interval_type="days")
+            is True
+        )
 
 
 # ── determine_time_format ──────────────────────────────────────────
+
 
 class TestDetermineTimeFormat:
     def test_iso_8601_with_z(self):
@@ -479,18 +523,23 @@ class TestDetermineTimeFormat:
 
 # ── find_file_with_extension ──────────────────────────────────────
 
+
 class TestFindFileWithExtension:
     def test_finds_file_with_given_extension(self, tmp_path):
         target = tmp_path / "data.json"
         target.write_text("{}")
-        result = find_file_with_extension(str(tmp_path / "data.json"), [".pkl", ".json"])
+        result = find_file_with_extension(
+            str(tmp_path / "data.json"), [".pkl", ".json"]
+        )
         assert result == str(target)
 
     def test_tries_extension_order(self, tmp_path):
         # Only CSV exists
         csv_file = tmp_path / "data.csv"
         csv_file.write_text("a,b")
-        result = find_file_with_extension(str(tmp_path / "data"), [".json", ".pkl", ".csv"])
+        result = find_file_with_extension(
+            str(tmp_path / "data"), [".json", ".pkl", ".csv"]
+        )
         assert result == str(csv_file)
 
     def test_returns_empty_when_not_found(self, tmp_path):
@@ -503,7 +552,9 @@ class TestFindFileWithExtension:
         pkl_file = tmp_path / "data.pkl"
         pkl_file.write_bytes(b"")
         # When extension is explicit, only check that exact file
-        result = find_file_with_extension(str(tmp_path / "data.json"), [".pkl", ".json"])
+        result = find_file_with_extension(
+            str(tmp_path / "data.json"), [".pkl", ".json"]
+        )
         assert result == str(json_file)
 
     def test_explicit_extension_not_found(self, tmp_path):
@@ -512,6 +563,7 @@ class TestFindFileWithExtension:
 
 
 # ── load_file_if_in_last_x_interval ───────────────────────────────
+
 
 class TestLoadFileIfInLastXInterval:
     def test_loads_recent_file(self, tmp_path):
@@ -549,6 +601,7 @@ class TestLoadFileIfInLastXInterval:
 
 # ── load_file ──────────────────────────────────────────────────────
 
+
 class TestLoadFile:
     def test_dispatches_json(self, tmp_path):
         f = tmp_path / "test.json"
@@ -559,7 +612,9 @@ class TestLoadFile:
     def test_dispatches_csv(self, tmp_path):
         f = tmp_path / "test.csv"
         f.write_text("name,age\nAlice,30\nBob,25\n")
-        with patch("wizsec.utils.mimetypes.guess_type", return_value=("text/csv", None)):
+        with patch(
+            "wizsec.utils.mimetypes.guess_type", return_value=("text/csv", None)
+        ):
             result = load_file(str(f))
         assert len(result) == 2
         assert result[0]["name"] == "Alice"
@@ -593,6 +648,7 @@ class TestLoadFile:
 
 # ── load_json ──────────────────────────────────────────────────────
 
+
 class TestLoadJson:
     def test_loads_plain_dict(self, tmp_path):
         f = tmp_path / "test.json"
@@ -618,6 +674,7 @@ class TestLoadJson:
 
 # ── load_csv ───────────────────────────────────────────────────────
 
+
 class TestLoadCsv:
     def test_loads_csv_to_dicts(self, tmp_path):
         f = tmp_path / "test.csv"
@@ -636,6 +693,7 @@ class TestLoadCsv:
 
 # ── load_xml ───────────────────────────────────────────────────────
 
+
 class TestLoadXml:
     def test_returns_root_element(self, tmp_path):
         f = tmp_path / "test.xml"
@@ -648,6 +706,7 @@ class TestLoadXml:
 
 
 # ── load_text ──────────────────────────────────────────────────────
+
 
 class TestLoadText:
     def test_loads_plain_text(self, tmp_path):
@@ -663,6 +722,7 @@ class TestLoadText:
 
 
 # ── load_data ──────────────────────────────────────────────────────
+
 
 class TestLoadData:
     def test_loads_pickle(self, tmp_path):

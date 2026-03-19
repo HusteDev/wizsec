@@ -16,13 +16,19 @@ class TestMergePage:
 
     def test_first_page_sets_data(self):
         base = self._make_base()
-        base._merge_page({"users": {"nodes": [1, 2], "pageInfo": {"hasNextPage": True}}})
+        base._merge_page(
+            {"users": {"nodes": [1, 2], "pageInfo": {"hasNextPage": True}}}
+        )
         assert base._aggregated_data["users"]["nodes"] == [1, 2]
 
     def test_second_page_extends_nodes(self):
         base = self._make_base()
-        base._merge_page({"users": {"nodes": [1, 2], "pageInfo": {"hasNextPage": True}}})
-        base._merge_page({"users": {"nodes": [3, 4], "pageInfo": {"hasNextPage": False}}})
+        base._merge_page(
+            {"users": {"nodes": [1, 2], "pageInfo": {"hasNextPage": True}}}
+        )
+        base._merge_page(
+            {"users": {"nodes": [3, 4], "pageInfo": {"hasNextPage": False}}}
+        )
         assert base._aggregated_data["users"]["nodes"] == [1, 2, 3, 4]
 
     def test_non_node_fields_overwritten(self):
@@ -46,7 +52,12 @@ class TestPageInfo:
 
     def test_extracts_page_info(self):
         base = self._make_base()
-        data = {"users": {"nodes": [], "pageInfo": {"hasNextPage": True, "endCursor": "abc"}}}
+        data = {
+            "users": {
+                "nodes": [],
+                "pageInfo": {"hasNextPage": True, "endCursor": "abc"},
+            }
+        }
         info = base._page_info(data)
         assert info == {"hasNextPage": True, "endCursor": "abc"}
 

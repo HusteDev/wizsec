@@ -43,9 +43,7 @@ class EnvironmentState:
                 "mutation_user": Rate(10, Duration.SECOND),
                 "mutation_service": Rate(3, Duration.SECOND),
             }
-            self._limiters = {
-                k: Limiter(v) for k, v in rate_configs.items()
-            }
+            self._limiters = {k: Limiter(v) for k, v in rate_configs.items()}
         return self._limiters
 
     def get_limiter(self, key: str) -> Limiter:

@@ -102,7 +102,9 @@ class SchemaValidator:
     _fetching: set[str] = set()  # prevents recursive introspection
 
     @classmethod
-    def get_schema(cls, environment: str, client: Any = None) -> Optional[GraphQLSchema]:
+    def get_schema(
+        cls, environment: str, client: Any = None
+    ) -> Optional[GraphQLSchema]:
         """Load or fetch the GraphQL schema for a given environment."""
         if environment in cls._schemas:
             return cls._schemas[environment]
@@ -128,11 +130,15 @@ class SchemaValidator:
         return None
 
     @classmethod
-    def validate_query(cls, query_str: str, environment: str, client: Any = None) -> None:
+    def validate_query(
+        cls, query_str: str, environment: str, client: Any = None
+    ) -> None:
         """Validate a query against the schema. Raises WizSchemaValidationError on failure."""
         schema = cls.get_schema(environment, client)
         if schema is None:
-            logger.debug("No schema available for '%s' — skipping validation", environment)
+            logger.debug(
+                "No schema available for '%s' — skipping validation", environment
+            )
             return
 
         try:
@@ -144,8 +150,8 @@ class SchemaValidator:
         if errors:
             messages = [str(e) for e in errors]
             raise WizSchemaValidationError(
-                f"Query validation failed with {len(errors)} error(s):\n" +
-                "\n".join(f"  - {m}" for m in messages),
+                f"Query validation failed with {len(errors)} error(s):\n"
+                + "\n".join(f"  - {m}" for m in messages),
                 query=query_str,
                 validation_errors=messages,
             )
@@ -177,7 +183,9 @@ class SchemaValidator:
             # Handle both {"__schema": {...}} and direct schema dict
             introspection = {"__schema": data} if "__schema" not in data else data
             schema = build_client_schema(introspection)
-            logger.info("Loaded cached schema for '%s' from %s", environment, cache_path)
+            logger.info(
+                "Loaded cached schema for '%s' from %s", environment, cache_path
+            )
             return schema
         except Exception as e:
             logger.warning("Failed to load cached schema for '%s': %s", environment, e)
@@ -196,12 +204,18 @@ class SchemaValidator:
             result = response.submit()
 
             if not result.success():
-                logger.warning("Introspection query failed for '%s': %s", environment, result.errors)
+                logger.warning(
+                    "Introspection query failed for '%s': %s",
+                    environment,
+                    result.errors,
+                )
                 return None
 
             schema_data = result.data.get("__schema")
             if not schema_data:
-                logger.warning("Introspection response missing __schema for '%s'", environment)
+                logger.warning(
+                    "Introspection response missing __schema for '%s'", environment
+                )
                 return None
 
             # Cache to disk

@@ -11,8 +11,8 @@ from graphql import build_client_schema, introspection_from_schema, build_schema
 from wizsec._schema import SchemaValidator, INTROSPECTION_QUERY
 from wizsec.exceptions import WizSchemaValidationError
 
-
 # ── Helpers ──────────────────────────────────────────────────────────
+
 
 def _make_test_schema():
     """Build a minimal GraphQL schema for testing."""
@@ -58,6 +58,7 @@ def _clean_schema_cache():
 
 
 # ── Tests ────────────────────────────────────────────────────────────
+
 
 class TestValidateQuery:
     def test_valid_query_passes(self):
@@ -117,7 +118,9 @@ class TestGetSchema:
         cache_file = tmp_path / "schema_disktest.json"
         cache_file.write_text(json.dumps(schema_data))
 
-        with patch.object(SchemaValidator, "_schema_cache_path", return_value=cache_file):
+        with patch.object(
+            SchemaValidator, "_schema_cache_path", return_value=cache_file
+        ):
             schema = SchemaValidator.get_schema("disktest")
         assert schema is not None
         assert "disktest" in SchemaValidator._schemas
@@ -126,7 +129,9 @@ class TestGetSchema:
         cache_file = tmp_path / "schema_bad.json"
         cache_file.write_text("not json")
 
-        with patch.object(SchemaValidator, "_schema_cache_path", return_value=cache_file):
+        with patch.object(
+            SchemaValidator, "_schema_cache_path", return_value=cache_file
+        ):
             schema = SchemaValidator.get_schema("bad")
         assert schema is None
 
@@ -160,7 +165,9 @@ class TestFetchAndCache:
         mock_client.create_request.return_value = mock_response
 
         cache_file = tmp_path / "schema_fetch.json"
-        with patch.object(SchemaValidator, "_schema_cache_path", return_value=cache_file):
+        with patch.object(
+            SchemaValidator, "_schema_cache_path", return_value=cache_file
+        ):
             schema = SchemaValidator._fetch_and_cache("fetch", mock_client)
 
         assert schema is not None
@@ -194,5 +201,6 @@ class TestFetchAndCache:
 class TestIntrospectionQuery:
     def test_query_is_parseable(self):
         from graphql import parse
+
         doc = parse(INTROSPECTION_QUERY)
         assert len(doc.definitions) > 0

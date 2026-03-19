@@ -23,8 +23,12 @@ from .config import Config
 from . import utils
 import webbrowser
 from .exceptions import (
-    WizAuthenticationError, WizAPIError, WizCredentialsError,
-    WizConfigurationError, WizTimeoutError, WizError
+    WizAuthenticationError,
+    WizAPIError,
+    WizCredentialsError,
+    WizConfigurationError,
+    WizTimeoutError,
+    WizError,
 )
 from ._registry import EnvironmentRegistry, ProfileRegistry
 from ._transport import post as transport_post, create_async_client, TransportError
@@ -39,7 +43,9 @@ class WizClient:
     _clients: Dict[tuple, "WizClient"] = {}
     _clients_lock = threading.Lock()
 
-    def __new__(cls, environment: str = "", profile: str = "", *args, **kwargs) -> "WizClient":
+    def __new__(
+        cls, environment: str = "", profile: str = "", *args, **kwargs
+    ) -> "WizClient":
         environment = environment or Config.default_domain()
         profile = profile or "default"
         key = (environment, profile)
@@ -63,9 +69,9 @@ class WizClient:
         grant_type: str = "",
         log_lvl: Optional[Union[str, int]] = None,
         serverless: bool = False,
-        interactive: bool = False
+        interactive: bool = False,
     ) -> None:
-        if getattr(self, '_initialized', False):
+        if getattr(self, "_initialized", False):
             return
 
         if log_lvl:
@@ -90,8 +96,12 @@ class WizClient:
         self._env_state = EnvironmentRegistry.get_or_create(self.environment)
         self._profile_state = ProfileRegistry.get_or_create(self.profile)
 
-        self._logger.debug(f"Client Request: environment={self.environment}, profile={self.profile}, grant_type={self._grant_type}")
-        self._logger.info(f"WizClient Initialized:  environment={self.environment}, profile={self.profile}, grant_type={self._grant_type}")
+        self._logger.debug(
+            f"Client Request: environment={self.environment}, profile={self.profile}, grant_type={self._grant_type}"
+        )
+        self._logger.info(
+            f"WizClient Initialized:  environment={self.environment}, profile={self.profile}, grant_type={self._grant_type}"
+        )
 
         self._initialize_headers()
         self._preload_credentials()
@@ -148,10 +158,10 @@ class WizClient:
     def _initialize_headers(self) -> None:
         """Set default HTTP headers on the environment state."""
         self._logger.debug("Initializing headers")
-        user_agent = f'{Config.app_name()}/{Config.release_version()}'
+        user_agent = f"{Config.app_name()}/{Config.release_version()}"
         self._env_state.headers = {
             "Content-Type": "application/json",
-            "User-Agent": user_agent
+            "User-Agent": user_agent,
         }
 
     # ========== QUEUE & WORKER ==========
@@ -219,11 +229,20 @@ class WizClient:
         queryCollection: Optional[str] = None,
         query: Optional[str] = None,
         vars: Optional[Dict[str, Any]] = None,
-        **kwargs
+        **kwargs,
     ) -> "WizResponse":
-        self._logger.debug(f"Creating request with query: {query[:50] if query else 'None'}...")
+        self._logger.debug(
+            f"Creating request with query: {query[:50] if query else 'None'}..."
+        )
         from ._request import WizRequest, WizResponse
-        request = WizRequest(client=self, queryCollection=queryCollection, query=query, vars=vars, **kwargs)
+
+        request = WizRequest(
+            client=self,
+            queryCollection=queryCollection,
+            query=query,
+            vars=vars,
+            **kwargs,
+        )
         return WizResponse(request)
 
     def create_batch_request(self) -> "WizBatchRequest":
@@ -241,6 +260,7 @@ class WizClient:
         """
         self._logger.debug("Creating batch request")
         from ._request import WizBatchRequest
+
         return WizBatchRequest(client=self)
 
     # ========== ASYNC METHODS ==========
@@ -250,7 +270,7 @@ class WizClient:
         queryCollection: Optional[str] = None,
         query: Optional[str] = None,
         vars: Optional[Dict[str, Any]] = None,
-        **kwargs
+        **kwargs,
     ) -> "AsyncWizResponse":
         """
         Async version of create_request. Returns an async-enabled response.
@@ -260,9 +280,18 @@ class WizClient:
                 response = await session_client.create_async_request(query="...", vars={})
                 result = await response.submit()
         """
-        self._logger.debug(f"Creating async request with query: {query[:50] if query else 'None'}...")
+        self._logger.debug(
+            f"Creating async request with query: {query[:50] if query else 'None'}..."
+        )
         from ._request import AsyncWizRequest, AsyncWizResponse
-        request = AsyncWizRequest(client=self, queryCollection=queryCollection, query=query, vars=vars, **kwargs)
+
+        request = AsyncWizRequest(
+            client=self,
+            queryCollection=queryCollection,
+            query=query,
+            vars=vars,
+            **kwargs,
+        )
         return AsyncWizResponse(request)
 
     async def create_async_batch_request(self) -> "AsyncWizBatchRequest":
@@ -278,6 +307,7 @@ class WizClient:
         """
         self._logger.debug("Creating async batch request")
         from ._request import AsyncWizBatchRequest
+
         return AsyncWizBatchRequest(client=self)
 
     def async_session(self, client: Optional[Any] = None) -> Any:
@@ -289,15 +319,18 @@ class WizClient:
                 response = await async_client.create_async_request(query="...")
                 result = await response.submit()
         """
+
         class AsyncEnabledClient:
-            def __init__(self, sync_client: "WizClient", async_client: Optional[Any]) -> None:
+            def __init__(
+                self, sync_client: "WizClient", async_client: Optional[Any]
+            ) -> None:
                 self._sync_client = sync_client
                 self._async_client = async_client
                 self._owns_client = async_client is None
 
             async def __aenter__(self) -> "WizClient":
                 if self._owns_client:
-                    ca_bundle = os.environ.get('REQUESTS_CA_BUNDLE')
+                    ca_bundle = os.environ.get("REQUESTS_CA_BUNDLE")
                     verify = ca_bundle if ca_bundle else True
                     self._async_client = create_async_client(
                         timeout=Config.api_timeout(),
@@ -306,11 +339,16 @@ class WizClient:
                 self._sync_client._async_session = self._async_client
                 return self._sync_client
 
-            async def __aexit__(self, exc_type: Optional[type], exc_val: Optional[BaseException], exc_tb: Optional[Any]) -> None:
+            async def __aexit__(
+                self,
+                exc_type: Optional[type],
+                exc_val: Optional[BaseException],
+                exc_tb: Optional[Any],
+            ) -> None:
                 if self._owns_client and self._async_client:
                     await self._async_client.aclose()
-                if hasattr(self._sync_client, '_async_session'):
-                    delattr(self._sync_client, '_async_session')
+                if hasattr(self._sync_client, "_async_session"):
+                    delattr(self._sync_client, "_async_session")
 
         return AsyncEnabledClient(self, client)
 
@@ -324,7 +362,9 @@ class WizClient:
 
     def _get_headers(self) -> Dict[str, str]:
         headers = dict(self._env_state.headers)
-        safe_keys = {k: ("***" if k == "Authorization" else v) for k, v in headers.items()}
+        safe_keys = {
+            k: ("***" if k == "Authorization" else v) for k, v in headers.items()
+        }
         self._logger.debug(f"Headers fetched: {safe_keys}")
         return headers
 
@@ -333,13 +373,13 @@ class WizClient:
         self._logger.debug(f"POST to {self._api_endpoint()}")
         self._logger.debug(f"POST data: {kwargs.get('json', {})}")
         try:
-            ca_bundle = os.environ.get('REQUESTS_CA_BUNDLE')
+            ca_bundle = os.environ.get("REQUESTS_CA_BUNDLE")
             verify = ca_bundle if ca_bundle else True
             response = transport_post(
                 proxy=self._proxies.get("https") or self._proxies.get("http"),
                 verify=verify,
                 timeout=Config.api_timeout(),
-                **kwargs
+                **kwargs,
             )
             self._logger.verbose(f"Response status code: {response.status_code}")
             return response
@@ -371,7 +411,9 @@ class WizClient:
                 self._logger.verbose("Serverless mode: forcing fresh authentication")
                 self._authenticate()
             if not self._profile_state.token_data:
-                self._logger.verbose("Existing token not found; attempting to authenticate.")
+                self._logger.verbose(
+                    "Existing token not found; attempting to authenticate."
+                )
                 self._authenticate()
             elif self._token_expired():
                 self._logger.verbose("Token expired; refreshing.")
@@ -383,7 +425,9 @@ class WizClient:
         """Load credentials based on configuration."""
         self._logger.debug("Attempting to preload credentials")
         if self._grant_type != "client_credentials":
-            self._logger.debug("Grant type is not client_credentials; skipping credential retrieval")
+            self._logger.debug(
+                "Grant type is not client_credentials; skipping credential retrieval"
+            )
             return
 
         try:
@@ -408,14 +452,18 @@ class WizClient:
         elif self.credential_storage == "prompt":
             self._load_credentials_from_prompt()
         else:
-            self._logger.warning(f"Unknown storage method [{self.credential_storage}]. Falling back to environment variables.")
+            self._logger.warning(
+                f"Unknown storage method [{self.credential_storage}]. Falling back to environment variables."
+            )
 
         if not self._client_id or not self._client_secret:
             self._load_credentials_from_env()
 
     def _load_credentials_from_file(self) -> None:
         """Load credentials from the credentials file."""
-        creds_file_path, creds_file = utils.parse_filepath(Config.credential_file_path())
+        creds_file_path, creds_file = utils.parse_filepath(
+            Config.credential_file_path()
+        )
         path = creds_file_path / (creds_file or "wiz.credentials")
 
         self._logger.verbose(f"Looking for credentials file: {path}")
@@ -425,9 +473,13 @@ class WizClient:
                 self._client_id = creds.get("client_id")
                 self._client_secret = creds.get("client_secret")
                 self._validate_environment_match(creds)
-                self._logger.verbose(f"Credentials loaded from file for profile: {self.profile}")
+                self._logger.verbose(
+                    f"Credentials loaded from file for profile: {self.profile}"
+                )
             else:
-                self._logger.warning(f"No credentials for profile {self.profile} found in file: {path}.")
+                self._logger.warning(
+                    f"No credentials for profile {self.profile} found in file: {path}."
+                )
 
     def _validate_environment_match(self, creds: Dict[str, Optional[str]]) -> None:
         """Validate that the loaded credentials match the expected environment."""
@@ -439,6 +491,7 @@ class WizClient:
     def _load_credentials_from_prompt(self) -> None:
         """Load credentials from user prompt."""
         import getpass
+
         self._client_id = input(f"{self.profile} Client ID: ").strip()
         self._client_secret = getpass.getpass(f"{self.profile} Client Secret: ").strip()
         self._logger.verbose("Credentials input from prompt.")
@@ -446,14 +499,20 @@ class WizClient:
     def _load_credentials_from_env(self) -> None:
         """Load credentials from environment variables."""
         self._logger.debug("Checking environment variables for credentials")
-        self._client_id = os.environ.get("WIZ_CLIENT_ID") or os.getenv(f"{self.profile}_WIZ_CLIENT_ID")
-        self._client_secret = os.environ.get("WIZ_CLIENT_SECRET") or os.getenv(f"{self.profile}_WIZ_CLIENT_SECRET")
+        self._client_id = os.environ.get("WIZ_CLIENT_ID") or os.getenv(
+            f"{self.profile}_WIZ_CLIENT_ID"
+        )
+        self._client_secret = os.environ.get("WIZ_CLIENT_SECRET") or os.getenv(
+            f"{self.profile}_WIZ_CLIENT_SECRET"
+        )
 
     def _validate_and_store_credentials(self) -> None:
         """Validate that credentials were loaded and store them in profile state."""
         if not self._client_id or not self._client_secret:
             self._logger.error("Credentials not found.")
-            raise WizCredentialsError("Failed to load credentials. Please check your credential configuration.")
+            raise WizCredentialsError(
+                "Failed to load credentials. Please check your credential configuration."
+            )
 
         self._profile_state.client_id = self._client_id
         self._profile_state.client_secret = self._client_secret
@@ -465,17 +524,21 @@ class WizClient:
     def _try_save_credentials_to_file(self) -> None:
         """Attempt to save credentials to file, logging warnings on failure."""
         try:
-            creds_file_path, creds_file = utils.parse_filepath(Config.credential_file_path())
+            creds_file_path, creds_file = utils.parse_filepath(
+                Config.credential_file_path()
+            )
             path = creds_file_path / (creds_file or "wiz.credentials")
             utils.write_credentials_to_file(
                 profile=self.profile,
                 client_id=self._client_id,
                 client_secret=self._client_secret,
                 environment=self.environment,
-                credentials_file=str(path)
+                credentials_file=str(path),
             )
         except Exception:
-            self._logger.warning("Failed to save credentials to file. Continuing without saving.")
+            self._logger.warning(
+                "Failed to save credentials to file. Continuing without saving."
+            )
 
     def _authenticate(self, refresh: bool = False) -> None:
         """Dispatch authentication to the appropriate grant-type handler."""
@@ -495,7 +558,9 @@ class WizClient:
             device_code_data = response.json()
             uri = device_code_data.get("verification_uri_complete")
             if uri:
-                webbrowser.open(uri + f"&quiet={Config.quiet_auth()}", new=0, autoraise=True)
+                webbrowser.open(
+                    uri + f"&quiet={Config.quiet_auth()}", new=0, autoraise=True
+                )
             else:
                 self._logger.warning("No verification_uri_complete in response.")
             device_code = device_code_data.get("device_code")
@@ -506,7 +571,7 @@ class WizClient:
                     url=auth_url,
                     headers=self._headers_auth,
                     data={"device_code": device_code},
-                    timeout=Config.api_timeout()
+                    timeout=Config.api_timeout(),
                 )
                 if token_response.status_code == 200:
                     token_data = token_response.json()
@@ -514,17 +579,25 @@ class WizClient:
                     self._profile_state.token_data = token_data
                     token_type = token_data.get("token_type", "Bearer")
                     access_token = token_data.get("access_token")
-                    self._env_state.headers["Authorization"] = f"{token_type} {access_token}"
+                    self._env_state.headers["Authorization"] = (
+                        f"{token_type} {access_token}"
+                    )
                     if access_token:
                         if self._decode_access_token(access_token):
-                            self._logger.verbose("Device code authentication successful")
+                            self._logger.verbose(
+                                "Device code authentication successful"
+                            )
                             return True
                 time.sleep(interval)
                 elapsed += interval
             raise WizTimeoutError("Timeout waiting for device code authentication")
         except TransportError as e:
-            self._logger.error(f"Network error during device code authentication: {e}", exc_info=True)
-            raise WizAPIError("Network error during device code authentication", original_error=e)
+            self._logger.error(
+                f"Network error during device code authentication: {e}", exc_info=True
+            )
+            raise WizAPIError(
+                "Network error during device code authentication", original_error=e
+            )
         except Exception as e:
             self._logger.error(f"Device code authentication failed: {e}", exc_info=True)
             raise WizAuthenticationError("Device code authentication failed", e)
@@ -534,22 +607,29 @@ class WizClient:
         self._logger.verbose("Authenticating via client credentials")
         auth_url = f"https://auth.{self._domain}/oauth/token"
         auth_payload = {
-            'grant_type': 'client_credentials',
-            'audience': 'wiz-api',
-            'client_id': self._profile_state.client_id,
-            'client_secret': self._profile_state.client_secret
+            "grant_type": "client_credentials",
+            "audience": "wiz-api",
+            "client_id": self._profile_state.client_id,
+            "client_secret": self._profile_state.client_secret,
         }
         try:
             proxy = self._proxies.get("https") or self._proxies.get("http")
-            response = transport_post(auth_url, data=auth_payload, headers=self._headers_auth, proxy=proxy)
+            response = transport_post(
+                auth_url, data=auth_payload, headers=self._headers_auth, proxy=proxy
+            )
             if response.status_code != 200:
-                self._logger.error(f"Failed to authenticate: {response.status_code} - {response.text}", exc_info=True)
+                self._logger.error(
+                    f"Failed to authenticate: {response.status_code} - {response.text}",
+                    exc_info=True,
+                )
                 raise WizAuthenticationError(
                     f"Authentication failed with status {response.status_code}: {response.text}"
                 )
             token_data = response.json()
             token_data["time_received"] = time.time()
-            token_data["expiry_time"] = token_data["time_received"] + token_data["expires_in"]
+            token_data["expiry_time"] = (
+                token_data["time_received"] + token_data["expires_in"]
+            )
             self._profile_state.token_data = token_data
             access_token = token_data.get("access_token")
             token_type = token_data.get("token_type", "Bearer")
@@ -558,12 +638,16 @@ class WizClient:
             self._logger.verbose("Client credentials authentication successful")
             return True
         except TransportError as e:
-            self._logger.error(f"Network error during authentication: {e}", exc_info=True)
+            self._logger.error(
+                f"Network error during authentication: {e}", exc_info=True
+            )
             raise WizAPIError("Network error during authentication", original_error=e)
         except WizAuthenticationError:
             raise
         except Exception as e:
-            self._logger.error(f"Client credentials authentication error: {e}", exc_info=True)
+            self._logger.error(
+                f"Client credentials authentication error: {e}", exc_info=True
+            )
             raise WizAuthenticationError("Client credentials authentication failed", e)
 
     def _decode_access_token(self, token: Optional[str]) -> bool:
@@ -571,10 +655,10 @@ class WizClient:
         if token:
             self._logger.debug("Decoding access token")
             try:
-                parts = token.split('.')
+                parts = token.split(".")
                 if len(parts) < 2:
                     raise ValueError("Invalid JWT")
-                padded = parts[1] + '=' * (-len(parts[1]) % 4)
+                padded = parts[1] + "=" * (-len(parts[1]) % 4)
                 payload = base64.urlsafe_b64decode(padded.encode())
                 data = json.loads(payload)
                 self.dc = data.get("dc")
@@ -606,10 +690,14 @@ class WizClient:
             try:
                 self._logger.debug("Loud Logging on")
                 if self._logger.console_handler.level != 15:
-                    self._logger.initial_console_level = self._logger.console_handler.level
+                    self._logger.initial_console_level = (
+                        self._logger.console_handler.level
+                    )
                     self._logger.console_handler.setLevel(15)
                 yield
-                self._logger.console_handler.setLevel(self._logger.initial_console_level)
+                self._logger.console_handler.setLevel(
+                    self._logger.initial_console_level
+                )
                 self._logger.debug("Loud Logging off")
             except Exception as e:
                 self._logger.error(f"Loud logging setup error: {e}", exc_info=True)
@@ -617,9 +705,16 @@ class WizClient:
         else:
             yield
 
-    def set_log_level(self, level: Union[str, int], handler_level: Optional[Union[str, int]] = None, include_children: bool = True) -> None:
+    def set_log_level(
+        self,
+        level: Union[str, int],
+        handler_level: Optional[Union[str, int]] = None,
+        include_children: bool = True,
+    ) -> None:
         """Update the SDK log level and refresh this client's logger reference."""
-        Config.set_log_level(level, handler_level=handler_level, include_children=include_children)
+        Config.set_log_level(
+            level, handler_level=handler_level, include_children=include_children
+        )
         self._logger = Config.get_logger()
 
     # ========== CLEANUP ==========

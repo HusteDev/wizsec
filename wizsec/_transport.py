@@ -22,18 +22,21 @@ import contextlib
 import httpx
 from typing import Optional, Dict, Any
 
-
 # ── Exception ────────────────────────────────────────────────────────
+
 
 class TransportError(Exception):
     """Wraps the underlying HTTP library's errors."""
 
-    def __init__(self, message: str, original_error: Optional[Exception] = None) -> None:
+    def __init__(
+        self, message: str, original_error: Optional[Exception] = None
+    ) -> None:
         super().__init__(message)
         self.original_error = original_error
 
 
 # ── Sync helpers ─────────────────────────────────────────────────────
+
 
 def post(
     url: str,
@@ -74,6 +77,7 @@ def stream_get(url: str) -> contextlib.AbstractContextManager[httpx.Response]:
 
 
 # ── Async client factory ─────────────────────────────────────────────
+
 
 def create_async_client(
     *,
