@@ -24,7 +24,7 @@ try:
     from importlib.metadata import version as get_version
 except ImportError:
     # Python <3.8 fallback (not typical in modern environments, but just in case)
-    from importlib_metadata import version as get_version
+    from importlib_metadata import version as get_version  # type: ignore[no-redef]
 
 from .version import __version__ as wizsec_version
 from ._logging import (
@@ -75,12 +75,12 @@ class Config:
                 [
                     path,
                     path.is_dir(),
-                    os.path.exists(path / filename),
                     filename,
                     isinstance(filename, str),
+                    os.path.exists(path / filename),  # type: ignore[operator]
                 ]
             ):
-                with open(path / filename, "r") as file:
+                with open(path / filename, "r") as file:  # type: ignore[operator]
                     cls._CONFIG = yaml.safe_load(file)
             else:
                 if not SERVERLESS:
@@ -103,7 +103,7 @@ class Config:
                 else:
                     continue
                 keys = key.split(".")
-                d = cls._CONFIG
+                d: Any = cls._CONFIG
                 for k in keys[:-1]:
                     if k not in d or not isinstance(d[k], dict):
                         d[k] = {}
@@ -116,6 +116,7 @@ class Config:
                 os.environ["WIZ_CLIENT_SECRET"] = client_secret
 
             if not cls.serverless():
+                assert cls._CONFIG is not None
                 config_version = cls._CONFIG.get("app", {}).get("release")
                 try:
                     library_version = get_version("wizsec")
@@ -159,6 +160,7 @@ class Config:
                 cls, DEFAULT_WIZ_DIR, parse_filepath, name="wizsec"
             )
 
+    @staticmethod
     def ensure_loaded(func: Callable) -> Callable:
         """Decorator that ensures Config.load() has been called before method execution."""
 
@@ -190,7 +192,7 @@ class Config:
             logger.handlers = list(base_logger.handlers)  # same handler objects
             logger.setLevel(base_logger.level)
             logger.propagate = False  # don’t bubble to root
-            logger._baselogger_initialized = True
+            logger._baselogger_initialized = True  # type: ignore[attr-defined]
         else:
             # keep level in sync with base, in case config changed on a warm start
             logger.setLevel(base_logger.level)
@@ -414,12 +416,12 @@ class Config:
             "http": (
                 f'{proxy_config.get("http", {}).get("url", "")}:{proxy_config.get("http", {}).get("port", "")}'
                 if proxy_config
-                else os.environ.get("HTTP_PROXY", None)
+                else os.environ.get("HTTP_PROXY")
             ),
             "https": (
                 f'{proxy_config.get("https", {}).get("url", "")}:{proxy_config.get("https", {}).get("port", "")}'
                 if proxy_config
-                else os.environ.get("HTTPS_PROXY", None)
+                else os.environ.get("HTTPS_PROXY")
             ),
         }
 

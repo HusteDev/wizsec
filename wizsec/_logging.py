@@ -28,8 +28,8 @@ def _register_verbose_level() -> None:
             if self.isEnabledFor(VERBOSE_LEVEL):
                 self._log(VERBOSE_LEVEL, message, args, **kwargs)
 
-        logging.Logger.verbose = _verbose
-        logging.VERBOSE = VERBOSE_LEVEL
+        logging.Logger.verbose = _verbose  # type: ignore[attr-defined]
+        logging.VERBOSE = VERBOSE_LEVEL  # type: ignore[attr-defined]
 
 
 class CustomFormatter(logging.Formatter):
@@ -69,8 +69,8 @@ class MarkdownFormatter(CustomFormatter):
 
 def _ensure_verbose_console_level(level: int, config: Any) -> int:
     """Lower the console level to VERBOSE if verbose mode is enabled."""
-    if config.verbose_mode() and level > logging.VERBOSE:
-        return logging.VERBOSE
+    if config.verbose_mode() and level > logging.VERBOSE:  # type: ignore[attr-defined]
+        return logging.VERBOSE  # type: ignore[attr-defined]
     return level
 
 
@@ -88,7 +88,7 @@ def _init_lambda_logger(level: int) -> logging.Logger:
     logger.addHandler(h)
     logger.setLevel(level)
     logger.propagate = False
-    logger._baselogger_initialized = True
+    logger._baselogger_initialized = True  # type: ignore[attr-defined]
     return logger
 
 
@@ -105,7 +105,7 @@ def _maybe_attach_console_handler(logger: logging.Logger, config: Any) -> None:
     fmt = "\r%(asctime)s [%(name)s::%(levelname)s]:   %(message)s\033[K"
     h.setFormatter(logging.Formatter(fmt=fmt, datefmt="%H:%M:%S"))
     logger.addHandler(h)
-    logger.console_handler = h
+    logger.console_handler = h  # type: ignore[attr-defined]
 
 
 def _maybe_attach_file_handler(
@@ -130,7 +130,7 @@ def _maybe_attach_file_handler(
     )
     path = log_dir / fname
 
-    logger.log_directory = log_dir
+    logger.log_directory = log_dir  # type: ignore[attr-defined]
 
     h = logging.FileHandler(filename=path, mode="w")
     lvl_name = str(config.file_handler_logging_level()).upper()
@@ -146,7 +146,7 @@ def _maybe_attach_file_handler(
         h.setFormatter(CustomFormatter(fmt=fmt, datefmt=datefmt))
 
     logger.addHandler(h)
-    logger.file_handler = h
+    logger.file_handler = h  # type: ignore[attr-defined]
 
 
 def logging_init(
@@ -197,11 +197,11 @@ def logging_init(
         logger.propagate = False
         _maybe_attach_console_handler(logger, config)
         _maybe_attach_file_handler(logger, config, default_wiz_dir, parse_filepath_fn)
-        logger._baselogger_initialized = True
+        logger._baselogger_initialized = True  # type: ignore[attr-defined]
     else:
         logger.setLevel(base_level)
 
-    logger.verbose(
+    logger.verbose(  # type: ignore[attr-defined]
         "Logging enabled: %s | Root Level: %s | Debug Mode: %s | Verbose Logging: %s | File Logging: %s",
         config.logging_enabled(),
         config.logger_min_level(),

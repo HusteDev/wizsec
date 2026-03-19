@@ -46,7 +46,7 @@ class _RequestBase:
         self._logger = Config.get_logger()
         self._client = client
         self.vars = vars or {}
-        self._response = None
+        self._response: Optional[Dict[str, Any]] = None
         self.errors: List[Dict[str, Any]] = []
         self.data: Optional[Dict[str, Any]] = None
         self._status_code = None
@@ -56,7 +56,7 @@ class _RequestBase:
         self._page = 0
         self._aggregated_data: Optional[Dict[str, Any]] = None
 
-        self._queryCollection = None
+        self._queryCollection: Optional[Any] = None
         if queryCollection:
             self.queryCollection = queryCollection
 
@@ -270,6 +270,7 @@ class WizRequest(_RequestBase):
     ) -> bool:
         """Process a successful HTTP response. Returns True if processing is complete."""
         self._response = response.json()
+        assert self._response is not None
         self.errors.extend(self._response.get("errors", []))
         page_data = self._response.get("data", {})
         self._merge_page(page_data)
@@ -290,6 +291,7 @@ class WizRequest(_RequestBase):
 
     def _handle_serverless_pagination(self, url: str, headers: Dict[str, str]) -> bool:
         """Handle pagination in serverless mode."""
+        assert self._response is not None
         if self._paginate and not self.errors:
             page_data = self._response.get("data", {})
             info = self._page_info(page_data)
@@ -393,6 +395,7 @@ class WizRequest(_RequestBase):
 
     def _report_workflow(self, response: Any) -> Optional["WizRequest"]:
         """Poll for report completion and download/stream the result."""
+        assert self._response is not None
         self._report_id = self._response["data"]["createReport"]["report"]["id"]
         self.query = """query ReportDownloadUrl($reportId: ID!) {report(id: $reportId) { name lastRun {url status progress runAt}}}"""
         self.vars = {"reportId": self._report_id}
@@ -404,6 +407,7 @@ class WizRequest(_RequestBase):
                 time.sleep(self._client._query_retry_time)
                 continue
 
+            assert polling_response.data is not None
             last_run = polling_response.data["report"]["lastRun"]
             status = last_run["status"]
             progress = last_run["progress"]
@@ -417,6 +421,7 @@ class WizRequest(_RequestBase):
                         {"message": "No download URL found in final report status."}
                     )
                     return self
+                assert self.data is not None
                 if self.stream_report:
                     self._logger.info("Streaming report")
                     self.data["report_data"] = list(
@@ -668,12 +673,12 @@ class WizBatchRequest:
         for i, request in enumerate(self._requests):
             # Wrap the original done event to track batch completion
             original_done_event = getattr(request, "_done_event", None)
-            request._batch_id = i
-            request._batch_parent = self
+            request._batch_id = i  # type: ignore[attr-defined]
+            request._batch_parent = self  # type: ignore[attr-defined]
 
             # Replace or set the done event handler
             if original_done_event:
-                request._original_done_event = original_done_event
+                request._original_done_event = original_done_event  # type: ignore[attr-defined]
             request._done_event = threading.Event()
 
         # Submit requests to the queue (rate limiting happens in the client)
@@ -856,7 +861,7 @@ class AsyncWizRequest(_RequestBase):
                 "Async session not initialized. Use client.async_session() context manager."
             )
 
-        client = self._client._async_session
+        client = self._client._async_session  # type: ignore[attr-defined]
         semaphore = getattr(self._client, "_async_semaphore", asyncio.Semaphore(10))
         limiter = self._client._get_limiter(self._limiter_key)
 
@@ -978,7 +983,7 @@ class AsyncWizBatchRequest:
 
         # Ensure we have an async semaphore on the client
         if not hasattr(client, "_async_semaphore"):
-            client._async_semaphore = asyncio.Semaphore(max_concurrent)
+            client._async_semaphore = asyncio.Semaphore(max_concurrent)  # type: ignore[attr-defined]
 
     def add_request(
         self,
@@ -1032,9 +1037,9 @@ class AsyncWizBatchRequest:
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Process results
-        response_map = {}
+        response_map: Dict[int, "AsyncWizResponse"] = {}
         for result in results:
-            if isinstance(result, Exception):
+            if isinstance(result, BaseException):
                 self._logger.error(f"Batch request failed: {result}")
                 # Create failed response
                 # This would need error handling logic
@@ -1042,7 +1047,7 @@ class AsyncWizBatchRequest:
                 index, response = result
                 response_map[index] = response
 
-        return WizBatchResponse(response_map)
+        return WizBatchResponse(response_map)  # type: ignore[arg-type]
 
     def clear(self) -> None:
         """Clear all requests from the batch."""

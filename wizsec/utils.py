@@ -25,6 +25,8 @@ import mimetypes
 from graphql import parse
 from graphql.language import print_ast
 from graphql.language.ast import (
+    FieldNode,
+    OperationDefinitionNode,
     VariableDefinitionNode,
     NamedTypeNode,
     NameNode,
@@ -68,13 +70,16 @@ def resource_path(relative_path: str) -> str:
 
 
 def safe_write_json(
-    data: Any, filename: str, save_path: Path, temp_path: Path = DEFAULT_TEMP_FOLDER
+    data: Any,
+    filename: str,
+    save_path: Path,
+    temp_path: Union[str, Path] = DEFAULT_TEMP_FOLDER,
 ) -> None:
     """Write data as JSON atomically via a temp file, then move into place."""
     logger = Config.get_logger()
     original = Path(filename)
     temp_filename = f"{original.stem}_temp{original.suffix}"
-    temp_file = temp_path / temp_filename
+    temp_file = Path(temp_path) / temp_filename
 
     def serialize_object(obj: Any) -> Any:
         """Fallback serializer for json.dump: use vars() or str()."""
@@ -139,7 +144,7 @@ def dump_to_json(
                 Path(temp_directory).mkdir(parents=True, exist_ok=True)
 
             if save_directory.is_file() and filename:
-                save_directory = save_directory.parents
+                save_directory = save_directory.parent
                 temp_directory = (
                     temp_directory if temp_directory else save_directory / "temp"
                 )
@@ -164,12 +169,12 @@ def dump_to_json(
                         or sys.getsizeof(data) <= 100000
                         or not allow_pickle
                     ):
-                        result = None
+                        result: Any = None
                         if isinstance(data, (list, tuple)):
                             if all([isinstance(row, list) for row in data]) and (
                                 len(data[0]) < len(set(data[0]))
                             ):
-                                header_count = {}
+                                header_count: Dict[Any, int] = {}
                                 unique_headers = [
                                     (
                                         header
@@ -200,8 +205,7 @@ def dump_to_json(
                         else:
                             logger.warning(
                                 "File is very large [%s KB]. \n Recommend enabling pickle from the configuration file to save this file."
-                                % sys.getsizeof(data)
-                                / 1024
+                                % (sys.getsizeof(data) / 1024)
                             )
                     break
 
@@ -229,7 +233,7 @@ def dump_to_json(
         logger.debug("No Data to save")
 
 
-def store_data(data: Any, file_path: Optional[str] = None) -> Any:
+def store_data(data: Any, file_path: Union[str, Path, None] = None) -> Any:
     """Pickle data to disk and return it."""
     import pickle
     import mimetypes
@@ -248,7 +252,12 @@ def store_data(data: Any, file_path: Optional[str] = None) -> Any:
 
 def return_formatted_duration(duration: float) -> str:
     """Convert a duration in seconds to a human-readable string (e.g. '2 hours, 3 minutes')."""
-    formatted_duration = {"hour": "", "minute": "", "second": "", "millisecond": ""}
+    formatted_duration: Dict[str, Union[str, int]] = {
+        "hour": "",
+        "minute": "",
+        "second": "",
+        "millisecond": "",
+    }
     hours = duration // 3600
     remaining_duration = duration % 3600
 
@@ -269,7 +278,7 @@ def return_formatted_duration(duration: float) -> str:
 
     formatted_parts = []
     for key, value in formatted_duration.items():
-        if value:
+        if isinstance(value, int) and value > 0:
             formatted_parts.append(f"{value} {key}{'s' if value > 1 else ''}")
 
     return ", ".join(formatted_parts)
@@ -277,7 +286,7 @@ def return_formatted_duration(duration: float) -> str:
 
 def extract_fields(selection_set: Any) -> Dict[str, Any]:
     """Recursively extract fields from a GraphQL selection set."""
-    fields = {}
+    fields: Dict[str, Any] = {}
     for selection in selection_set.selections:
         if selection.kind == "field":
             name = selection.name.value
@@ -305,6 +314,7 @@ def parse_query_metadata(query: str) -> Dict[str, Any]:
 
     for definition in document.definitions:
         if definition.kind == "operation_definition":
+            assert isinstance(definition, OperationDefinitionNode)
             request_type = str(definition.operation).split(".")[-1]
             request_name = definition.name.value if definition.name else ""
             fields = extract_fields(definition.selection_set)
@@ -336,6 +346,7 @@ def ensure_pagination_variables(query: str) -> str:
     for definition in document.definitions:
         if definition.kind != "operation_definition":
             continue
+        assert isinstance(definition, OperationDefinitionNode)
         if str(definition.operation).split(".")[-1].lower() != "query":
             continue
 
@@ -347,14 +358,14 @@ def ensure_pagination_variables(query: str) -> str:
             return query
 
         # Find the paginated field (has both 'nodes' and 'pageInfo' subfields)
-        paginated_field = None
+        paginated_field: Optional[FieldNode] = None
         for selection in definition.selection_set.selections:
-            if selection.kind != "field" or not selection.selection_set:
+            if not isinstance(selection, FieldNode) or not selection.selection_set:
                 continue
             child_names = {
                 s.name.value
                 for s in selection.selection_set.selections
-                if s.kind == "field"
+                if isinstance(s, FieldNode)
             }
             if "nodes" in child_names and "pageInfo" in child_names:
                 paginated_field = selection
@@ -384,10 +395,14 @@ def ensure_pagination_variables(query: str) -> str:
 
         # Rebuild the AST with injected variable and argument
         new_doc = copy.deepcopy(document)
-        new_defn = new_doc.definitions[document.definitions.index(definition)]
-        new_defn.variable_definitions = tuple(new_var_defs)
-        for sel in new_defn.selection_set.selections:
-            if sel.kind == "field" and sel.name.value == paginated_field.name.value:
+        new_defn_node = new_doc.definitions[document.definitions.index(definition)]
+        assert isinstance(new_defn_node, OperationDefinitionNode)
+        new_defn_node.variable_definitions = tuple(new_var_defs)
+        for sel in new_defn_node.selection_set.selections:
+            if (
+                isinstance(sel, FieldNode)
+                and sel.name.value == paginated_field.name.value
+            ):
                 sel.arguments = tuple(new_args)
                 break
         return print_ast(new_doc)
@@ -478,6 +493,8 @@ def is_in_last_x_intervals(
 
     if isinstance(timestamp_str, str):
         time_format = determine_time_format(timestamp_str)
+        if time_format is None:
+            raise ValueError(f"Unable to determine time format for: {timestamp_str}")
         given_time = datetime.strptime(timestamp_str, time_format)
         if given_time.tzinfo is None:
             given_time = given_time.replace(tzinfo=timezone.utc)

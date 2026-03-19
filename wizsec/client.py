@@ -34,8 +34,13 @@ from ._registry import EnvironmentRegistry, ProfileRegistry
 from ._transport import post as transport_post, create_async_client, TransportError
 
 if TYPE_CHECKING:
-    from ._request import WizRequest
-    from ._request import WizResponse
+    from ._request import (
+        WizRequest,
+        WizResponse,
+        WizBatchRequest,
+        AsyncWizResponse,
+        AsyncWizBatchRequest,
+    )
 
 
 class WizClient:
@@ -336,7 +341,7 @@ class WizClient:
                         timeout=Config.api_timeout(),
                         verify=verify,
                     )
-                self._sync_client._async_session = self._async_client
+                self._sync_client._async_session = self._async_client  # type: ignore[attr-defined]
                 return self._sync_client
 
             async def __aexit__(
@@ -389,7 +394,7 @@ class WizClient:
 
     # ========== RATE LIMITING ==========
 
-    def _limiter_key(self, request: Optional["WizRequest"] = None) -> str:
+    def _limiter_key(self, request: Optional[Any] = None) -> str:
         """Build the rate-limiter key based on request type and account type."""
         info = getattr(request, "_current_query_info", {}) or {}
         qtype = str(info.get("request_type", "query")).lower()
@@ -470,8 +475,8 @@ class WizClient:
         if path.exists():
             creds = utils.load_credentials_from_file(self.profile, str(path))
             if creds:
-                self._client_id = creds.get("client_id")
-                self._client_secret = creds.get("client_secret")
+                self._client_id = creds.get("client_id") or ""
+                self._client_secret = creds.get("client_secret") or ""
                 self._validate_environment_match(creds)
                 self._logger.verbose(
                     f"Credentials loaded from file for profile: {self.profile}"
@@ -499,11 +504,15 @@ class WizClient:
     def _load_credentials_from_env(self) -> None:
         """Load credentials from environment variables."""
         self._logger.debug("Checking environment variables for credentials")
-        self._client_id = os.environ.get("WIZ_CLIENT_ID") or os.getenv(
-            f"{self.profile}_WIZ_CLIENT_ID"
+        self._client_id = (
+            os.environ.get("WIZ_CLIENT_ID")
+            or os.getenv(f"{self.profile}_WIZ_CLIENT_ID")
+            or ""
         )
-        self._client_secret = os.environ.get("WIZ_CLIENT_SECRET") or os.getenv(
-            f"{self.profile}_WIZ_CLIENT_SECRET"
+        self._client_secret = (
+            os.environ.get("WIZ_CLIENT_SECRET")
+            or os.getenv(f"{self.profile}_WIZ_CLIENT_SECRET")
+            or ""
         )
 
     def _validate_and_store_credentials(self) -> None:
