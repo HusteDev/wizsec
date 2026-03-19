@@ -6,7 +6,7 @@ The SDK uses a YAML config file at `~/.wiz/wiz.config`. If it doesn't exist, one
 
 ```yaml
 app:
-  name: wiz-sdk
+  name: wizsec
   release: 1.0.0
   # serverless: false           # Lambda/serverless mode
   # wiz_dir: ""                 # Override ~/.wiz directory
@@ -68,7 +68,7 @@ app:
 ### Changing Log Level
 
 ```python
-from wiz_sdk import Config
+from wizsec import Config
 
 Config.load()
 Config.set_log_level("DEBUG")

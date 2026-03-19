@@ -11,7 +11,7 @@ import asyncio
 import sys
 import threading
 import time
-from wiz_sdk import WizClient, Config
+from wizsec import WizClient, Config
 
 Config.load()
 client = WizClient()
@@ -37,7 +37,7 @@ def example_page_callback():
                 }
             }
         """,
-        vars={"first": 50},
+        vars={"first": 100},
         on_page_event=on_page,
     ).submit()
 
@@ -74,7 +74,7 @@ def example_spinner_progress():
                     }
                 }
             """,
-            vars={"first": 100},
+            vars={"first": 25},
             on_page_event=on_page,
         ).submit()
         progress["done"] = True
@@ -129,7 +129,7 @@ async def example_async_progress():
             query="""
                 query ListProjects($first: Int) {
                     projects(first: $first) {
-                        nodes { id name businessImpact }
+                        nodes { id name slug }
                         pageInfo { hasNextPage endCursor }
                     }
                 }
@@ -139,7 +139,7 @@ async def example_async_progress():
         )
         result = await request.submit()
 
-    if result.success():
+    if result.success:
         total = len(result.data["projects"]["nodes"])
         print(f"  Done! {total} projects in {pages_fetched} pages\n")
     else:

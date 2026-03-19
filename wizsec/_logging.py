@@ -13,10 +13,10 @@ import logging
 import sys
 from datetime import date, datetime
 from pathlib import Path
-from typing import Union
+from typing import Any, Callable, Union
 
 VERBOSE_LEVEL = 15  # Between INFO (20) and DEBUG (10)
-BASE_LOGGER_NAME = "wiz_sdk"
+BASE_LOGGER_NAME = "wizsec"
 
 
 def _register_verbose_level() -> None:
@@ -33,7 +33,10 @@ def _register_verbose_level() -> None:
 
 
 class CustomFormatter(logging.Formatter):
-    def formatTime(self, record, datefmt=None):
+    """Formatter that uses datetime for microsecond-precision timestamps."""
+
+    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
+        """Format the record's creation time with microsecond precision."""
         ct = datetime.fromtimestamp(record.created)
         if datefmt:
             return ct.strftime(datefmt)
@@ -42,9 +45,12 @@ class CustomFormatter(logging.Formatter):
 
 
 class MarkdownFormatter(CustomFormatter):
-    header_written = False
+    """Formatter that outputs log records as Markdown table rows."""
 
-    def format(self, record):
+    header_written: bool = False
+
+    def format(self, record: logging.LogRecord) -> str:
+        """Format the record as a Markdown table row, prepending the header on first call."""
         formatted_message = super().format(record)
         markdown_message = formatted_message
 
@@ -59,13 +65,15 @@ class MarkdownFormatter(CustomFormatter):
         return markdown_message
 
 
-def _ensure_verbose_console_level(level: int, config) -> int:
+def _ensure_verbose_console_level(level: int, config: Any) -> int:
+    """Lower the console level to VERBOSE if verbose mode is enabled."""
     if config.verbose_mode() and level > logging.VERBOSE:
         return logging.VERBOSE
     return level
 
 
 def _init_lambda_logger(level: int) -> logging.Logger:
+    """Initialize a minimal stdout logger for serverless/Lambda environments."""
     logger = logging.getLogger(BASE_LOGGER_NAME)
     if getattr(logger, "_baselogger_initialized", False):
         logger.setLevel(level)
@@ -82,7 +90,8 @@ def _init_lambda_logger(level: int) -> logging.Logger:
     return logger
 
 
-def _maybe_attach_console_handler(logger: logging.Logger, config) -> None:
+def _maybe_attach_console_handler(logger: logging.Logger, config: Any) -> None:
+    """Attach a console (stdout) handler to the logger if enabled in config."""
     if not config.console_handler_enabled():
         return
     lvl_name = str(config.console_handler_logging_level()).upper()
@@ -97,7 +106,13 @@ def _maybe_attach_console_handler(logger: logging.Logger, config) -> None:
     logger.console_handler = h
 
 
-def _maybe_attach_file_handler(logger: logging.Logger, config, default_wiz_dir, parse_filepath_fn) -> None:
+def _maybe_attach_file_handler(
+    logger: logging.Logger,
+    config: Any,
+    default_wiz_dir: Path,
+    parse_filepath_fn: Callable[..., Any],
+) -> None:
+    """Attach a file handler to the logger if file logging is enabled."""
     if not (config.file_logging_enabled() and not config.serverless()):
         return
 
@@ -130,7 +145,12 @@ def _maybe_attach_file_handler(logger: logging.Logger, config, default_wiz_dir, 
     logger.file_handler = h
 
 
-def logging_init(config, default_wiz_dir, parse_filepath_fn, name: str = BASE_LOGGER_NAME) -> logging.Logger:
+def logging_init(
+    config: Any,
+    default_wiz_dir: Path,
+    parse_filepath_fn: Callable[..., Any],
+    name: str = BASE_LOGGER_NAME,
+) -> logging.Logger:
     """Initialize or return the library logger.
 
     Args:

@@ -6,7 +6,7 @@ requires = [
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "wiz-sdk"
+name = "wizsec"
 dynamic = ["version"]
 description = "A custom SDK for the Wiz API"
 readme = "README.md"
@@ -35,8 +35,8 @@ classifiers = [
 ]
 
 [project.urls]
-homepage = "https://github.com/HusteDev/wiz-sdk"
-repository = "https://github.com/HusteDev/wiz-sdk"
+homepage = "https://github.com/HusteDev/wizsec"
+repository = "https://github.com/HusteDev/wizsec"
 
 [project.optional-dependencies]
 dev = [
@@ -51,13 +51,15 @@ docs = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["wiz_sdk", "wiz_sdk.*"]
+include = ["wizsec", "wizsec.*"]
 
 [tool.setuptools.package-data]
-wiz_sdk = ["py.typed", "wiz.config.template"]
+wizsec = ["py.typed", "wiz.config.template"]
 
 [tool.setuptools_scm]
-version_file = "wiz_sdk/version.py"
+version_file = "wizsec/version.py"
+version_scheme = "post-release"
+local_scheme = "no-local-version"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

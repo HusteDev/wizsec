@@ -1,14 +1,14 @@
 ##
-## 
-##   WW       WW  IIIIIII  ZZZZZZZ       SSSSS    DDDDD    K   K
-##   WW       WW     I         ZZ       SS        D    D   K  K
-##   WW   W   WW     I       ZZ           SSSS    D    D   KKK
-##    WW WWW WW      I      ZZ               SS   D    D   K  K
-##     WW   WW    IIIIIII  ZZZZZZZ_______SSSSS    DDDDD    K   K
+##
+##   W       W  IIIIIII  ZZZZZZZ   SSSSS   EEEEE    CCCCC
+##   W       W     I         ZZ   S       E       C
+##   W   W   W     I       ZZ     SSSSS   EEEEE   C
+##    W WWW W      I      ZZ          S   E       C
+##     W   W    IIIIIII  ZZZZZZZ  SSSSS   EEEEE    CCCCC
 ##
 ##
 ## Author: James Husted             Email: james@husted.dev
-## Repo: https://github.com/HusteDev/wiz-sdk
+## Repo: https://github.com/HusteDev/wizsec
 ##
 
 # __init__.py

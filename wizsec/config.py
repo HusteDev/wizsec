@@ -18,18 +18,18 @@ import logging
 import tempfile
 import inspect
 from functools import wraps
-from typing import Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 try:
     from importlib.metadata import version as get_version
 except ImportError:
     # Python <3.8 fallback (not typical in modern environments, but just in case)
     from importlib_metadata import version as get_version
 
-from .version import __version__ as wiz_sdk_version
+from .version import __version__ as wizsec_version
 from ._logging import logging_init as _logging_init, parse_level as _parse_level, BASE_LOGGER_NAME
 
-LIBRARY_NAME = "wiz-sdk"
-CURRENT_VERSION = wiz_sdk_version
+LIBRARY_NAME = "wizsec"
+CURRENT_VERSION = wizsec_version
 
 # _CONFIG = None
 SERVERLESS = str(os.environ.get("WIZ_SERVERLESS", "")).lower() in ("1", "true", "yes") or bool(os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
@@ -42,8 +42,16 @@ class Config:
     _loaded = False
 
     @classmethod
-    def load(cls, config_path: str = None, overrides: dict = None,
-             client_id: str = None, client_secret: str = None):
+    def load(cls, config_path: Optional[str] = None, overrides: Optional[Dict[str, str]] = None,
+             client_id: Optional[str] = None, client_secret: Optional[str] = None) -> None:
+        """Load configuration from YAML file, applying overrides and credential env vars.
+
+        Args:
+            config_path: Path to the YAML config file. Defaults to ~/.wiz/wiz.config.
+            overrides: Dot-notation key=value strings to override config values.
+            client_id: If provided, sets WIZ_CLIENT_ID environment variable.
+            client_secret: If provided, sets WIZ_CLIENT_SECRET environment variable.
+        """
         if cls._CONFIG is None:
             config_path = config_path or str(DEFAULT_WIZ_DIR / "wiz.config")
             path, filename = parse_filepath(str(config_path))
@@ -84,7 +92,7 @@ class Config:
             if not cls.serverless():
                 config_version = cls._CONFIG.get("app", {}).get("release")
                 try:
-                    library_version = get_version("wiz_sdk")
+                    library_version = get_version("wizsec")
                     if config_version != library_version:
                         sys.stdout.write(f"Warning: Config file version [{config_version}] doesn't match the installed library version [{library_version}]\n")
                         sys.stdout.flush()
@@ -112,11 +120,12 @@ class Config:
                         os.environ['REQUESTS_CA_BUNDLE'] = existing_cert
         cls._loaded = True
         if cls._logger is None:
-            cls._logger = _logging_init(cls, DEFAULT_WIZ_DIR, parse_filepath, name="wiz_sdk")
+            cls._logger = _logging_init(cls, DEFAULT_WIZ_DIR, parse_filepath, name="wizsec")
 
-    def ensure_loaded(func):
+    def ensure_loaded(func: Callable) -> Callable:
+        """Decorator that ensures Config.load() has been called before method execution."""
         @wraps(func)
-        def wrapper(cls, *args, **kwargs):
+        def wrapper(cls: "Config", *args: Any, **kwargs: Any) -> Any:
             if not cls._loaded:
                 cls.load()
             return func(cls, *args, **kwargs)
@@ -126,6 +135,7 @@ class Config:
     @classmethod
     @ensure_loaded
     def get_logger(cls) -> logging.Logger:
+        """Return a child logger named after the calling module."""
         base_logger = cls._logger or _logging_init(cls, DEFAULT_WIZ_DIR, parse_filepath)
 
         # Determine caller’s module to create a child-like name
@@ -151,7 +161,8 @@ class Config:
     
     @classmethod
     @ensure_loaded
-    def load_dotenv(cls):
+    def load_dotenv(cls) -> None:
+        """Load environment variables from the .env file in the configured env_path."""
         if cls.serverless():
             return  # skip loading files in serverless mode
         from dotenv import load_dotenv
@@ -162,7 +173,13 @@ class Config:
 
     @classmethod
     @ensure_loaded
-    def get(cls, *keys, default=None):
+    def get(cls, *keys: str, default: Any = None) -> Any:
+        """Retrieve a nested config value by key path.
+
+        Args:
+            *keys: Sequence of keys to traverse in the config dict.
+            default: Value returned when the key path is not found.
+        """
         d = cls._CONFIG
         for key in keys:
             d = d.get(key, {}) if isinstance(d, dict) else {}
@@ -185,7 +202,7 @@ class Config:
 
         - `level`: logger level for base and children (e.g. 'DEBUG', 20, 'VERBOSE')
         - `handler_level`: optional handler threshold; defaults to `level`
-        - `include_children`: also retune wiz_sdk.<module> child loggers
+        - `include_children`: also retune wizsec.<module> child loggers
 
         Returns the effective base level as an int.
         """
@@ -228,21 +245,25 @@ class Config:
     ############
     @classmethod
     @ensure_loaded
-    def app_name(cls):
-        return cls.get("app", "name", default="wiz_sdk")
+    def app_name(cls) -> str:
+        """Return the configured application name."""
+        return cls.get("app", "name", default="wizsec")
 
     @classmethod
     @ensure_loaded
-    def release_version(cls):
+    def release_version(cls) -> str:
+        """Return the configured release version string."""
         return cls.get("app", "release", default="0.0.0")
 
     @classmethod
-    def serverless(cls):
+    def serverless(cls) -> bool:
+        """Return whether the SDK is running in serverless mode."""
         return SERVERLESS
     
     @classmethod
     @ensure_loaded
-    def wiz_dir(cls):
+    def wiz_dir(cls) -> Path:
+        """Return the resolved Wiz configuration directory path."""
         if cls.serverless():
             return Path("/tmp")
         filepath, _ = parse_filepath( cls.get("app", "wiz_dir", default=DEFAULT_WIZ_DIR))
@@ -251,7 +272,8 @@ class Config:
     
     @classmethod
     @ensure_loaded
-    def env_path(cls):
+    def env_path(cls) -> Path:
+        """Return the resolved path to the .env file directory."""
         filepath, _ = parse_filepath( cls.get("app", "env_path", default=f"{CWD}"))
         cls.get_logger().debug(f"Resolved env_path: {filepath}")
         return filepath
@@ -261,14 +283,16 @@ class Config:
     ############
     @classmethod
     @ensure_loaded
-    def saved_data_enabled(cls):
+    def saved_data_enabled(cls) -> bool:
+        """Return whether saved data persistence is enabled."""
         if cls.serverless():
             return False
         return cls.get("saved_data", "enabled", default=True)
 
     @classmethod
     @ensure_loaded
-    def saved_data_directory(cls):
+    def saved_data_directory(cls) -> Path:
+        """Return the resolved directory path for saved data output."""
         if cls.serverless():
             return Path("/tmp")
         filepath, _ = parse_filepath(cls.get("saved_data", "directory", default=f"{CWD}/saved-data"))
@@ -276,7 +300,8 @@ class Config:
 
     @classmethod
     @ensure_loaded
-    def saved_data_temp_directory(cls): 
+    def saved_data_temp_directory(cls) -> Path:
+        """Return the resolved temporary directory path for saved data."""
         if cls.serverless():
             return Path("/tmp")
         filepath, _ = parse_filepath(cls.get("saved_data", "temp", default=DEFAULT_TEMP_FOLDER))
@@ -284,7 +309,8 @@ class Config:
 
     @classmethod
     @ensure_loaded
-    def saved_data_pickle_enabled(cls): 
+    def saved_data_pickle_enabled(cls) -> bool:
+        """Return whether pickle serialization is enabled for saved data."""
         if cls.serverless():
             return False
         return cls.get("saved_data", "pickle", default=False)
@@ -294,41 +320,48 @@ class Config:
     ############
     @classmethod
     @ensure_loaded
-    def grant_type(cls):
+    def grant_type(cls) -> str:
+        """Return the configured OAuth grant type."""
         if cls.serverless():
             return "client_credentials"
         return cls.get("auth", "grant_type", default="client_credentials")
     
     @classmethod
     @ensure_loaded
-    def storage_method(cls):
+    def storage_method(cls) -> str:
+        """Return the credential storage method (file, env, or prompt)."""
         return cls.get("auth", "credentials", "storage_method", default="file")
     
     @classmethod
     @ensure_loaded
-    def credential_file_path(cls):
+    def credential_file_path(cls) -> Path:
+        """Return the resolved path to the credentials file directory."""
         filepath, _ = parse_filepath(cls.get("auth", "credentials", "file_path", default=f"{DEFAULT_WIZ_DIR}"))
         cls.get_logger().debug(f"Resolved credential file path: {filepath}")
         return filepath
 
     @classmethod
     @ensure_loaded
-    def ca_cert(cls):
+    def ca_cert(cls) -> str:
+        """Return the configured CA certificate path."""
         return cls.get("auth", "ca_cert", default="")
     
     @classmethod
     @ensure_loaded
-    def quiet_auth(cls):
+    def quiet_auth(cls) -> str:
+        """Return whether device-code auth should suppress browser prompts."""
         return cls.get("auth", "device", "quiet", default="true")
     
     @classmethod
     @ensure_loaded
-    def auth_poll_time(cls):
+    def auth_poll_time(cls) -> int:
+        """Return the polling interval in seconds for device-code auth."""
         return int(cls.get("auth", "device", "poll_time", default=5))
 
     @classmethod
     @ensure_loaded
-    def get_proxies(cls):
+    def get_proxies(cls) -> Dict[str, Optional[str]]:
+        """Return a dict of HTTP/HTTPS proxy URLs from config or environment."""
         if cls.serverless():
             return {"https": os.environ.get("HTTPS_PROXY")}
         proxy_config = cls.get("auth", "proxy", default={})
@@ -348,17 +381,20 @@ class Config:
     ############
     @classmethod
     @ensure_loaded
-    def default_domain(cls):
+    def default_domain(cls) -> str:
+        """Return the default Wiz domain identifier."""
         return cls.get("domain", "default", default="gov")
     
     @classmethod
     @ensure_loaded
-    def domain_enabled(cls, domain):
+    def domain_enabled(cls, domain: str) -> bool:
+        """Return whether the specified domain is enabled in config."""
         return cls.get("domain", domain, "enabled", default=False)
 
     @classmethod
     @ensure_loaded
-    def domain_root(cls, env):
+    def domain_root(cls, env: str) -> Optional[str]:
+        """Return the root domain string for the given environment identifier."""
         root_domains = {
             "app"       :   "app.wiz.io",
             "gov"       :   "gov.wiz.io",
@@ -371,22 +407,26 @@ class Config:
     ############
     @classmethod
     @ensure_loaded
-    def api_max_retries(cls):
+    def api_max_retries(cls) -> int:
+        """Return the maximum number of API request retries."""
         return cls.get("api", "max_retries", default=5)
     
     @classmethod
     @ensure_loaded
-    def api_retry(cls):
+    def api_retry(cls) -> int:
+        """Return the retry delay in seconds between API attempts."""
         return cls.get("api", "retry_time", default=2)
 
     @classmethod
     @ensure_loaded
-    def api_timeout(cls):
+    def api_timeout(cls) -> int:
+        """Return the API request timeout in seconds."""
         return cls.get("api", "timeout", default=180)
 
     @classmethod
     @ensure_loaded
-    def validate_queries(cls):
+    def validate_queries(cls) -> bool:
+        """Return whether GraphQL query validation is enabled."""
         return cls.get("api", "validate_queries", default=False)
 
     ############
@@ -394,44 +434,52 @@ class Config:
     ############
     @classmethod
     @ensure_loaded
-    def report_stream_by_default(cls):
+    def report_stream_by_default(cls) -> bool:
+        """Return whether reports should stream results by default."""
         return cls.get("reports", "stream_by_default", default=True)
 
     @classmethod
     @ensure_loaded
-    def report_export_directory(cls):
+    def report_export_directory(cls) -> Path:
+        """Return the resolved directory path for report exports."""
         filepath, _ = parse_filepath(cls.get("reports", "export_directory", default=f"{CWD}"))
         cls.get_logger().debug(f"Resolved report export directory: {filepath}")
         return filepath
 
     @classmethod
     @ensure_loaded
-    def report_export_type(cls):
+    def report_export_type(cls) -> str:
+        """Return the default export format for reports."""
         return cls.get("reports", "export_type", default="json")
 
     @classmethod
     @ensure_loaded
-    def report_retry_time(cls):
+    def report_retry_time(cls) -> int:
+        """Return the retry delay in seconds for report operations."""
         return cls.get("reports", "retry_time", default=30)
 
     @classmethod
     @ensure_loaded
-    def report_max_retries(cls):
+    def report_max_retries(cls) -> int:
+        """Return the maximum number of retries for report operations."""
         return cls.get("reports", "max_retries", default=3)
 
     @classmethod
     @ensure_loaded
-    def report_polling_time(cls):
+    def report_polling_time(cls) -> int:
+        """Return the polling interval in seconds for report status checks."""
         return cls.get("reports", "polling_time", default=15)
 
     @classmethod
     @ensure_loaded
-    def report_auto_cleanup(cls):
+    def report_auto_cleanup(cls) -> bool:
+        """Return whether automatic report cleanup is enabled."""
         return cls.get("reports", "auto_cleanup", default=False)
 
     @classmethod
     @ensure_loaded
-    def report_save_incomplete(cls):
+    def report_save_incomplete(cls) -> bool:
+        """Return whether incomplete reports should be saved to disk."""
         return cls.get("reports", "save_incomplete_reports", default=True)
 
     ############
@@ -439,31 +487,36 @@ class Config:
     ############
     @classmethod
     @ensure_loaded
-    def logging_enabled(cls):
+    def logging_enabled(cls) -> bool:
+        """Return whether logging is enabled."""
         val = cls.get("logging", "enabled", default=True)
         return val
     
     @classmethod
     @ensure_loaded
-    def logger_min_level(cls):
+    def logger_min_level(cls) -> int:
+        """Return the minimum logging level threshold."""
         val = cls.get("logging", "lowest_level", default=10)
         return val
 
     @classmethod
     @ensure_loaded
-    def verbose_mode(cls):
+    def verbose_mode(cls) -> bool:
+        """Return whether verbose logging mode is enabled."""
         val = cls.get("logging", "verbose", default=False)
         return val
 
     @classmethod
     @ensure_loaded
-    def debug_mode(cls):
+    def debug_mode(cls) -> bool:
+        """Return whether debug logging mode is enabled."""
         val = cls.get("logging", "debug", default=False)
         return val
 
     @classmethod
     @ensure_loaded
-    def file_logging_enabled(cls):
+    def file_logging_enabled(cls) -> bool:
+        """Return whether file-based log output is enabled."""
         if cls.serverless():
             return False
         val = cls.get("logging", "file_handler", "enabled", default=False)
@@ -471,12 +524,14 @@ class Config:
     
     @classmethod
     @ensure_loaded
-    def file_handler_logging_level(cls):
+    def file_handler_logging_level(cls) -> str:
+        """Return the logging level for the file handler."""
         return cls.get("logging", "file_handler", "logging_level", default="DEBUG")
 
     @classmethod
     @ensure_loaded
-    def file_handler_log_directory(cls):
+    def file_handler_log_directory(cls) -> Union[str, Path]:
+        """Return the resolved directory path for log file output."""
         if cls.serverless():
             return "/tmp"
         path_str = cls.get("logging", "file_handler", "log_directory", default="")
@@ -487,28 +542,39 @@ class Config:
 
     @classmethod
     @ensure_loaded
-    def file_handler_create_log_dir(cls):
+    def file_handler_create_log_dir(cls) -> bool:
+        """Return whether the log directory should be auto-created."""
         return cls.get("logging", "file_handler", "create_log_dir", default=True)
 
     @classmethod
     @ensure_loaded
-    def file_handler_markdown_enabled(cls):
+    def file_handler_markdown_enabled(cls) -> bool:
+        """Return whether markdown-formatted log output is enabled."""
         return cls.get("logging", "file_handler", "markdown", default=False)
 
     @classmethod
     @ensure_loaded
-    def console_handler_enabled(cls):
-        # Assuming console logging is always enabled if main logging is, unless specified otherwise
+    def console_handler_enabled(cls) -> bool:
+        """Return whether console log output is enabled."""
         return cls.get("logging", "console_handler", "enabled", default=cls.logging_enabled())
 
     @classmethod
     @ensure_loaded
-    def console_handler_logging_level(cls):
+    def console_handler_logging_level(cls) -> str:
+        """Return the logging level for the console handler."""
         return cls.get("logging", "console_handler", "logging_level", default="INFO")
 
 
 
-def generate_default_config(file_path=(DEFAULT_WIZ_DIR / "wiz.config")):
+def generate_default_config(file_path: Union[str, Path] = (DEFAULT_WIZ_DIR / "wiz.config")) -> bool:
+    """Generate a default config file from the bundled template.
+
+    Args:
+        file_path: Destination path for the generated config file.
+
+    Returns:
+        True if the config file was created, False in serverless mode.
+    """
     if SERVERLESS:
         return False
 
@@ -534,6 +600,7 @@ def generate_default_config(file_path=(DEFAULT_WIZ_DIR / "wiz.config")):
 
 
 def expand_all_vars(path_str: str) -> str:
+    """Expand $CWD, $HOME, ~, and environment variables in a path string."""
     path_str = str(path_str)  # ensure it's a string
     path_str = path_str.replace("$CWD", str(Path.cwd()))
     path_str = path_str.replace("$HOME", str(Path.home()))
@@ -541,7 +608,15 @@ def expand_all_vars(path_str: str) -> str:
     expanded = os.path.expandvars(expanded)
     return expanded
 
-def parse_filepath(path_str: str = None) -> Path:
+def parse_filepath(path_str: Optional[str] = None) -> Tuple[Path, Optional[str]]:
+    """Parse and resolve a path string into a directory and optional filename.
+
+    Args:
+        path_str: Raw path string, possibly containing variables. Defaults to cwd.
+
+    Returns:
+        Tuple of (directory Path, filename string or None).
+    """
     if path_str is None:
         return Path.cwd(), None
     expanded_path_str = expand_all_vars(path_str)

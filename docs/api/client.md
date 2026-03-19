@@ -1,6 +1,6 @@
 # WizClient
 
-::: wiz_sdk.client.WizClient
+::: wizsec.client.WizClient
     options:
       members:
         - __init__

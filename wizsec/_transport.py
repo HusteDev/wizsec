@@ -18,6 +18,7 @@ All HTTP I/O flows through this module. To swap httpx for another
 library, only this file needs to change.
 """
 
+import contextlib
 import httpx
 from typing import Optional, Dict, Any
 
@@ -27,7 +28,7 @@ from typing import Optional, Dict, Any
 class TransportError(Exception):
     """Wraps the underlying HTTP library's errors."""
 
-    def __init__(self, message: str, original_error: Optional[Exception] = None):
+    def __init__(self, message: str, original_error: Optional[Exception] = None) -> None:
         super().__init__(message)
         self.original_error = original_error
 
@@ -43,7 +44,7 @@ def post(
     proxy: Optional[str] = None,
     verify: Any = True,
     timeout: Optional[float] = None,
-):
+) -> httpx.Response:
     """Synchronous POST request."""
     try:
         return httpx.post(
@@ -59,7 +60,7 @@ def post(
         raise TransportError(str(exc), original_error=exc) from exc
 
 
-def get(url: str, **kwargs):
+def get(url: str, **kwargs: Any) -> httpx.Response:
     """Synchronous GET request."""
     try:
         return httpx.get(url, **kwargs)
@@ -67,7 +68,7 @@ def get(url: str, **kwargs):
         raise TransportError(str(exc), original_error=exc) from exc
 
 
-def stream_get(url: str):
+def stream_get(url: str) -> contextlib.AbstractContextManager[httpx.Response]:
     """Context manager for a streaming GET request."""
     return httpx.stream("GET", url)
 
@@ -79,7 +80,7 @@ def create_async_client(
     timeout: float = 180,
     max_connections: int = 100,
     verify: Any = True,
-):
+) -> httpx.AsyncClient:
     """Create a configured async HTTP client."""
     return httpx.AsyncClient(
         timeout=httpx.Timeout(timeout),

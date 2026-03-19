@@ -2,7 +2,7 @@
 
 import pytest
 
-from wiz_sdk.exceptions import (
+from wizsec.exceptions import (
     WizAPIError,
     WizAuthenticationError,
     WizConfigurationError,

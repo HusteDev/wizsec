@@ -1,4 +1,4 @@
-# wiz-sdk
+# wizsec
 
 A Python SDK for the [Wiz](https://www.wiz.io/) Cloud Security GraphQL API.
 
@@ -16,7 +16,7 @@ A Python SDK for the [Wiz](https://www.wiz.io/) Cloud Security GraphQL API.
 ## Quick Example
 
 ```python
-from wiz_sdk import WizClient, Config
+from wizsec import WizClient, Config
 
 Config.load()
 client = WizClient()
@@ -47,5 +47,5 @@ if result.success():
 ## Installation
 
 ```bash
-pip install wiz-sdk
+pip install wizsec
 ```

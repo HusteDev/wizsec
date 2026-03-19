@@ -2,7 +2,7 @@
 
 ## WizRequest
 
-::: wiz_sdk._request.WizRequest
+::: wizsec._request.WizRequest
     options:
       show_root_heading: true
       members:
@@ -15,7 +15,7 @@
 
 ## AsyncWizRequest
 
-::: wiz_sdk._request.AsyncWizRequest
+::: wizsec._request.AsyncWizRequest
     options:
       show_root_heading: true
       members:
@@ -23,12 +23,12 @@
 
 ## WizBatchRequest
 
-::: wiz_sdk._request.WizBatchRequest
+::: wizsec._request.WizBatchRequest
     options:
       show_root_heading: true
 
 ## AsyncWizBatchRequest
 
-::: wiz_sdk._request.AsyncWizBatchRequest
+::: wizsec._request.AsyncWizBatchRequest
     options:
       show_root_heading: true

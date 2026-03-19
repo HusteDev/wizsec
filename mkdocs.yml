@@ -1,6 +1,6 @@
-site_name: wiz-sdk
+site_name: wizsec
 site_description: Python SDK for the Wiz Cloud Security API
-repo_url: https://github.com/HusteDev/wiz-sdk
+repo_url: https://github.com/HusteDev/wizsec
 
 theme:
   name: material

@@ -1,6 +1,6 @@
 # SchemaValidator
 
-::: wiz_sdk._schema.SchemaValidator
+::: wizsec._schema.SchemaValidator
     options:
       show_root_heading: true
       members:
