@@ -7,7 +7,7 @@ Demonstrates:
 - Checking success and reading results
 """
 
-from wiz_sdk import WizClient, Config
+from wizsec import WizClient, Config
 
 # Load configuration from ~/.wiz/wiz.config
 Config.load()

@@ -8,8 +8,8 @@ from unittest.mock import patch, MagicMock
 import pytest
 from graphql import build_client_schema, introspection_from_schema, build_schema
 
-from wiz_sdk._schema import SchemaValidator, INTROSPECTION_QUERY
-from wiz_sdk.exceptions import WizSchemaValidationError
+from wizsec._schema import SchemaValidator, INTROSPECTION_QUERY
+from wizsec.exceptions import WizSchemaValidationError
 
 
 # ── Helpers ──────────────────────────────────────────────────────────

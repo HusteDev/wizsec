@@ -8,7 +8,7 @@ Demonstrates:
 """
 
 import os
-from wiz_sdk import WizClient, Config
+from wizsec import WizClient, Config
 
 
 def handler(event, context):

@@ -7,7 +7,7 @@ Demonstrates:
 - Inspecting individual results from WizBatchResponse
 """
 
-from wiz_sdk import WizClient, Config
+from wizsec import WizClient, Config
 
 Config.load()
 client = WizClient()

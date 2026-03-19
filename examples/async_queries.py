@@ -7,7 +7,7 @@ Demonstrates:
 """
 
 import asyncio
-from wiz_sdk import WizClient, Config
+from wizsec import WizClient, Config
 
 
 async def single_async_query():
@@ -49,7 +49,7 @@ async def async_batch():
         for severity in severities:
             batch.add_request(
                 query="""
-                    query IssuesBySeverity($first: Int, $after: String, $severity: [IssueSeverity!]) {
+                    query IssuesBySeverity($first: Int, $after: String, $severity: [Severity!]) {
                         issues(first: $first, after: $after, filterBy: { severity: $severity }) {
                             nodes { id sourceRule { name } }
                             pageInfo { hasNextPage endCursor }

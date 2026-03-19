@@ -8,7 +8,7 @@
 ## Installation
 
 ```bash
-pip install wiz-sdk
+pip install wizsec
 ```
 
 For development:
@@ -64,7 +64,7 @@ client = WizClient(
 ## First Query
 
 ```python
-from wiz_sdk import WizClient, Config
+from wizsec import WizClient, Config
 
 # Load config from ~/.wiz/wiz.config (auto-generated if missing)
 Config.load()

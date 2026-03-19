@@ -6,7 +6,7 @@ Use `async_session()` to run queries asynchronously:
 
 ```python
 import asyncio
-from wiz_sdk import WizClient, Config
+from wizsec import WizClient, Config
 
 Config.load()
 client = WizClient()

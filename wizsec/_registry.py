@@ -11,7 +11,7 @@
 
 import queue
 import threading
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 from pyrate_limiter import Duration, Limiter, Rate
 
 
@@ -23,18 +23,19 @@ class EnvironmentState:
     limits are global per environment.
     """
 
-    def __init__(self, environment: str):
+    def __init__(self, environment: str) -> None:
         self.environment = environment
-        self.queue: queue.Queue = queue.Queue()
+        self.queue: queue.Queue[Any] = queue.Queue()
         self.worker_thread: Optional[threading.Thread] = None
-        self.stop_event = threading.Event()
-        self.queue_lock = threading.Lock()
+        self.stop_event: threading.Event = threading.Event()
+        self.queue_lock: threading.Lock = threading.Lock()
         self.headers: Dict[str, str] = {"Content-Type": "application/json"}
         self.dc: Optional[str] = None
         self._limiters: Optional[Dict[str, Limiter]] = None
 
     @property
     def limiters(self) -> Dict[str, Limiter]:
+        """Lazily initialize and return the per-request-type rate limiters."""
         if self._limiters is None:
             rate_configs = {
                 "query_user": Rate(100, Duration.SECOND),
@@ -48,6 +49,7 @@ class EnvironmentState:
         return self._limiters
 
     def get_limiter(self, key: str) -> Limiter:
+        """Return the rate limiter for the given key, raising ValueError if not found."""
         limiter = self.limiters.get(key)
         if limiter is None:
             raise ValueError(f"No limiter for key: {key}")
@@ -66,6 +68,7 @@ class EnvironmentRegistry:
 
     @classmethod
     def get_or_create(cls, environment: str) -> EnvironmentState:
+        """Return the shared state for the environment, creating it if needed."""
         with cls._lock:
             if environment not in cls._environments:
                 cls._environments[environment] = EnvironmentState(environment)
@@ -95,15 +98,16 @@ class EnvironmentRegistry:
 class ProfileState:
     """Holds per-profile auth state (tokens, credentials)."""
 
-    def __init__(self, profile: str):
+    def __init__(self, profile: str) -> None:
         self.profile = profile
-        self.token_data: Dict = {}
+        self.token_data: Dict[str, Any] = {}
         self.client_id: Optional[str] = None
         self.client_secret: Optional[str] = None
-        self.auth_lock = threading.Lock()
+        self.auth_lock: threading.Lock = threading.Lock()
 
     @property
     def access_token(self) -> Optional[str]:
+        """Return the current access token, or None if not authenticated."""
         return self.token_data.get("access_token")
 
     @access_token.setter
@@ -129,6 +133,7 @@ class ProfileRegistry:
 
     @classmethod
     def get_or_create(cls, profile: str) -> ProfileState:
+        """Return the auth state for the profile, creating it if needed."""
         with cls._lock:
             if profile not in cls._profiles:
                 cls._profiles[profile] = ProfileState(profile)

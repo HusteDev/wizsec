@@ -5,7 +5,7 @@ The SDK can create Wiz reports, poll for completion, and stream or download resu
 ## Creating a Report
 
 ```python
-from wiz_sdk import WizClient, Config
+from wizsec import WizClient, Config
 
 Config.load()
 client = WizClient()
