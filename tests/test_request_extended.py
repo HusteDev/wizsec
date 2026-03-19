@@ -18,8 +18,8 @@ from wizsec._request import (
 from wizsec._transport import TransportError
 from wizsec.exceptions import WizQueryError
 
-
 # ── Helpers ──────────────────────────────────────────────────────────
+
 
 @pytest.fixture()
 def mock_wiz_client(mock_config):
@@ -52,6 +52,7 @@ def _make_wiz_request(client, query=None, paginate=True, **kwargs):
 
 # ── Query Setter ────────────────────────────────────────────────────
 
+
 class TestQuerySetter:
     def test_valid_query(self, mock_wiz_client):
         req = _make_wiz_request(mock_wiz_client, query="query Q { users { id } }")
@@ -80,7 +81,7 @@ class TestQuerySetter:
         """Report detection checks for createReport/rerunReport mutations."""
         req = _make_wiz_request(
             mock_wiz_client,
-            query='mutation M { createReport(input: {}) { report { id } } }',
+            query="mutation M { createReport(input: {}) { report { id } } }",
             paginate=False,
         )
         assert req._current_query_info["source"] == "createReport"
@@ -95,8 +96,10 @@ class TestQuerySetter:
         assert req._current_query_info["source"] == "users"
 
     def test_schema_validation_called_when_enabled(self, mock_wiz_client):
-        with patch.object(Config, "validate_queries", return_value=True), \
-             patch("wizsec._request.SchemaValidator") as mock_sv:
+        with (
+            patch.object(Config, "validate_queries", return_value=True),
+            patch("wizsec._request.SchemaValidator") as mock_sv,
+        ):
             # Don't use _make_wiz_request since it patches validate_queries to False
             WizRequest(
                 client=mock_wiz_client,
@@ -106,6 +109,7 @@ class TestQuerySetter:
 
 
 # ── WizResponse ─────────────────────────────────────────────────────
+
 
 class TestWizResponse:
     def test_wraps_request_data(self, mock_wiz_client):
@@ -161,6 +165,7 @@ class TestWizResponse:
 
 
 # ── WizBatchResponse ───────────────────────────────────────────────
+
 
 class TestWizBatchResponse:
     def _make_response(self, data=None, errors=None):
@@ -243,7 +248,10 @@ class TestWizBatchResponse:
         assert all("request_id" in e for e in all_errors)
 
     def test_iterate_results(self, mock_config):
-        results = {0: self._make_response(data={"a": 1}), 1: self._make_response(data={"b": 2})}
+        results = {
+            0: self._make_response(data={"a": 1}),
+            1: self._make_response(data={"b": 2}),
+        }
         batch = WizBatchResponse(results)
         items = list(batch.iterate_results())
         assert len(items) == 2
@@ -254,12 +262,16 @@ class TestWizBatchResponse:
         assert len(batch) == 1
 
     def test_repr(self, mock_config):
-        results = {0: self._make_response(data={"a": 1}), 1: self._make_response(errors=[{"message": "x"}])}
+        results = {
+            0: self._make_response(data={"a": 1}),
+            1: self._make_response(errors=[{"message": "x"}]),
+        }
         batch = WizBatchResponse(results)
         assert "1/2" in repr(batch)
 
 
 # ── WizRequest repr ────────────────────────────────────────────────
+
 
 class TestWizRequestRepr:
     def test_repr(self, mock_wiz_client):
@@ -273,10 +285,12 @@ class TestWizRequestRepr:
 
 # ── QueryCollection Setter ─────────────────────────────────────────
 
+
 class TestQueryCollectionSetter:
     def test_set_query_collection_from_module(self, mock_wiz_client):
         """Setting queryCollection with a module object stores it."""
         import types
+
         mod = types.ModuleType("fake_queries")
         mod.GET_USERS = "query GetUsers { users { id } }"
         req = _make_wiz_request(mock_wiz_client)
@@ -286,11 +300,13 @@ class TestQueryCollectionSetter:
     def test_set_query_collection_from_string_not_loaded(self, mock_wiz_client):
         """Setting queryCollection with a module name string that is not yet loaded imports it."""
         import sys
+
         req = _make_wiz_request(mock_wiz_client)
         # Use a module not yet in sys.modules by temporarily removing it
         mod_name = "wizsec._request"  # already loaded, so use a unique fake
         fake_mod_name = "_test_fake_qc_module"
         import types
+
         fake_mod = types.ModuleType(fake_mod_name)
         # Patch importlib.import_module to return our fake module
         with patch("importlib.import_module", return_value=fake_mod) as mock_import:
@@ -312,6 +328,7 @@ class TestQueryCollectionSetter:
     def test_query_resolved_from_collection(self, mock_wiz_client):
         """When query string is not valid GraphQL, resolve from queryCollection attribute."""
         import types
+
         mod = types.ModuleType("fake_queries")
         mod.MY_QUERY = "query MyQuery { users { id } }"
         req = _make_wiz_request(mock_wiz_client, paginate=False)
@@ -321,6 +338,7 @@ class TestQueryCollectionSetter:
 
 
 # ── WizRequest.__init__ ────────────────────────────────────────────
+
 
 class TestWizRequestInit:
     def test_basic_init(self, mock_wiz_client):
@@ -344,7 +362,9 @@ class TestWizRequestInit:
 
     def test_init_sets_paginate_flag(self, mock_wiz_client):
         """Paginate flag is stored correctly."""
-        req = _make_wiz_request(mock_wiz_client, query="query Q { users { id } }", paginate=False)
+        req = _make_wiz_request(
+            mock_wiz_client, query="query Q { users { id } }", paginate=False
+        )
         assert req._paginate is False
 
     def test_init_with_on_page_event(self, mock_wiz_client):
@@ -360,24 +380,33 @@ class TestWizRequestInit:
 
 # ── WizRequest._execute_page ──────────────────────────────────────
 
+
 class TestExecutePage:
     def _setup_client(self, mock_wiz_client, status_code=200, json_data=None):
         """Configure mock client for _execute_page calls."""
         mock_wiz_client._check_token.return_value = None
-        mock_wiz_client._api_endpoint.return_value = "https://api.us1.app.wiz.io/graphql"
+        mock_wiz_client._api_endpoint.return_value = (
+            "https://api.us1.app.wiz.io/graphql"
+        )
         mock_wiz_client._get_headers.return_value = {"Authorization": "Bearer fake"}
 
         mock_response = MagicMock()
         mock_response.status_code = status_code
-        mock_response.json.return_value = json_data or {"data": {"users": {"nodes": [{"id": "1"}]}}}
+        mock_response.json.return_value = json_data or {
+            "data": {"users": {"nodes": [{"id": "1"}]}}
+        }
         mock_response.text = "error text"
         mock_wiz_client._post.return_value = mock_response
         return mock_response
 
     def test_successful_execution(self, mock_wiz_client):
         """Successful _execute_page sets data and status code."""
-        self._setup_client(mock_wiz_client, json_data={"data": {"users": [{"id": "1"}]}})
-        req = _make_wiz_request(mock_wiz_client, query="query Q { users { id } }", paginate=False)
+        self._setup_client(
+            mock_wiz_client, json_data={"data": {"users": [{"id": "1"}]}}
+        )
+        req = _make_wiz_request(
+            mock_wiz_client, query="query Q { users { id } }", paginate=False
+        )
         req._execute_page()
         assert req._status_code == 200
         assert req.data == {"users": [{"id": "1"}]}
@@ -385,7 +414,9 @@ class TestExecutePage:
     def test_failed_response_records_error(self, mock_wiz_client):
         """Non-200 response records errors and retries."""
         self._setup_client(mock_wiz_client, status_code=500)
-        req = _make_wiz_request(mock_wiz_client, query="query Q { users { id } }", paginate=False)
+        req = _make_wiz_request(
+            mock_wiz_client, query="query Q { users { id } }", paginate=False
+        )
         with patch("wizsec._request.time.sleep"):
             req._execute_page()
         # Should have errors from each retry + the final failure
@@ -395,13 +426,17 @@ class TestExecutePage:
     def test_transport_error_records_error(self, mock_wiz_client):
         """TransportError is caught and recorded."""
         mock_wiz_client._check_token.return_value = None
-        mock_wiz_client._api_endpoint.return_value = "https://api.us1.app.wiz.io/graphql"
+        mock_wiz_client._api_endpoint.return_value = (
+            "https://api.us1.app.wiz.io/graphql"
+        )
         mock_wiz_client._get_headers.return_value = {}
         mock_wiz_client._post.side_effect = TransportError("connection reset")
         mock_limiter = MagicMock()
         mock_wiz_client._get_limiter.return_value = mock_limiter
 
-        req = _make_wiz_request(mock_wiz_client, query="query Q { users { id } }", paginate=False)
+        req = _make_wiz_request(
+            mock_wiz_client, query="query Q { users { id } }", paginate=False
+        )
         with patch("wizsec._request.time.sleep"):
             req._execute_page()
         assert any("connection reset" in e["message"] for e in req.errors)
@@ -409,13 +444,17 @@ class TestExecutePage:
     def test_unexpected_error_records_error(self, mock_wiz_client):
         """Unexpected exceptions are caught and recorded."""
         mock_wiz_client._check_token.return_value = None
-        mock_wiz_client._api_endpoint.return_value = "https://api.us1.app.wiz.io/graphql"
+        mock_wiz_client._api_endpoint.return_value = (
+            "https://api.us1.app.wiz.io/graphql"
+        )
         mock_wiz_client._get_headers.return_value = {}
         mock_wiz_client._post.side_effect = RuntimeError("something broke")
         mock_limiter = MagicMock()
         mock_wiz_client._get_limiter.return_value = mock_limiter
 
-        req = _make_wiz_request(mock_wiz_client, query="query Q { users { id } }", paginate=False)
+        req = _make_wiz_request(
+            mock_wiz_client, query="query Q { users { id } }", paginate=False
+        )
         with patch("wizsec._request.time.sleep"):
             req._execute_page()
         assert any("something broke" in e["message"] for e in req.errors)
@@ -426,19 +465,26 @@ class TestExecutePage:
             mock_wiz_client,
             json_data={"data": None, "errors": [{"message": "field not found"}]},
         )
-        req = _make_wiz_request(mock_wiz_client, query="query Q { users { id } }", paginate=False)
+        req = _make_wiz_request(
+            mock_wiz_client, query="query Q { users { id } }", paginate=False
+        )
         req._execute_page()
         assert any("field not found" in e["message"] for e in req.errors)
 
 
 # ── _process_successful_response ──────────────────────────────────
 
+
 class TestProcessSuccessfulResponse:
     def _setup_req(self, mock_wiz_client, paginate=False):
         mock_wiz_client._check_token.return_value = None
-        mock_wiz_client._api_endpoint.return_value = "https://api.us1.app.wiz.io/graphql"
+        mock_wiz_client._api_endpoint.return_value = (
+            "https://api.us1.app.wiz.io/graphql"
+        )
         mock_wiz_client._get_headers.return_value = {}
-        return _make_wiz_request(mock_wiz_client, query="query Q { users { id } }", paginate=paginate)
+        return _make_wiz_request(
+            mock_wiz_client, query="query Q { users { id } }", paginate=paginate
+        )
 
     def test_merges_page_data(self, mock_wiz_client):
         """_process_successful_response merges page data into aggregated data."""
@@ -464,10 +510,14 @@ class TestProcessSuccessfulResponse:
         """When _generate_report returns True, _report_workflow is called."""
         req = self._setup_req(mock_wiz_client, paginate=False)
         mock_resp = MagicMock()
-        mock_resp.json.return_value = {"data": {"createReport": {"report": {"id": "r1"}}}}
+        mock_resp.json.return_value = {
+            "data": {"createReport": {"report": {"id": "r1"}}}
+        }
 
-        with patch.object(req, "_generate_report", return_value=True), \
-             patch.object(req, "_report_workflow") as mock_wf:
+        with (
+            patch.object(req, "_generate_report", return_value=True),
+            patch.object(req, "_report_workflow") as mock_wf,
+        ):
             result = req._process_successful_response(mock_resp, "url", {})
             assert result is True
             mock_wf.assert_called_once()
@@ -475,10 +525,13 @@ class TestProcessSuccessfulResponse:
 
 # ── _handle_failed_response ───────────────────────────────────────
 
+
 class TestHandleFailedResponse:
     def test_records_error_and_logs(self, mock_wiz_client):
         """_handle_failed_response appends error from response text."""
-        req = _make_wiz_request(mock_wiz_client, query="query Q { users { id } }", paginate=False)
+        req = _make_wiz_request(
+            mock_wiz_client, query="query Q { users { id } }", paginate=False
+        )
         mock_resp = MagicMock()
         mock_resp.status_code = 403
         mock_resp.text = "Forbidden"
@@ -487,6 +540,7 @@ class TestHandleFailedResponse:
 
 
 # ── _handle_standard_pagination ───────────────────────────────────
+
 
 class TestHandleStandardPagination:
     def test_no_paginate_sets_data_immediately(self, mock_wiz_client):
@@ -537,6 +591,7 @@ class TestHandleStandardPagination:
 
 
 # ── _handle_serverless_pagination ─────────────────────────────────
+
 
 class TestHandleServerlessPagination:
     def test_no_pagination_sets_data_from_response(self, mock_wiz_client):
@@ -618,6 +673,7 @@ class TestHandleServerlessPagination:
 
 # ── _trigger_page_event ───────────────────────────────────────────
 
+
 class TestTriggerPageEvent:
     def test_fires_callback_with_correct_data(self, mock_wiz_client):
         """_trigger_page_event calls callback with page data and info."""
@@ -661,6 +717,7 @@ class TestTriggerPageEvent:
 
 # ── _finalize_pagination ──────────────────────────────────────────
 
+
 class TestFinalizePagination:
     def test_sets_data_and_done_event(self, mock_wiz_client):
         """_finalize_pagination sets data from aggregated data and fires done event."""
@@ -682,6 +739,7 @@ class TestFinalizePagination:
 
 
 # ── WizRequest.submit ─────────────────────────────────────────────
+
 
 class TestWizRequestSubmit:
     def test_submit_enqueues_and_waits(self, mock_wiz_client):
@@ -708,12 +766,13 @@ class TestWizRequestSubmit:
 
 # ── _generate_report ──────────────────────────────────────────────
 
+
 class TestGenerateReport:
     def test_returns_true_for_create_report(self, mock_wiz_client):
         """_generate_report returns True when source is createReport."""
         req = _make_wiz_request(
             mock_wiz_client,
-            query='mutation M { createReport(input: {}) { report { id } } }',
+            query="mutation M { createReport(input: {}) { report { id } } }",
             paginate=False,
         )
         assert req._generate_report() is True
@@ -731,7 +790,7 @@ class TestGenerateReport:
         """_generate_report sets report_name from report_request dict."""
         req = _make_wiz_request(
             mock_wiz_client,
-            query='mutation M { createReport(input: {}) { report { id } } }',
+            query="mutation M { createReport(input: {}) { report { id } } }",
             paginate=False,
             report_request={"name": "my_report", "stream": False},
         )
@@ -741,6 +800,7 @@ class TestGenerateReport:
 
 
 # ── WizBatchRequest ───────────────────────────────────────────────
+
 
 class TestWizBatchRequest:
     def test_init(self, mock_wiz_client):
@@ -821,6 +881,7 @@ class TestWizBatchRequest:
 
 # ── WizBatchRequest Progress Callback ─────────────────────────────
 
+
 class TestBatchProgressCallback:
     def test_progress_callback_fires(self, mock_wiz_client):
         """Progress callback is called for each completed request."""
@@ -865,6 +926,7 @@ class TestBatchProgressCallback:
 
 # ── AsyncWizRequest / AsyncWizResponse ────────────────────────────
 
+
 class TestAsyncWizRequest:
     @pytest.mark.asyncio
     async def test_submit_calls_execute_page(self, mock_wiz_client):
@@ -881,10 +943,15 @@ class TestAsyncWizRequest:
         mock_wiz_client._check_token.return_value = None
 
         # Mock _execute_page to avoid real async HTTP
-        with patch.object(req, "_execute_page", new_callable=lambda: lambda: MagicMock(return_value=None)) as mock_exec:
+        with patch.object(
+            req,
+            "_execute_page",
+            new_callable=lambda: lambda: MagicMock(return_value=None),
+        ) as mock_exec:
             # Make _execute_page a proper coroutine
             async def fake_execute():
                 req.data = {"users": [{"id": "1"}]}
+
             with patch.object(req, "_execute_page", side_effect=fake_execute):
                 result = await req.submit()
         assert result is req
@@ -915,13 +982,17 @@ class TestAsyncWizRequest:
         mock_session.post = fake_post
         mock_wiz_client._async_session = mock_session
         mock_wiz_client._async_semaphore = asyncio.Semaphore(10)
-        mock_wiz_client._api_endpoint.return_value = "https://api.us1.app.wiz.io/graphql"
+        mock_wiz_client._api_endpoint.return_value = (
+            "https://api.us1.app.wiz.io/graphql"
+        )
         mock_wiz_client._get_headers.return_value = {}
 
         # Make limiter async-compatible
         mock_limiter = MagicMock()
+
         async def fake_acquire(key):
             pass
+
         mock_limiter.try_acquire_async = fake_acquire
         mock_wiz_client._get_limiter.return_value = mock_limiter
 
@@ -945,22 +1016,31 @@ class TestAsyncWizRequest:
         mock_async_resp.text = "Internal Server Error"
 
         mock_session = MagicMock()
+
         async def fake_post(**kwargs):
             return mock_async_resp
+
         mock_session.post = fake_post
 
         mock_wiz_client._async_session = mock_session
         mock_wiz_client._async_semaphore = asyncio.Semaphore(10)
-        mock_wiz_client._api_endpoint.return_value = "https://api.us1.app.wiz.io/graphql"
+        mock_wiz_client._api_endpoint.return_value = (
+            "https://api.us1.app.wiz.io/graphql"
+        )
         mock_wiz_client._get_headers.return_value = {}
 
         mock_limiter = MagicMock()
+
         async def fake_acquire(key):
             pass
+
         mock_limiter.try_acquire_async = fake_acquire
         mock_wiz_client._get_limiter.return_value = mock_limiter
 
-        with patch("wizsec._request.asyncio.sleep", new_callable=lambda: lambda *a, **kw: fake_acquire("x")):
+        with patch(
+            "wizsec._request.asyncio.sleep",
+            new_callable=lambda: lambda *a, **kw: fake_acquire("x"),
+        ):
             await req._execute_page()
 
         assert len(req.errors) > 0

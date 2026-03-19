@@ -1,5 +1,5 @@
 ##
-## 
+##
 ##   U     U TTTTTTT IIIIIII  L        SSSSSSS
 ##   U     U    T       I     L        S
 ##   U     U    T       I     L        SSSSSSS
@@ -40,20 +40,25 @@ from .config import Config, parse_filepath, DEFAULT_TEMP_FOLDER
 from ._logging import logging_init
 
 import pickle
-mimetypes.add_type('application/python-pickle', '.pkl')
-mimetypes.add_type('application/python-pickle', '.pickle')
+
+mimetypes.add_type("application/python-pickle", ".pkl")
+mimetypes.add_type("application/python-pickle", ".pickle")
 
 from .exceptions import WizFileError, WizConfigurationError
 
+
 def disable_in_serverless(func: Callable[..., Any]) -> Callable[..., Any]:
     """Decorator that skips the wrapped function when running in serverless mode."""
+
     @wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         if Config.serverless():
             Config.get_logger().debug(f"{func.__name__} disabled in serverless mode.")
             return None  # or raise, or return original input
         return func(*args, **kwargs)
+
     return wrapper
+
 
 def resource_path(relative_path: str) -> str:
     """Get the absolute path to the resource."""
@@ -61,11 +66,9 @@ def resource_path(relative_path: str) -> str:
         return os.path.join(sys._MEIPASS, relative_path)
     return os.path.join(os.path.abspath("."), relative_path)
 
+
 def safe_write_json(
-    data: Any,
-    filename: str,
-    save_path: Path,
-    temp_path: Path = DEFAULT_TEMP_FOLDER
+    data: Any, filename: str, save_path: Path, temp_path: Path = DEFAULT_TEMP_FOLDER
 ) -> None:
     """Write data as JSON atomically via a temp file, then move into place."""
     logger = Config.get_logger()
@@ -76,39 +79,41 @@ def safe_write_json(
     def serialize_object(obj: Any) -> Any:
         """Fallback serializer for json.dump: use vars() or str()."""
         try:
-            return vars(obj) if hasattr(obj, '__dict__') else str(obj)
+            return vars(obj) if hasattr(obj, "__dict__") else str(obj)
         except TypeError:
             return str(obj)
-    
+
     try:
-        with open(temp_file, 'w+') as file:
+        with open(temp_file, "w+") as file:
             json.dump(data, file, indent=2, default=serialize_object)
         shutil.move(temp_file, save_path / filename)
     except Exception as e:
         _, exc_value, exc_traceback = sys.exc_info()
         tb = traceback.extract_tb(exc_traceback)
         last_call = tb[-1]
-        logger.error('Safe Write Error - at line %s', last_call.lineno)
+        logger.error("Safe Write Error - at line %s", last_call.lineno)
         raise
     finally:
         temp_file = Path(temp_file)
         if temp_file.exists():
             temp_file.unlink()
 
+
 @disable_in_serverless
 def dump_to_json(
     data: Any,
     filename: Optional[str] = None,
     filepath: Optional[str] = None,
-    retry: bool = True
+    retry: bool = True,
 ) -> None:
     """Serialize data to a JSON (or pickle) file if saved_data is enabled."""
     logger = Config.get_logger()
     try:
-        logger.verbose('Attempting to dump_to_json')
+        logger.verbose("Attempting to dump_to_json")
     except AttributeError:
         if logger is None:
             from .config import DEFAULT_WIZ_DIR
+
             logger = logging_init(Config, DEFAULT_WIZ_DIR, parse_filepath)
     if data:
         allow_saved_data = Config.saved_data_enabled()
@@ -116,57 +121,94 @@ def dump_to_json(
 
         if allow_saved_data:
             configs_save, _ = parse_filepath(Config.saved_data_directory())
-            save_directory, extracted_filename = parse_filepath(filepath) if filepath else (configs_save, None)
+            save_directory, extracted_filename = (
+                parse_filepath(filepath) if filepath else (configs_save, None)
+            )
             if not save_directory.exists():
                 save_directory.mkdir(parents=True, exist_ok=True)
 
-            configs_temp, _ = parse_filepath(Config.get("saved_data", "temp", default=DEFAULT_TEMP_FOLDER))
-            temp_directory = Path(configs_temp) if all([configs_temp, configs_temp.is_dir()]) else DEFAULT_TEMP_FOLDER
+            configs_temp, _ = parse_filepath(
+                Config.get("saved_data", "temp", default=DEFAULT_TEMP_FOLDER)
+            )
+            temp_directory = (
+                Path(configs_temp)
+                if all([configs_temp, configs_temp.is_dir()])
+                else DEFAULT_TEMP_FOLDER
+            )
             if not Path(temp_directory).exists():
                 Path(temp_directory).mkdir(parents=True, exist_ok=True)
-            
+
             if save_directory.is_file() and filename:
                 save_directory = save_directory.parents
-                temp_directory = temp_directory if temp_directory else save_directory / "temp"
+                temp_directory = (
+                    temp_directory if temp_directory else save_directory / "temp"
+                )
 
             if filename and not filepath:
                 save_directory = configs_save
-                temp_directory = temp_directory if temp_directory else save_directory / "temp"
-            
+                temp_directory = (
+                    temp_directory if temp_directory else save_directory / "temp"
+                )
+
             file_name = filename if filename else extracted_filename
             if not file_name:
-                file_name = 'dumpFile.json'
+                file_name = "dumpFile.json"
 
             basename = Path(file_name).stem
 
             start = time.perf_counter()
             while True:
                 try:
-                    if Path(file_name).suffix == ".json" or sys.getsizeof(data) <= 100000 or not allow_pickle:
+                    if (
+                        Path(file_name).suffix == ".json"
+                        or sys.getsizeof(data) <= 100000
+                        or not allow_pickle
+                    ):
                         result = None
                         if isinstance(data, (list, tuple)):
-                            if all([isinstance(row, list) for row in data]) and (len(data[0]) < len(set(data[0]))):
+                            if all([isinstance(row, list) for row in data]) and (
+                                len(data[0]) < len(set(data[0]))
+                            ):
                                 header_count = {}
-                                unique_headers = [\
-                                    header if header_count.setdefault(header, 0) == 0 \
-                                    else f"{header}_{header_count[header]}" \
-                                    for header in data[0] \
-                                    for header_count[header] in [header_count.get(header,0) + 1]]
-                                result = [dict(itertools.zip_longest(unique_headers, row, fillvalue=None)) for row in data[1:]]
+                                unique_headers = [
+                                    (
+                                        header
+                                        if header_count.setdefault(header, 0) == 0
+                                        else f"{header}_{header_count[header]}"
+                                    )
+                                    for header in data[0]
+                                    for header_count[header] in [
+                                        header_count.get(header, 0) + 1
+                                    ]
+                                ]
+                                result = [
+                                    dict(
+                                        itertools.zip_longest(
+                                            unique_headers, row, fillvalue=None
+                                        )
+                                    )
+                                    for row in data[1:]
+                                ]
                             data = {"data": result if result else data}
                         safe_write_json(data, file_name, save_directory, temp_directory)
-                        logger.verbose('%s.json created', basename)
+                        logger.verbose("%s.json created", basename)
                     else:
                         if allow_pickle:
                             logger.verbose("Object too large, saving as pickle instead")
-                            data = store_data(data, save_directory / f'{file_name}.pkl')
-                            logger.verbose('%s.pkl created', file_name)
+                            data = store_data(data, save_directory / f"{file_name}.pkl")
+                            logger.verbose("%s.pkl created", file_name)
                         else:
-                            logger.warning("File is very large [%s KB]. \n Recommend enabling pickle from the configuration file to save this file." % sys.getsizeof(data)/1024)
+                            logger.warning(
+                                "File is very large [%s KB]. \n Recommend enabling pickle from the configuration file to save this file."
+                                % sys.getsizeof(data)
+                                / 1024
+                            )
                     break
 
                 except PermissionError as pe:
-                    logger.error(f"Permission denied writing to {file_name}: {pe}", exc_info=True)
+                    logger.error(
+                        f"Permission denied writing to {file_name}: {pe}", exc_info=True
+                    )
                     raise WizFileError(f"Permission denied writing to {file_name}", pe)
 
                 except (IOError, OSError) as e:
@@ -174,37 +216,39 @@ def dump_to_json(
                     raise WizFileError(f"Failed to write {file_name}", e)
 
                 except Exception as e:
-                    logger.error(f"Unexpected error writing {file_name}: {e}", exc_info=True)
+                    logger.error(
+                        f"Unexpected error writing {file_name}: {e}", exc_info=True
+                    )
                     raise WizFileError(f"Unexpected error writing {file_name}", e)
-            
+
             duration = return_formatted_duration(time.perf_counter() - start)
-            logger.debug(f'{file_name} export completed (Duration: {duration})')
+            logger.debug(f"{file_name} export completed (Duration: {duration})")
         else:
             logger.info("saved_data not enabled")
     else:
         logger.debug("No Data to save")
 
+
 def store_data(data: Any, file_path: Optional[str] = None) -> Any:
     """Pickle data to disk and return it."""
     import pickle
     import mimetypes
-    mimetypes.add_type('application/python-pickle', '.pkl')
-    mimetypes.add_type('application/python-pickle', '.pickle')
+
+    mimetypes.add_type("application/python-pickle", ".pkl")
+    mimetypes.add_type("application/python-pickle", ".pickle")
     if file_path is None:
-        file_path = Path.cwd() / 'data.pkl'
+        file_path = Path.cwd() / "data.pkl"
     try:
-        with open(file_path, 'wb') as pickle_file:
+        with open(file_path, "wb") as pickle_file:
             pickle.dump(data, pickle_file)
             return data
     except Exception as e:
-        logging.error(f'Data not saved due to error: {e}', exc_info=True)
+        logging.error(f"Data not saved due to error: {e}", exc_info=True)
+
 
 def return_formatted_duration(duration: float) -> str:
     """Convert a duration in seconds to a human-readable string (e.g. '2 hours, 3 minutes')."""
-    formatted_duration = {"hour": "",
-                          "minute": "",
-                          "second": "",
-                          "millisecond": ""}
+    formatted_duration = {"hour": "", "minute": "", "second": "", "millisecond": ""}
     hours = duration // 3600
     remaining_duration = duration % 3600
 
@@ -228,7 +272,8 @@ def return_formatted_duration(duration: float) -> str:
         if value:
             formatted_parts.append(f"{value} {key}{'s' if value > 1 else ''}")
 
-    return ', '.join(formatted_parts)
+    return ", ".join(formatted_parts)
+
 
 def extract_fields(selection_set: Any) -> Dict[str, Any]:
     """Recursively extract fields from a GraphQL selection set."""
@@ -250,6 +295,7 @@ def extract_fields(selection_set: Any) -> Dict[str, Any]:
                 fields.update(extract_fields(selection.selection_set))
     return fields
 
+
 def parse_query_metadata(query: str) -> Dict[str, Any]:
     """Parse a GraphQL query string and return its type, name, fields, and source."""
     document = parse(query)
@@ -268,8 +314,9 @@ def parse_query_metadata(query: str) -> Dict[str, Any]:
         "request_type": request_type,
         "request_name": request_name,
         "fields": fields,
-        "source": next(iter(fields))
+        "source": next(iter(fields)),
     }
+
 
 def ensure_pagination_variables(query: str) -> str:
     """Inject $after into a query if it uses the Relay connection pattern but is missing the variable.
@@ -293,7 +340,9 @@ def ensure_pagination_variables(query: str) -> str:
             continue
 
         # Check if $after is already declared
-        existing_vars = {v.variable.name.value for v in (definition.variable_definitions or [])}
+        existing_vars = {
+            v.variable.name.value for v in (definition.variable_definitions or [])
+        }
         if "after" in existing_vars:
             return query
 
@@ -303,7 +352,8 @@ def ensure_pagination_variables(query: str) -> str:
             if selection.kind != "field" or not selection.selection_set:
                 continue
             child_names = {
-                s.name.value for s in selection.selection_set.selections
+                s.name.value
+                for s in selection.selection_set.selections
                 if s.kind == "field"
             }
             if "nodes" in child_names and "pageInfo" in child_names:
@@ -346,7 +396,9 @@ def ensure_pagination_variables(query: str) -> str:
 
 
 @disable_in_serverless
-def load_credentials_from_file(profile: str, credentials_file: str) -> Dict[str, Optional[str]]:
+def load_credentials_from_file(
+    profile: str, credentials_file: str
+) -> Dict[str, Optional[str]]:
     """Load client_id, client_secret, and environment from an INI credentials file."""
     logger = Config.get_logger()
     config = configparser.ConfigParser()
@@ -360,9 +412,14 @@ def load_credentials_from_file(profile: str, credentials_file: str) -> Dict[str,
         client_id = config[profile].get("client_id")
         client_secret = config[profile].get("client_secret")
         environment = config[profile].get("environment", None)
-        return {"client_id": client_id, "client_secret": client_secret, "environment": environment}
+        return {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "environment": environment,
+        }
     logger.debug(f"Profile {profile} not found in credentials file.")
     return {}
+
 
 @disable_in_serverless
 def write_credentials_to_file(
@@ -386,13 +443,23 @@ def write_credentials_to_file(
             config[profile]["environment"] = environment
         with open(path, "w") as f:
             config.write(f)
-        Config.get_logger().debug(f"Credentials for profile {profile} written to {credentials_file}")
+        Config.get_logger().debug(
+            f"Credentials for profile {profile} written to {credentials_file}"
+        )
     except (IOError, OSError) as e:
-        Config.get_logger().error(f"Failed to write credentials to {credentials_file}: {e}", exc_info=True)
+        Config.get_logger().error(
+            f"Failed to write credentials to {credentials_file}: {e}", exc_info=True
+        )
         raise WizFileError(f"Failed to write credentials to {credentials_file}", e)
     except Exception as e:
-        Config.get_logger().error(f"Unexpected error writing credentials to {credentials_file}: {e}", exc_info=True)
-        raise WizFileError(f"Unexpected error writing credentials to {credentials_file}", e)
+        Config.get_logger().error(
+            f"Unexpected error writing credentials to {credentials_file}: {e}",
+            exc_info=True,
+        )
+        raise WizFileError(
+            f"Unexpected error writing credentials to {credentials_file}", e
+        )
+
 
 def is_in_last_x_intervals(
     timestamp_str: Union[str, datetime],
@@ -400,12 +467,12 @@ def is_in_last_x_intervals(
     interval_type: str = "days",
 ) -> bool:
     """Check whether a timestamp falls within the last N days/minutes/seconds."""
-    if interval_type not in ['days', 'minutes', 'seconds']:
+    if interval_type not in ["days", "minutes", "seconds"]:
         raise ValueError("Invalid interval type. Use 'days', 'minutes', or 'seconds'.")
 
     if interval_value <= 0:
         return True
-    
+
     time_difference = timedelta(**{interval_type: interval_value})
     current_time = datetime.now(timezone.utc)
 
@@ -419,85 +486,81 @@ def is_in_last_x_intervals(
         if given_time.tzinfo is None:
             given_time = given_time.replace(tzinfo=timezone.utc)
 
-    return given_time >= (current_time - time_difference).replace(hour=0, minute=0, second=0, microsecond=0)
+    return given_time >= (current_time - time_difference).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+
 
 def determine_time_format(date_str: str) -> Optional[str]:
     """Return the matching strptime format string for the given date, or None."""
     possible_formats = [
         # ISO 8601 with microseconds
-        '%Y-%m-%dT%H:%M:%S.%f%z',       # ISO 8601 with microseconds and timezone offset
-        '%Y-%m-%dT%H:%M:%S.%f',         # ISO 8601 with microseconds, no timezone or offset
-        '%Y-%m-%dT%H:%M:%S.%fZ',        # ISO 8601 with microseconds and 'Z' for UTC
-        
+        "%Y-%m-%dT%H:%M:%S.%f%z",  # ISO 8601 with microseconds and timezone offset
+        "%Y-%m-%dT%H:%M:%S.%f",  # ISO 8601 with microseconds, no timezone or offset
+        "%Y-%m-%dT%H:%M:%S.%fZ",  # ISO 8601 with microseconds and 'Z' for UTC
         # ISO 8601 without microseconds
-        '%Y-%m-%dT%H:%M:%S%z',          # ISO 8601 without microseconds, timezone offset
-        '%Y-%m-%dT%H:%M:%SZ',           # ISO 8601 without microseconds, 'Z' for UTC
-        '%Y-%m-%d %H:%M:%S.%f%z',       # ISO 8601 with space instead of 'T', microseconds and timezone
-        '%Y-%m-%d %H:%M:%S.%f',         # ISO 8601 with space instead of 'T', microseconds, no timezone
-        '%Y-%m-%d %H:%M:%S%z',          # ISO 8601 with space instead of 'T', no microseconds, timezone offset
-        '%Y-%m-%d %H:%M:%SZ',           # ISO 8601 with space instead of 'T', no microseconds, 'Z' for UTC
-        
+        "%Y-%m-%dT%H:%M:%S%z",  # ISO 8601 without microseconds, timezone offset
+        "%Y-%m-%dT%H:%M:%SZ",  # ISO 8601 without microseconds, 'Z' for UTC
+        "%Y-%m-%d %H:%M:%S.%f%z",  # ISO 8601 with space instead of 'T', microseconds and timezone
+        "%Y-%m-%d %H:%M:%S.%f",  # ISO 8601 with space instead of 'T', microseconds, no timezone
+        "%Y-%m-%d %H:%M:%S%z",  # ISO 8601 with space instead of 'T', no microseconds, timezone offset
+        "%Y-%m-%d %H:%M:%SZ",  # ISO 8601 with space instead of 'T', no microseconds, 'Z' for UTC
         # ISO 8601 Week-based date format
-        '%G-W%V-%u',                    # ISO 8601 week-based date format (e.g., "2024-W31-3")
-
+        "%G-W%V-%u",  # ISO 8601 week-based date format (e.g., "2024-W31-3")
         # RFC 822/2822 formats
-        '%a, %d %b %Y %H:%M:%S %z',     # RFC 822 / RFC 2822 format (e.g., "Tue, 31 Jul 2024 16:14:51 +0000")
-        
+        "%a, %d %b %Y %H:%M:%S %z",  # RFC 822 / RFC 2822 format (e.g., "Tue, 31 Jul 2024 16:14:51 +0000")
         # Full date and time with various precision
-        '%Y-%m-%d %H:%M:%S.%f %z %Z',   # Full date and time with microseconds, timezone offset, and abbreviation (UTC) 
-        '%Y-%m-%d %H:%M:%S.%f',         # Full date and time with microseconds, no timezone or offset
-        '%Y-%m-%d %H:%M:%S',            # Full date and time without microseconds or timezone
-
+        "%Y-%m-%d %H:%M:%S.%f %z %Z",  # Full date and time with microseconds, timezone offset, and abbreviation (UTC)
+        "%Y-%m-%d %H:%M:%S.%f",  # Full date and time with microseconds, no timezone or offset
+        "%Y-%m-%d %H:%M:%S",  # Full date and time without microseconds or timezone
         # Compact date and time formats
-        '%Y%m%d%H%M%S',                 # Compact date and time format (e.g., "20240731161451")
-        '%Y%m%d',                       # Compact date format (e.g., "20240731")
-
+        "%Y%m%d%H%M%S",  # Compact date and time format (e.g., "20240731161451")
+        "%Y%m%d",  # Compact date format (e.g., "20240731")
         # Date only formats
-        '%Y-%m-%d',                     # Date only in YYYY-MM-DD format
-        '%d/%m/%Y',                     # Date only in DD/MM/YYYY format (European style)
-        '%m/%d/%Y',                     # Date only in MM/DD/YYYY format (US style)
-        '%Y/%m/%d',                     # Date only in YYYY/MM/DD format
-
+        "%Y-%m-%d",  # Date only in YYYY-MM-DD format
+        "%d/%m/%Y",  # Date only in DD/MM/YYYY format (European style)
+        "%m/%d/%Y",  # Date only in MM/DD/YYYY format (US style)
+        "%Y/%m/%d",  # Date only in YYYY/MM/DD format
         # Date and time with different regions
-        '%d/%m/%Y %H:%M:%S',            # Date and time in DD/MM/YYYY HH:MM:SS format (European style)
-        '%m/%d/%Y %H:%M:%S',            # Date and time in MM/DD/YYYY HH:MM:SS format (US style)
-        '%Y/%m/%d %H:%M:%S',            # Date and time in YYYY/MM/DD HH:MM:SS format
-        '%Y-%m-%d %I:%M %p',            # Date and time in YYYY-MM-DD with 12-hour time and AM/PM
-        
+        "%d/%m/%Y %H:%M:%S",  # Date and time in DD/MM/YYYY HH:MM:SS format (European style)
+        "%m/%d/%Y %H:%M:%S",  # Date and time in MM/DD/YYYY HH:MM:SS format (US style)
+        "%Y/%m/%d %H:%M:%S",  # Date and time in YYYY/MM/DD HH:MM:SS format
+        "%Y-%m-%d %I:%M %p",  # Date and time in YYYY-MM-DD with 12-hour time and AM/PM
         # Time-only formats
-        '%H:%M:%S',                     # Time only in HH:MM:SS format (24-hour clock)
-        '%I:%M %p',                     # Time only in HH:MM AM/PM format (12-hour clock)
-        '%H:%M:%S.%f',                  # Time only with microseconds (HH:MM:SS.microseconds)
-
+        "%H:%M:%S",  # Time only in HH:MM:SS format (24-hour clock)
+        "%I:%M %p",  # Time only in HH:MM AM/PM format (12-hour clock)
+        "%H:%M:%S.%f",  # Time only with microseconds (HH:MM:SS.microseconds)
         # Date and time with full day and month names
-        '%d %b %Y',                     # Date with day, abbreviated month, and year (e.g., "31 Jul 2024")
-        '%A, %d %B %Y %H:%M:%S',        # Full day name, date, full month name, year, and time (e.g., "Wednesday, 31 July 2024 16:14:51")
+        "%d %b %Y",  # Date with day, abbreviated month, and year (e.g., "31 Jul 2024")
+        "%A, %d %B %Y %H:%M:%S",  # Full day name, date, full month name, year, and time (e.g., "Wednesday, 31 July 2024 16:14:51")
     ]
-    
+
     for fmt in possible_formats:
         try:
             datetime.strptime(date_str, fmt)
             return fmt
         except ValueError:
             continue
-    
+
     return None
+
 
 def find_file_with_extension(filepath: str, extension_order: List[str]) -> str:
     """Finds the first existing file with the specified extensions."""
     path_dir, file_name = os.path.split(filepath)
     filename, extension = os.path.splitext(file_name)
-    
+
     if extension:
-        full_path = os.path.join(path_dir, f'{filename}{extension}')
+        full_path = os.path.join(path_dir, f"{filename}{extension}")
         if os.path.exists(full_path):
             return full_path
     else:
         for ext in extension_order:
-            full_path = os.path.join(path_dir, f'{filename}{ext}')
+            full_path = os.path.join(path_dir, f"{filename}{ext}")
             if os.path.exists(full_path):
                 return full_path
     return ""
+
 
 def load_file_if_in_last_x_interval(
     filepath: str,
@@ -506,50 +569,58 @@ def load_file_if_in_last_x_interval(
     extension_order: List[str] = [".pkl", ".json", ".csv"],
 ) -> Any:
     """Load a file only if it was modified within the given interval."""
-    
+
     if interval_value:
         if interval_value < 0:
             return {}
     else:
         full_path = find_file_with_extension(filepath, extension_order)
         return load_file(full_path)
-    
+
     full_path = find_file_with_extension(filepath, extension_order)
-    
+
     if not full_path or os.path.getsize(full_path) <= 1000:
         return {}
 
     last_modified_time = datetime.fromtimestamp(os.path.getmtime(full_path))
-    
-    if is_in_last_x_intervals(last_modified_time, interval_value=interval_value, interval_type=interval_type):
+
+    if is_in_last_x_intervals(
+        last_modified_time, interval_value=interval_value, interval_type=interval_type
+    ):
         return load_file(full_path)
-    
+
     return {}
+
 
 def load_file(full_path: str) -> Any:
     """Load a file based on its MIME type."""
     mime_type, _ = mimetypes.guess_type(full_path)
-    
-    if mime_type == 'application/json':
+
+    if mime_type == "application/json":
         return load_json(full_path)
-    elif mime_type == 'text/csv':
+    elif mime_type == "text/csv":
         return load_csv(full_path)
-    elif mime_type in ['application/xml', 'text/xml']:
+    elif mime_type in ["application/xml", "text/xml"]:
         return load_xml(full_path)
-    elif mime_type == 'text/plain':
+    elif mime_type == "text/plain":
         return load_text(full_path)
-    elif mime_type == 'application/python-pickle':
+    elif mime_type == "application/python-pickle":
         return load_data(full_path)
     else:
         return {}
         # raise ValueError(f"Unsupported file type for {full_path}")
 
+
 def load_json(full_path: str) -> Any:
     """Load and normalize a JSON file."""
-    with open(full_path, 'r') as f:
+    with open(full_path, "r") as f:
         file_data = json.load(f)
-        
-        if isinstance(file_data, dict) and len(file_data) == 1 and isinstance(next(iter(file_data.values())), list):
+
+        if (
+            isinstance(file_data, dict)
+            and len(file_data) == 1
+            and isinstance(next(iter(file_data.values())), list)
+        ):
             data = next(iter(file_data.values()))
             unique_keys = {key for item in data for key in item.keys()}
             for item in data:
@@ -557,33 +628,39 @@ def load_json(full_path: str) -> Any:
                     if key not in item:
                         item[key] = None
             return {next(iter(file_data)): data}
-        
+
         return file_data
+
 
 def load_csv(full_path: str) -> List[Dict[str, str]]:
     """Load a CSV file into a list of dictionaries."""
-    with open(full_path, 'r') as f:
+    with open(full_path, "r") as f:
         reader = csv.DictReader(f)
         return list(reader)
+
 
 def load_xml(full_path: str) -> ET.Element:
     """Load an XML file and return the root element."""
     tree = ET.parse(full_path)
     return tree.getroot()
 
+
 def load_text(full_path: str) -> str:
     """Load a plain text file and return its contents."""
-    with open(full_path, 'r') as f:
+    with open(full_path, "r") as f:
         return f.read()
+
 
 def load_data(file_path: str) -> Any:
     """Load a pickled data file from disk."""
     try:
-        with open(file_path, 'rb') as pickled_data:  
+        with open(file_path, "rb") as pickled_data:
             dataFile = pickle.load(pickled_data)
-            logging.info(f'Data dated {datetime.fromtimestamp(os.path.getmtime(file_path))} loaded.')
+            logging.info(
+                f"Data dated {datetime.fromtimestamp(os.path.getmtime(file_path))} loaded."
+            )
         return dataFile
     except (IOError, OSError, pickle.PickleError) as e1:
-        message = f'Unable to open saved data due to error: {e1}'
+        message = f"Unable to open saved data due to error: {e1}"
         logging.error(message, exc_info=True)
         raise WizFileError(f"Failed to load data from {file_path}", e1)

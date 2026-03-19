@@ -135,12 +135,16 @@ class TestGetLogger:
 # Config.load() — loading from a YAML file
 # ---------------------------------------------------------------------------
 
+
 class TestConfigLoad:
     def test_load_from_yaml_file(self, tmp_path):
         """load() should read a YAML config file and populate _CONFIG."""
         config_data = {
             "app": {"name": "test-app", "release": "2.0.0"},
-            "auth": {"grant_type": "client_credentials", "credentials": {"storage_method": "env"}},
+            "auth": {
+                "grant_type": "client_credentials",
+                "credentials": {"storage_method": "env"},
+            },
             "domain": {"default": "gov"},
             "api": {"max_retries": 3, "retry_time": 1, "timeout": 60},
             "logging": {"enabled": False},
@@ -148,9 +152,11 @@ class TestConfigLoad:
         config_file = tmp_path / "wiz.config"
         config_file.write_text(yaml.dump(config_data))
 
-        with patch("wizsec.config.DEFAULT_WIZ_DIR", tmp_path), \
-             patch("wizsec.config.SERVERLESS", False), \
-             patch("wizsec.config.get_version", side_effect=Exception("not installed")):
+        with (
+            patch("wizsec.config.DEFAULT_WIZ_DIR", tmp_path),
+            patch("wizsec.config.SERVERLESS", False),
+            patch("wizsec.config.get_version", side_effect=Exception("not installed")),
+        ):
             Config.load(config_path=str(config_file))
 
         assert Config._loaded is True
@@ -160,7 +166,10 @@ class TestConfigLoad:
         """load() should apply dot-notation overrides on top of YAML values."""
         config_data = {
             "app": {"name": "original", "release": "1.0.0"},
-            "auth": {"grant_type": "client_credentials", "credentials": {"storage_method": "env"}},
+            "auth": {
+                "grant_type": "client_credentials",
+                "credentials": {"storage_method": "env"},
+            },
             "domain": {"default": "gov"},
             "api": {"max_retries": 2, "retry_time": 1, "timeout": 30},
             "logging": {"enabled": False},
@@ -169,9 +178,11 @@ class TestConfigLoad:
         config_file.write_text(yaml.dump(config_data))
 
         overrides = ["api.timeout=120", "app.name=overridden"]
-        with patch("wizsec.config.DEFAULT_WIZ_DIR", tmp_path), \
-             patch("wizsec.config.SERVERLESS", False), \
-             patch("wizsec.config.get_version", side_effect=Exception("not installed")):
+        with (
+            patch("wizsec.config.DEFAULT_WIZ_DIR", tmp_path),
+            patch("wizsec.config.SERVERLESS", False),
+            patch("wizsec.config.get_version", side_effect=Exception("not installed")),
+        ):
             Config.load(config_path=str(config_file), overrides=overrides)
 
         assert Config._CONFIG["api"]["timeout"] == 120
@@ -181,7 +192,10 @@ class TestConfigLoad:
         """load() should set WIZ_CLIENT_ID / WIZ_CLIENT_SECRET env vars when provided."""
         config_data = {
             "app": {"name": "t", "release": "0"},
-            "auth": {"grant_type": "client_credentials", "credentials": {"storage_method": "env"}},
+            "auth": {
+                "grant_type": "client_credentials",
+                "credentials": {"storage_method": "env"},
+            },
             "domain": {"default": "gov"},
             "api": {"max_retries": 1, "retry_time": 0, "timeout": 5},
             "logging": {"enabled": False},
@@ -190,9 +204,11 @@ class TestConfigLoad:
         config_file.write_text(yaml.dump(config_data))
 
         try:
-            with patch("wizsec.config.DEFAULT_WIZ_DIR", tmp_path), \
-                 patch("wizsec.config.SERVERLESS", False), \
-                 patch("wizsec.config.get_version", side_effect=Exception("skip")):
+            with (
+                patch("wizsec.config.DEFAULT_WIZ_DIR", tmp_path),
+                patch("wizsec.config.SERVERLESS", False),
+                patch("wizsec.config.get_version", side_effect=Exception("skip")),
+            ):
                 Config.load(
                     config_path=str(config_file),
                     client_id="test-id",
@@ -209,7 +225,10 @@ class TestConfigLoad:
         """Overrides without '=' should be silently skipped."""
         config_data = {
             "app": {"name": "t", "release": "0"},
-            "auth": {"grant_type": "client_credentials", "credentials": {"storage_method": "env"}},
+            "auth": {
+                "grant_type": "client_credentials",
+                "credentials": {"storage_method": "env"},
+            },
             "domain": {"default": "gov"},
             "api": {"max_retries": 1, "retry_time": 0, "timeout": 5},
             "logging": {"enabled": False},
@@ -218,9 +237,11 @@ class TestConfigLoad:
         config_file.write_text(yaml.dump(config_data))
 
         overrides = ["no-equals-here", 42]  # invalid overrides
-        with patch("wizsec.config.DEFAULT_WIZ_DIR", tmp_path), \
-             patch("wizsec.config.SERVERLESS", False), \
-             patch("wizsec.config.get_version", side_effect=Exception("skip")):
+        with (
+            patch("wizsec.config.DEFAULT_WIZ_DIR", tmp_path),
+            patch("wizsec.config.SERVERLESS", False),
+            patch("wizsec.config.get_version", side_effect=Exception("skip")),
+        ):
             Config.load(config_path=str(config_file), overrides=overrides)
 
         # Should load successfully despite bad overrides
@@ -231,12 +252,16 @@ class TestConfigLoad:
 # Config.ensure_loaded() decorator
 # ---------------------------------------------------------------------------
 
+
 class TestEnsureLoaded:
     def test_ensure_loaded_calls_load_when_not_loaded(self, tmp_path):
         """ensure_loaded decorator should call load() when _loaded is False."""
         config_data = {
             "app": {"name": "auto", "release": "0.1"},
-            "auth": {"grant_type": "client_credentials", "credentials": {"storage_method": "env"}},
+            "auth": {
+                "grant_type": "client_credentials",
+                "credentials": {"storage_method": "env"},
+            },
             "domain": {"default": "gov"},
             "api": {"max_retries": 1, "retry_time": 0, "timeout": 10},
             "logging": {"enabled": False},
@@ -246,9 +271,11 @@ class TestEnsureLoaded:
 
         assert Config._loaded is False
 
-        with patch("wizsec.config.DEFAULT_WIZ_DIR", tmp_path), \
-             patch("wizsec.config.SERVERLESS", False), \
-             patch("wizsec.config.get_version", side_effect=Exception("skip")):
+        with (
+            patch("wizsec.config.DEFAULT_WIZ_DIR", tmp_path),
+            patch("wizsec.config.SERVERLESS", False),
+            patch("wizsec.config.get_version", side_effect=Exception("skip")),
+        ):
             # Calling an accessor should auto-load
             result = Config.app_name()
 
@@ -265,6 +292,7 @@ class TestEnsureLoaded:
 # ---------------------------------------------------------------------------
 # Config.load_dotenv()
 # ---------------------------------------------------------------------------
+
 
 class TestLoadDotenv:
     def test_load_dotenv_calls_dotenv(self, mock_config, tmp_path):
@@ -287,6 +315,7 @@ class TestLoadDotenv:
 # ---------------------------------------------------------------------------
 # Additional Accessor Tests
 # ---------------------------------------------------------------------------
+
 
 class TestConfigAccessorsExtended:
     def test_app_name(self, mock_config):
@@ -445,25 +474,30 @@ class TestConfigAccessorsExtended:
 # expand_all_vars()
 # ---------------------------------------------------------------------------
 
+
 class TestExpandAllVars:
     def test_expands_home(self):
         from wizsec.config import expand_all_vars
+
         result = expand_all_vars("$HOME/test")
         assert str(Path.home()) in result
         assert result.endswith("/test") or result.endswith("\\test")
 
     def test_expands_cwd(self):
         from wizsec.config import expand_all_vars
+
         result = expand_all_vars("$CWD/output")
         assert str(Path.cwd()) in result
 
     def test_expands_tilde(self):
         from wizsec.config import expand_all_vars
+
         result = expand_all_vars("~/somedir")
         assert "~" not in result
 
     def test_expands_env_var(self):
         from wizsec.config import expand_all_vars
+
         with patch.dict(os.environ, {"MY_TEST_VAR": "/custom/path"}):
             result = expand_all_vars("$MY_TEST_VAR/sub")
         assert "/custom/path" in result
@@ -473,15 +507,18 @@ class TestExpandAllVars:
 # parse_filepath()
 # ---------------------------------------------------------------------------
 
+
 class TestParseFilepath:
     def test_none_returns_cwd(self):
         from wizsec.config import parse_filepath
+
         directory, filename = parse_filepath(None)
         assert directory == Path.cwd()
         assert filename is None
 
     def test_file_path_returns_parent_and_name(self, tmp_path):
         from wizsec.config import parse_filepath
+
         test_file = tmp_path / "data.json"
         test_file.touch()
         directory, filename = parse_filepath(str(test_file))
@@ -490,11 +527,13 @@ class TestParseFilepath:
 
     def test_directory_path_returns_dir_and_none(self, tmp_path):
         from wizsec.config import parse_filepath
+
         directory, filename = parse_filepath(str(tmp_path))
         assert directory == tmp_path
         assert filename is None
 
     def test_relative_path_resolved_to_absolute(self):
         from wizsec.config import parse_filepath
+
         directory, filename = parse_filepath("relative/dir")
         assert directory.is_absolute()

@@ -38,7 +38,12 @@ class TestPost:
     @patch("wizsec._transport.httpx.post")
     def test_with_proxy_and_verify(self, mock_post):
         mock_post.return_value = MagicMock(status_code=200)
-        post("https://example.com", proxy="http://proxy:8080", verify="/ca.pem", timeout=30)
+        post(
+            "https://example.com",
+            proxy="http://proxy:8080",
+            verify="/ca.pem",
+            timeout=30,
+        )
         _, kwargs = mock_post.call_args
         assert kwargs["proxy"] == "http://proxy:8080"
         assert kwargs["verify"] == "/ca.pem"
@@ -47,6 +52,7 @@ class TestPost:
     @patch("wizsec._transport.httpx.post")
     def test_wraps_httpx_error(self, mock_post):
         import httpx
+
         mock_post.side_effect = httpx.ConnectError("refused")
         with pytest.raises(TransportError) as exc_info:
             post("https://example.com")
@@ -64,6 +70,7 @@ class TestGet:
     @patch("wizsec._transport.httpx.get")
     def test_wraps_httpx_error(self, mock_get):
         import httpx
+
         mock_get.side_effect = httpx.TimeoutException("timed out")
         with pytest.raises(TransportError):
             get("https://example.com/file")

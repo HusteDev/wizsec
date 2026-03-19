@@ -15,7 +15,9 @@ import pytest
 from wizsec.config import Config
 from wizsec._registry import EnvironmentRegistry, ProfileRegistry
 from wizsec.exceptions import (
-    WizAuthenticationError, WizAPIError, WizCredentialsError,
+    WizAuthenticationError,
+    WizAPIError,
+    WizCredentialsError,
     WizTimeoutError,
 )
 from wizsec._transport import TransportError
@@ -24,9 +26,12 @@ from wizsec._transport import TransportError
 @pytest.fixture()
 def mock_client(mock_config):
     """Create a WizClient with mocked auth so no real network calls happen."""
-    with patch("wizsec.client.WizClient._preload_credentials"), \
-         patch("wizsec.client.WizClient._initialize_headers"):
+    with (
+        patch("wizsec.client.WizClient._preload_credentials"),
+        patch("wizsec.client.WizClient._initialize_headers"),
+    ):
         from wizsec.client import WizClient
+
         # Clear the singleton cache so we get a fresh instance
         WizClient._clients.clear()
         client = WizClient(environment="gov", profile="test")
@@ -36,9 +41,12 @@ def mock_client(mock_config):
 
 class TestWizClientSingleton:
     def test_same_env_profile_returns_same_instance(self, mock_config):
-        with patch("wizsec.client.WizClient._preload_credentials"), \
-             patch("wizsec.client.WizClient._initialize_headers"):
+        with (
+            patch("wizsec.client.WizClient._preload_credentials"),
+            patch("wizsec.client.WizClient._initialize_headers"),
+        ):
             from wizsec.client import WizClient
+
             WizClient._clients.clear()
 
             c1 = WizClient(environment="app", profile="default")
@@ -48,9 +56,12 @@ class TestWizClientSingleton:
             WizClient._clients.clear()
 
     def test_different_profile_returns_different_instance(self, mock_config):
-        with patch("wizsec.client.WizClient._preload_credentials"), \
-             patch("wizsec.client.WizClient._initialize_headers"):
+        with (
+            patch("wizsec.client.WizClient._preload_credentials"),
+            patch("wizsec.client.WizClient._initialize_headers"),
+        ):
             from wizsec.client import WizClient
+
             WizClient._clients.clear()
 
             c1 = WizClient(environment="app", profile="p1")
@@ -60,9 +71,12 @@ class TestWizClientSingleton:
             WizClient._clients.clear()
 
     def test_different_environment_returns_different_instance(self, mock_config):
-        with patch("wizsec.client.WizClient._preload_credentials"), \
-             patch("wizsec.client.WizClient._initialize_headers"):
+        with (
+            patch("wizsec.client.WizClient._preload_credentials"),
+            patch("wizsec.client.WizClient._initialize_headers"),
+        ):
             from wizsec.client import WizClient
+
             WizClient._clients.clear()
 
             c1 = WizClient(environment="app", profile="default")
@@ -131,9 +145,14 @@ class TestApiEndpoint:
 # Helper to build a minimal JWT for testing
 # ===================================================================
 
+
 def _make_jwt(payload: dict) -> str:
     """Build a fake JWT with header.payload.signature (only payload matters)."""
-    header = base64.urlsafe_b64encode(json.dumps({"alg": "RS256"}).encode()).rstrip(b"=").decode()
+    header = (
+        base64.urlsafe_b64encode(json.dumps({"alg": "RS256"}).encode())
+        .rstrip(b"=")
+        .decode()
+    )
     body = base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode()
     return f"{header}.{body}.fakesig"
 
@@ -142,11 +161,13 @@ def _make_jwt(payload: dict) -> str:
 # _initialize_headers
 # ===================================================================
 
+
 class TestInitializeHeaders:
     def test_headers_set_on_env_state(self, mock_config):
         """Create client without mocking _initialize_headers to test it."""
         with patch("wizsec.client.WizClient._preload_credentials"):
             from wizsec.client import WizClient
+
             WizClient._clients.clear()
             client = WizClient(environment="gov", profile="hdr_test")
             headers = client._env_state.headers
@@ -159,6 +180,7 @@ class TestInitializeHeaders:
 # ===================================================================
 # _enqueue_request
 # ===================================================================
+
 
 class TestEnqueueRequest:
     def test_serverless_executes_immediately(self, mock_client):
@@ -180,8 +202,10 @@ class TestEnqueueRequest:
 
     def test_normal_mode_enqueues_and_starts_worker(self, mock_client):
         request = MagicMock()
-        with patch.object(Config, "serverless", return_value=False), \
-             patch.object(mock_client, "_start_worker") as sw:
+        with (
+            patch.object(Config, "serverless", return_value=False),
+            patch.object(mock_client, "_start_worker") as sw,
+        ):
             mock_client._enqueue_request(request)
         assert not mock_client._env_state.queue.empty()
         sw.assert_called_once()
@@ -190,6 +214,7 @@ class TestEnqueueRequest:
 # ===================================================================
 # _start_worker / _process_queue / stop_worker
 # ===================================================================
+
 
 class TestWorkerLifecycle:
     def test_start_worker_creates_thread(self, mock_client):
@@ -224,10 +249,13 @@ class TestWorkerLifecycle:
 # create_request / create_batch_request
 # ===================================================================
 
+
 class TestRequestCreation:
     def test_create_request_returns_wiz_response(self, mock_client):
-        with patch("wizsec._request.WizRequest") as MockReq, \
-             patch("wizsec._request.WizResponse") as MockResp:
+        with (
+            patch("wizsec._request.WizRequest") as MockReq,
+            patch("wizsec._request.WizResponse") as MockResp,
+        ):
             result = mock_client.create_request(query="{ viewer { id } }")
         MockReq.assert_called_once()
         MockResp.assert_called_once()
@@ -242,13 +270,16 @@ class TestRequestCreation:
 # _post
 # ===================================================================
 
+
 class TestPost:
     def test_post_delegates_to_transport(self, mock_client):
         mock_client._env_state.dc = "us1"
         mock_client._domain = "gov.wiz.io"
         mock_resp = MagicMock(status_code=200)
         with patch("wizsec.client.transport_post", return_value=mock_resp) as tp:
-            result = mock_client._post(url="https://api.us1.gov.wiz.io/graphql", json={"query": "{ v }"})
+            result = mock_client._post(
+                url="https://api.us1.gov.wiz.io/graphql", json={"query": "{ v }"}
+            )
         tp.assert_called_once()
         assert result is mock_resp
 
@@ -263,6 +294,7 @@ class TestPost:
 # ===================================================================
 # _limiter_key / _get_limiter
 # ===================================================================
+
 
 class TestRateLimiting:
     def test_limiter_key_query_service(self, mock_client):
@@ -289,35 +321,53 @@ class TestRateLimiting:
 # _check_token
 # ===================================================================
 
+
 class TestCheckToken:
     def test_no_token_triggers_authenticate(self, mock_client):
         mock_client._profile_state.token_data = {}
-        with patch.object(mock_client, "_authenticate") as auth, \
-             patch.object(Config, "serverless", return_value=False):
+        with (
+            patch.object(mock_client, "_authenticate") as auth,
+            patch.object(Config, "serverless", return_value=False),
+        ):
             mock_client._check_token()
         auth.assert_called_once()
 
     def test_expired_token_triggers_refresh(self, mock_client):
-        mock_client._profile_state.token_data = {"access_token": "tok", "time_received": 0}
-        with patch.object(mock_client, "_authenticate") as auth, \
-             patch.object(mock_client, "_token_expired", return_value=True), \
-             patch.object(Config, "serverless", return_value=False):
+        mock_client._profile_state.token_data = {
+            "access_token": "tok",
+            "time_received": 0,
+        }
+        with (
+            patch.object(mock_client, "_authenticate") as auth,
+            patch.object(mock_client, "_token_expired", return_value=True),
+            patch.object(Config, "serverless", return_value=False),
+        ):
             mock_client._check_token()
         auth.assert_called_once_with(refresh=True)
 
     def test_valid_token_no_auth(self, mock_client):
-        mock_client._profile_state.token_data = {"access_token": "tok", "time_received": time.time()}
-        with patch.object(mock_client, "_authenticate") as auth, \
-             patch.object(mock_client, "_token_expired", return_value=False), \
-             patch.object(Config, "serverless", return_value=False):
+        mock_client._profile_state.token_data = {
+            "access_token": "tok",
+            "time_received": time.time(),
+        }
+        with (
+            patch.object(mock_client, "_authenticate") as auth,
+            patch.object(mock_client, "_token_expired", return_value=False),
+            patch.object(Config, "serverless", return_value=False),
+        ):
             mock_client._check_token()
         auth.assert_not_called()
 
     def test_serverless_forces_fresh_auth(self, mock_client):
-        mock_client._profile_state.token_data = {"access_token": "tok", "time_received": time.time()}
-        with patch.object(mock_client, "_authenticate") as auth, \
-             patch.object(mock_client, "_token_expired", return_value=False), \
-             patch.object(Config, "serverless", return_value=True):
+        mock_client._profile_state.token_data = {
+            "access_token": "tok",
+            "time_received": time.time(),
+        }
+        with (
+            patch.object(mock_client, "_authenticate") as auth,
+            patch.object(mock_client, "_token_expired", return_value=False),
+            patch.object(Config, "serverless", return_value=True),
+        ):
             mock_client._check_token()
         # Called once for serverless, then token_data is truthy and not expired so no more
         auth.assert_called_once()
@@ -326,6 +376,7 @@ class TestCheckToken:
 # ===================================================================
 # Credential loading
 # ===================================================================
+
 
 class TestCredentialLoading:
     def test_preload_skips_non_client_credentials(self, mock_client):
@@ -337,9 +388,12 @@ class TestCredentialLoading:
     def test_preload_calls_load_and_validate(self, mock_config):
         """Use a fresh client (not mock_client) so _preload_credentials is real."""
         from wizsec.client import WizClient
-        with patch("wizsec.client.WizClient._initialize_headers"), \
-             patch.object(WizClient, "_load_credentials_by_storage_method") as load, \
-             patch.object(WizClient, "_validate_and_store_credentials") as validate:
+
+        with (
+            patch("wizsec.client.WizClient._initialize_headers"),
+            patch.object(WizClient, "_load_credentials_by_storage_method") as load,
+            patch.object(WizClient, "_validate_and_store_credentials") as validate,
+        ):
             WizClient._clients.clear()
             client = WizClient(environment="gov", profile="preload_test")
         load.assert_called_once()
@@ -347,16 +401,25 @@ class TestCredentialLoading:
         WizClient._clients.clear()
 
     def test_load_credentials_from_env(self, mock_client):
-        with patch.dict(os.environ, {"WIZ_CLIENT_ID": "env-id", "WIZ_CLIENT_SECRET": "env-secret"}):
+        with patch.dict(
+            os.environ, {"WIZ_CLIENT_ID": "env-id", "WIZ_CLIENT_SECRET": "env-secret"}
+        ):
             mock_client._load_credentials_from_env()
         assert mock_client._client_id == "env-id"
         assert mock_client._client_secret == "env-secret"
 
     def test_load_credentials_from_env_profile_prefixed(self, mock_client):
-        with patch.dict(os.environ, {"test_WIZ_CLIENT_ID": "pid", "test_WIZ_CLIENT_SECRET": "psec"}, clear=False):
+        with patch.dict(
+            os.environ,
+            {"test_WIZ_CLIENT_ID": "pid", "test_WIZ_CLIENT_SECRET": "psec"},
+            clear=False,
+        ):
             # Clear the non-prefixed vars to test fallback
-            env = {k: v for k, v in os.environ.items()
-                   if k not in ("WIZ_CLIENT_ID", "WIZ_CLIENT_SECRET")}
+            env = {
+                k: v
+                for k, v in os.environ.items()
+                if k not in ("WIZ_CLIENT_ID", "WIZ_CLIENT_SECRET")
+            }
             with patch.dict(os.environ, env, clear=True):
                 mock_client._load_credentials_from_env()
         assert mock_client._client_id == "pid"
@@ -374,8 +437,10 @@ class TestCredentialLoading:
         mock_client.credential_storage = "file"
         mock_client._client_id = ""
         mock_client._client_secret = ""
-        with patch.object(mock_client, "_load_credentials_from_file") as load_file, \
-             patch.object(mock_client, "_load_credentials_from_env"):
+        with (
+            patch.object(mock_client, "_load_credentials_from_file") as load_file,
+            patch.object(mock_client, "_load_credentials_from_env"),
+        ):
             mock_client._load_credentials_by_storage_method()
         load_file.assert_called_once()
 
@@ -383,8 +448,10 @@ class TestCredentialLoading:
         mock_client.credential_storage = "prompt"
         mock_client._client_id = ""
         mock_client._client_secret = ""
-        with patch.object(mock_client, "_load_credentials_from_prompt") as load_prompt, \
-             patch.object(mock_client, "_load_credentials_from_env"):
+        with (
+            patch.object(mock_client, "_load_credentials_from_prompt") as load_prompt,
+            patch.object(mock_client, "_load_credentials_from_env"),
+        ):
             mock_client._load_credentials_by_storage_method()
         load_prompt.assert_called_once()
 
@@ -401,6 +468,7 @@ class TestCredentialLoading:
 # ===================================================================
 # _validate_and_store_credentials
 # ===================================================================
+
 
 class TestValidateAndStoreCredentials:
     def test_raises_when_missing_id(self, mock_client):
@@ -427,6 +495,7 @@ class TestValidateAndStoreCredentials:
 # ===================================================================
 # _authenticate / _authenticate_client_credentials
 # ===================================================================
+
 
 class TestAuthentication:
     def test_authenticate_dispatches_client_credentials(self, mock_client):
@@ -484,7 +553,9 @@ class TestAuthentication:
         mock_client._domain = "gov.wiz.io"
         mock_client._proxies = {}
 
-        with patch("wizsec.client.transport_post", side_effect=TransportError("net fail")):
+        with patch(
+            "wizsec.client.transport_post", side_effect=TransportError("net fail")
+        ):
             with pytest.raises(WizAPIError):
                 mock_client._authenticate_client_credentials()
 
@@ -492,6 +563,7 @@ class TestAuthentication:
 # ===================================================================
 # _decode_access_token
 # ===================================================================
+
 
 class TestDecodeAccessToken:
     def test_decode_valid_jwt(self, mock_client):
@@ -522,6 +594,7 @@ class TestDecodeAccessToken:
 # _token_expired
 # ===================================================================
 
+
 class TestTokenExpired:
     def test_no_access_token_means_expired(self, mock_client):
         mock_client._profile_state.token_data = {}
@@ -545,6 +618,7 @@ class TestTokenExpired:
 # ===================================================================
 # loud_logging
 # ===================================================================
+
 
 class TestLoudLogging:
     def test_loud_logging_noop_when_verbose_disabled(self, mock_client):
@@ -578,10 +652,13 @@ class TestLoudLogging:
 # set_log_level
 # ===================================================================
 
+
 class TestSetLogLevel:
     def test_set_log_level_delegates_to_config(self, mock_client):
-        with patch.object(Config, "set_log_level") as sll, \
-             patch.object(Config, "get_logger", return_value=mock_client._logger):
+        with (
+            patch.object(Config, "set_log_level") as sll,
+            patch.object(Config, "get_logger", return_value=mock_client._logger),
+        ):
             mock_client.set_log_level("DEBUG")
         sll.assert_called_once_with("DEBUG", handler_level=None, include_children=True)
 
@@ -590,19 +667,24 @@ class TestSetLogLevel:
 # cleanup_for_lambda
 # ===================================================================
 
+
 class TestCleanupForLambda:
     def test_cleanup_when_serverless(self, mock_client):
         mock_client.serverless = True
-        with patch.object(ProfileRegistry, "cleanup") as pc, \
-             patch.object(EnvironmentRegistry, "cleanup") as ec:
+        with (
+            patch.object(ProfileRegistry, "cleanup") as pc,
+            patch.object(EnvironmentRegistry, "cleanup") as ec,
+        ):
             mock_client.cleanup_for_lambda()
         pc.assert_called_once_with("test")
         ec.assert_called_once_with("gov")
 
     def test_cleanup_noop_when_not_serverless(self, mock_client):
         mock_client.serverless = False
-        with patch.object(ProfileRegistry, "cleanup") as pc, \
-             patch.object(EnvironmentRegistry, "cleanup") as ec:
+        with (
+            patch.object(ProfileRegistry, "cleanup") as pc,
+            patch.object(EnvironmentRegistry, "cleanup") as ec,
+        ):
             mock_client.cleanup_for_lambda()
         pc.assert_not_called()
         ec.assert_not_called()
@@ -612,14 +694,18 @@ class TestCleanupForLambda:
 # async_session
 # ===================================================================
 
+
 class TestAsyncSession:
     def test_async_session_creates_and_closes_client(self, mock_client):
         from unittest.mock import AsyncMock
+
         mock_async_client = MagicMock()
         mock_async_client.aclose = AsyncMock()
 
         async def _run():
-            with patch("wizsec.client.create_async_client", return_value=mock_async_client):
+            with patch(
+                "wizsec.client.create_async_client", return_value=mock_async_client
+            ):
                 async with mock_client.async_session() as sc:
                     assert sc is mock_client
                     assert hasattr(sc, "_async_session")
@@ -631,6 +717,7 @@ class TestAsyncSession:
 
     def test_async_session_with_provided_client(self, mock_client):
         from unittest.mock import AsyncMock
+
         provided = MagicMock()
         provided.aclose = AsyncMock()
 

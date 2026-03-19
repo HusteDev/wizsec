@@ -20,6 +20,7 @@ _register_verbose_level()
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _minimal_config(tmp_path: Path) -> dict:
     """Return a minimal in-memory config dict."""
     return {
@@ -50,6 +51,7 @@ def _minimal_config(tmp_path: Path) -> dict:
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture()
 def minimal_config(tmp_path):

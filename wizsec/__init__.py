@@ -44,6 +44,7 @@ __all__ = [
     "WizServerlessError",
 ]
 
+
 def __getattr__(name):
     if name == "WizClient":
         from .client import WizClient
@@ -60,14 +61,32 @@ def __getattr__(name):
     elif name == "SchemaValidator":
         from ._schema import SchemaValidator
     elif name in (
-        "WizError", "WizAuthenticationError", "WizAPIError", "WizConfigurationError",
-        "WizCredentialsError", "WizRateLimitError", "WizQueryError", "WizSchemaValidationError",
-        "WizReportError", "WizTimeoutError", "WizFileError", "WizServerlessError",
+        "WizError",
+        "WizAuthenticationError",
+        "WizAPIError",
+        "WizConfigurationError",
+        "WizCredentialsError",
+        "WizRateLimitError",
+        "WizQueryError",
+        "WizSchemaValidationError",
+        "WizReportError",
+        "WizTimeoutError",
+        "WizFileError",
+        "WizServerlessError",
     ):
         from .exceptions import (
-            WizError, WizAuthenticationError, WizAPIError, WizConfigurationError,
-            WizCredentialsError, WizRateLimitError, WizQueryError, WizSchemaValidationError,
-            WizReportError, WizTimeoutError, WizFileError, WizServerlessError,
+            WizError,
+            WizAuthenticationError,
+            WizAPIError,
+            WizConfigurationError,
+            WizCredentialsError,
+            WizRateLimitError,
+            WizQueryError,
+            WizSchemaValidationError,
+            WizReportError,
+            WizTimeoutError,
+            WizFileError,
+            WizServerlessError,
         )
     else:
         raise AttributeError(f"module {__name__} has no attribute {name}")

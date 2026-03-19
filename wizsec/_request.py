@@ -1,10 +1,10 @@
 ##
-## 
+##
 ##   RRRRR   EEEEE    QQQQQ   U     U   EEEEE   SSSSS   TTTTTTT
-##   R   R   E       Q     Q  U     U   E       S          T   
-##   RRRRR   EEEEE   Q  Q  Q  U     U   EEEEE   SSSSS      T   
-##   R  R    E       Q   QQQ  U     U   E           S      T   
-##   R   R   EEEEE    QQQQQ    UUUUU    EEEEE   SSSSS      T   
+##   R   R   E       Q     Q  U     U   E       S          T
+##   RRRRR   EEEEE   Q  Q  Q  U     U   EEEEE   SSSSS      T
+##   R  R    E       Q   QQQ  U     U   E           S      T
+##   R   R   EEEEE    QQQQQ    UUUUU    EEEEE   SSSSS      T
 ##
 ##
 ##
@@ -28,6 +28,7 @@ from .client import WizClient
 from .exceptions import WizQueryError, WizAPIError, WizReportError, WizTimeoutError
 from ._transport import stream_get, get as transport_get, TransportError
 
+
 class _RequestBase:
     """Shared logic for sync and async request classes."""
 
@@ -39,7 +40,7 @@ class _RequestBase:
         vars: Optional[Dict[str, Any]] = None,
         paginate: bool = True,
         report_request: Optional[Dict[str, Any]] = None,
-        on_page_event: Optional[Callable] = None
+        on_page_event: Optional[Callable] = None,
     ) -> None:
         """Initialize common state shared by sync and async request classes."""
         self._logger = Config.get_logger()
@@ -77,6 +78,7 @@ class _RequestBase:
     def queryCollection(self, module: Union[str, Any]) -> None:
         """Set the query collection by module name or module object."""
         import importlib, sys, types
+
         if isinstance(module, str):
             if module not in sys.modules:
                 module = importlib.import_module(module)
@@ -86,8 +88,12 @@ class _RequestBase:
                 sys.modules[module_name] = module
                 self._logger.debug("Manually added [%s] to sys.modules", module_name)
         else:
-            self._logger.warning("Unexpected type for queryCollection: %s", type(module))
-            raise WizQueryError("QueryCollection must be a module or a module name string")
+            self._logger.warning(
+                "Unexpected type for queryCollection: %s", type(module)
+            )
+            raise WizQueryError(
+                "QueryCollection must be a module or a module name string"
+            )
 
         self._queryCollection = module
 
@@ -113,7 +119,9 @@ class _RequestBase:
                     resolved = getattr(self.queryCollection, QUERY)
                     self._logger.debug(f"Resolved query '{QUERY}' from queryCollection")
                 except AttributeError:
-                    self._logger.debug(f"Query '{QUERY}' not found in queryCollection. Using raw query.")
+                    self._logger.debug(
+                        f"Query '{QUERY}' not found in queryCollection. Using raw query."
+                    )
                     resolved = QUERY
             else:
                 resolved = QUERY
@@ -130,10 +138,12 @@ class _RequestBase:
                 client=self._client,
             )
 
-        if (
-            self._current_query_info["request_type"].lower() == "mutation" and
-            self._current_query_info["source"].lower() in ["createreport", "rerunreport"]
-        ):
+        if self._current_query_info[
+            "request_type"
+        ].lower() == "mutation" and self._current_query_info["source"].lower() in [
+            "createreport",
+            "rerunreport",
+        ]:
             self._logger.debug("__current_query = %s", self._current_query_info)
             self._report = True
 
@@ -144,10 +154,12 @@ class _RequestBase:
             return
 
         for key, value in (page_data or {}).items():
-            if (isinstance(value, dict)
+            if (
+                isinstance(value, dict)
                 and "nodes" in value
                 and key in self._aggregated_data
-                and isinstance(self._aggregated_data[key], dict)):
+                and isinstance(self._aggregated_data[key], dict)
+            ):
 
                 if "nodes" not in self._aggregated_data[key]:
                     self._aggregated_data[key]["nodes"] = []
@@ -164,7 +176,7 @@ class _RequestBase:
                 page_info = value["pageInfo"]
                 return {
                     "hasNextPage": page_info.get("hasNextPage", False),
-                    "endCursor": page_info.get("endCursor")
+                    "endCursor": page_info.get("endCursor"),
                 }
         return None
 
@@ -172,7 +184,11 @@ class _RequestBase:
         """Remove pageInfo from final data."""
         if self.data:
             first_key = next(iter(self.data), None)
-            if first_key and isinstance(self.data[first_key], dict) and "pageInfo" in self.data[first_key]:
+            if (
+                first_key
+                and isinstance(self.data[first_key], dict)
+                and "pageInfo" in self.data[first_key]
+            ):
                 del self.data[first_key]["pageInfo"]
 
     def success(self) -> bool:
@@ -191,10 +207,18 @@ class WizRequest(_RequestBase):
         vars: Optional[Dict[str, Any]] = None,
         paginate: bool = True,
         report_request: Optional[Dict[str, Any]] = None,
-        on_page_event: Optional[Callable] = None
+        on_page_event: Optional[Callable] = None,
     ) -> None:
         """Initialize a synchronous Wiz GraphQL request."""
-        self._init_common(client, queryCollection, query, vars, paginate, report_request, on_page_event)
+        self._init_common(
+            client,
+            queryCollection,
+            query,
+            vars,
+            paginate,
+            report_request,
+            on_page_event,
+        )
         self._done_event = threading.Event()
 
     def submit(self) -> "WizRequest":
@@ -203,7 +227,7 @@ class WizRequest(_RequestBase):
             # Skip threading in serverless mode
             self._client._enqueue_request(self)
             return self
-    
+
         self._done_event.clear()
         self._client._enqueue_request(self)
         self._done_event.wait()
@@ -223,14 +247,14 @@ class WizRequest(_RequestBase):
                 limiter.try_acquire(self._limiter_key)
                 response = self._client._post(url=url, headers=headers, json=payload)
                 self._status_code = response.status_code
-                
+
                 if response.status_code == 200:
                     if self._process_successful_response(response, url, headers):
                         return
                 else:
                     self._handle_failed_response(response)
                     self._logger.debug(f"Payload: {payload}")
-                    
+
             except TransportError as e:
                 self._handle_network_error(e)
             except Exception as e:
@@ -240,8 +264,10 @@ class WizRequest(_RequestBase):
             self._wait_before_retry(retries)
 
         self._handle_final_failure()
-    
-    def _process_successful_response(self, response: Any, url: str, headers: Dict[str, str]) -> bool:
+
+    def _process_successful_response(
+        self, response: Any, url: str, headers: Dict[str, str]
+    ) -> bool:
         """Process a successful HTTP response. Returns True if processing is complete."""
         self._response = response.json()
         self.errors.extend(self._response.get("errors", []))
@@ -256,12 +282,12 @@ class WizRequest(_RequestBase):
             self._logger.debug("Trigger report workflow")
             self._report_workflow(response)
             return True
-            
+
         if Config.serverless():
             return self._handle_serverless_pagination(url, headers)
         else:
             return self._handle_standard_pagination(page_data)
-    
+
     def _handle_serverless_pagination(self, url: str, headers: Dict[str, str]) -> bool:
         """Handle pagination in serverless mode."""
         if self._paginate and not self.errors:
@@ -270,7 +296,11 @@ class WizRequest(_RequestBase):
             while info and info.get("hasNextPage") and not self.errors:
                 self.vars["after"] = info.get("endCursor")
                 # Execute next page immediately
-                response = self._client._post(url=url, headers=headers, json={"query": self.query, "variables": self.vars})
+                response = self._client._post(
+                    url=url,
+                    headers=headers,
+                    json={"query": self.query, "variables": self.vars},
+                )
                 if response.status_code == 200:
                     next_response = response.json()
                     self.errors.extend(next_response.get("errors", []))
@@ -279,13 +309,13 @@ class WizRequest(_RequestBase):
                     info = self._page_info(next_page_data)
                 else:
                     break
-            
+
             self.data = self._aggregated_data
             self._clean_page_info()
         else:
             self.data = self._response.get("data", {})
         return True
-    
+
     def _handle_standard_pagination(self, page_data: Dict[str, Any]) -> bool:
         """Handle pagination in standard (non-serverless) mode."""
         if not self._paginate:
@@ -301,74 +331,71 @@ class WizRequest(_RequestBase):
             else:
                 self._finalize_pagination()
             return True
-    
+
     def _trigger_page_event(self, page_data: Dict[str, Any]) -> None:
         """Trigger the page event callback if configured."""
         if self._page_event:
             self._logger.debug(f"on_page_event [Page {self._page}]")
             self._page += 1
-            page_info = { 
-                "per_page": self.vars.get("first", 0),
-                "page": self._page 
-            }
-            self._page_event({
-                "page_data": page_data, 
-                "page_info": page_info,
-                "errors": self.errors
-            })
-    
+            page_info = {"per_page": self.vars.get("first", 0), "page": self._page}
+            self._page_event(
+                {"page_data": page_data, "page_info": page_info, "errors": self.errors}
+            )
+
     def _finalize_pagination(self) -> None:
         """Finalize pagination by setting final data and marking as done."""
         self.data = self._aggregated_data
         self._clean_page_info()
         self._set_done_event()
-    
+
     def _handle_failed_response(self, response: Any) -> None:
         """Handle failed HTTP response."""
         error_msg = f"Query failed with status {response.status_code}: {response.text}"
         self.errors.append({"message": response.text})
         self._logger.warning(error_msg)
-    
+
     def _handle_network_error(self, e: TransportError) -> None:
         """Handle network-related errors."""
         error_msg = f"Network error executing query: {e}"
         self.errors.append({"message": str(e), "trace": traceback.format_exc()})
         self._logger.error(error_msg, exc_info=True)
-    
+
     def _handle_unexpected_error(self, e: Exception) -> None:
         """Handle unexpected errors."""
         error_msg = f"Unexpected error executing query: {e}"
         self.errors.append({"message": str(e), "trace": traceback.format_exc()})
         self._logger.error(error_msg, exc_info=True)
-    
+
     def _wait_before_retry(self, retries: int) -> None:
         """Wait before retrying with jitter."""
         sleep_time = self._client._query_retry_time * (1 + random.uniform(0, 0.5))
         self._logger.debug(f"Retrying in {sleep_time:.2f}s (Attempt {retries})")
         time.sleep(sleep_time)
-    
+
     def _handle_final_failure(self) -> None:
         """Handle final failure after all retries exhausted."""
         self._logger.error("Query ultimately failed after retries.")
         self._set_done_event()
-    
+
     def _set_done_event(self) -> None:
         """Set the done event if it exists."""
         if hasattr(self, "_done_event"):
             self._done_event.set()
-    
+
     def _generate_report(self) -> bool:
         """Check if the current query is a report creation and configure report settings."""
         if self._report_request:
             self.report_name = self._report_request.get("name")
-            self.stream_report = self._report_request.get("stream", Config.report_stream_by_default())
+            self.stream_report = self._report_request.get(
+                "stream", Config.report_stream_by_default()
+            )
         return self._current_query_info.get("source", "") == "createReport"
 
     def _report_workflow(self, response: Any) -> Optional["WizRequest"]:
         """Poll for report completion and download/stream the result."""
-        self._report_id = self._response['data']['createReport']['report']['id']
+        self._report_id = self._response["data"]["createReport"]["report"]["id"]
         self.query = """query ReportDownloadUrl($reportId: ID!) {report(id: $reportId) { name lastRun {url status progress runAt}}}"""
-        self.vars = {'reportId': self._report_id}
+        self.vars = {"reportId": self._report_id}
 
         while True:
             polling_response = self.submit()
@@ -386,11 +413,20 @@ class WizRequest(_RequestBase):
             if status == "COMPLETED":
                 download_url = last_run["url"]
                 if not download_url:
-                    self.errors.append({"message": "No download URL found in final report status."})
+                    self.errors.append(
+                        {"message": "No download URL found in final report status."}
+                    )
                     return self
                 if self.stream_report:
                     self._logger.info("Streaming report")
-                    self.data["report_data"] = list(self._stream_report(download_url, self.report_name, as_generator=False, on_page_event=self._page_event))
+                    self.data["report_data"] = list(
+                        self._stream_report(
+                            download_url,
+                            self.report_name,
+                            as_generator=False,
+                            on_page_event=self._page_event,
+                        )
+                    )
                 else:
                     self._logger.info("Downloading full report")
                     self.data["report_data"] = self._download_report(download_url)
@@ -403,20 +439,26 @@ class WizRequest(_RequestBase):
         report_name: Optional[str],
         as_generator: bool = False,
         on_page_event: Optional[Callable] = None,
-        chunk_size: int = 8192
+        chunk_size: int = 8192,
     ) -> Union[Iterator[Any], List[Any]]:
         """Stream or fully download a report from the given URL."""
         if as_generator:
-            return self._stream_report_generator(download_url, report_name, on_page_event, chunk_size)
+            return self._stream_report_generator(
+                download_url, report_name, on_page_event, chunk_size
+            )
         else:
-            return list(self._stream_report_generator(download_url, report_name, on_page_event, chunk_size))
+            return list(
+                self._stream_report_generator(
+                    download_url, report_name, on_page_event, chunk_size
+                )
+            )
 
     def _stream_report_generator(
         self,
         download_url: str,
         report_name: Optional[str],
         on_page_event: Optional[Callable] = None,
-        chunk_size: int = 8192
+        chunk_size: int = 8192,
     ) -> Iterator[Any]:
         """Yield report rows/records line-by-line from a streaming download."""
         self._logger.info(f"Streaming report: {report_name}")
@@ -433,7 +475,14 @@ class WizRequest(_RequestBase):
                             downloaded += len(line.encode("utf-8"))
                             yield data
                             if on_page_event:
-                                on_page_event({"name": report_name, "total_size": total_size, "downloaded": downloaded, "status": "In Progress"})
+                                on_page_event(
+                                    {
+                                        "name": report_name,
+                                        "total_size": total_size,
+                                        "downloaded": downloaded,
+                                        "status": "In Progress",
+                                    }
+                                )
                 elif "text/csv" in content_type or "application/csv" in content_type:
                     for line in response.iter_lines():
                         if line:
@@ -443,7 +492,9 @@ class WizRequest(_RequestBase):
                 else:
                     self._logger.error(f"Unsupported content type: {content_type}")
             else:
-                self._logger.error(f"Failed to retrieve report: HTTP {response.status_code}")
+                self._logger.error(
+                    f"Failed to retrieve report: HTTP {response.status_code}"
+                )
 
     def _download_report(self, download_url: str) -> Optional[bytes]:
         """Download a report file from the given URL."""
@@ -461,11 +512,16 @@ class WizRequest(_RequestBase):
         return f"<WizRequest status={self._status_code} success={self.success()}>"
 
 
-
 class WizResponse:
     """Protective wrapper for WizRequest that exposes only public attributes."""
 
-    _EXPOSED_FIELDS: List[str] = ["query", "vars", "paginate", "report_request", "on_page_event"]
+    _EXPOSED_FIELDS: List[str] = [
+        "query",
+        "vars",
+        "paginate",
+        "report_request",
+        "on_page_event",
+    ]
 
     def __init__(self, request: WizRequest) -> None:
         """Initialize response wrapper around a WizRequest."""
@@ -502,7 +558,7 @@ class WizResponse:
 
     def __dir__(self) -> List[str]:
         """Return only public attribute names."""
-        return [attr for attr in super().__dir__() if not attr.startswith('_')]
+        return [attr for attr in super().__dir__() if not attr.startswith("_")]
 
 
 class WizBatchRequest:
@@ -510,7 +566,7 @@ class WizBatchRequest:
     Manages multiple requests for batch execution.
     Provides efficient concurrent execution within rate limits.
     """
-    
+
     def __init__(self, client: "WizClient") -> None:
         """Initialize a batch request manager for the given client."""
         self._client = client
@@ -523,14 +579,14 @@ class WizBatchRequest:
         self._batch_event = threading.Event()
         self._lock = threading.Lock()
         self._progress_callback: Optional[Callable] = None
-    
+
     def add_request(
-        self, 
-        query: str, 
+        self,
+        query: str,
         vars: Optional[Dict[str, Any]] = None,
         queryCollection: Optional[Union[str, Any]] = None,
         paginate: bool = True,
-        **kwargs
+        **kwargs,
     ) -> int:
         """
         Add a request to the batch. Returns the request ID for later reference.
@@ -541,15 +597,15 @@ class WizBatchRequest:
             query=query,
             vars=vars,
             paginate=paginate,
-            **kwargs
+            **kwargs,
         )
-        
+
         request_id = len(self._requests)
         self._requests.append(response._request)  # Store internal WizRequest
         self._responses.append(response)  # Store WizResponse for user access
         self._logger.debug(f"Added request {request_id} to batch")
         return request_id
-    
+
     def add_response(self, response: "WizResponse") -> int:
         """Add an existing WizResponse to the batch."""
         request_id = len(self._requests)
@@ -557,37 +613,37 @@ class WizBatchRequest:
         self._responses.append(response)
         self._logger.debug(f"Added WizResponse {request_id} to batch")
         return request_id
-    
+
     def set_progress_callback(self, callback: Callable[[int, int], None]) -> None:
         """Set a callback function to track batch progress: callback(completed, total)"""
         self._progress_callback = callback
-    
+
     def submit(self, max_concurrent: int = 5) -> "WizBatchResponse":
         """
         Submit all requests in the batch with controlled concurrency.
-        
+
         Args:
             max_concurrent: Maximum number of requests to process concurrently
-        
+
         Returns:
             WizBatchResponse containing all results
         """
         if not self._requests:
             self._logger.warning("No requests in batch to submit")
             return WizBatchResponse({})
-        
+
         self._total_count = len(self._requests)
         self._completed_count = 0
         self._results.clear()
         self._batch_event.clear()
-        
+
         self._logger.info(f"Submitting batch of {self._total_count} requests")
-        
+
         if Config.serverless():
             return self._submit_sequential()
         else:
             return self._submit_concurrent(max_concurrent)
-    
+
     def _submit_sequential(self) -> "WizBatchResponse":
         """Submit requests sequentially in serverless mode."""
         for i, request in enumerate(self._requests):
@@ -603,36 +659,38 @@ class WizBatchRequest:
                 self._results[i] = self._responses[i]
                 self._completed_count += 1
                 self._trigger_progress_callback()
-        
+
         return WizBatchResponse(self._results)
-    
+
     def _submit_concurrent(self, max_concurrent: int) -> "WizBatchResponse":
         """Submit requests concurrently with controlled parallelism."""
         # Set up completion tracking for each request
         for i, request in enumerate(self._requests):
             # Wrap the original done event to track batch completion
-            original_done_event = getattr(request, '_done_event', None)
+            original_done_event = getattr(request, "_done_event", None)
             request._batch_id = i
             request._batch_parent = self
-            
+
             # Replace or set the done event handler
             if original_done_event:
                 request._original_done_event = original_done_event
             request._done_event = threading.Event()
-        
+
         # Submit requests to the queue (rate limiting happens in the client)
         for i, request in enumerate(self._requests):
             self._client._enqueue_request(request)
-        
+
         # Wait for all requests to complete
         self._wait_for_completion()
-        
+
         return WizBatchResponse(self._results)
-    
+
     def _wait_for_completion(self) -> None:
         """Wait for all batch requests to complete."""
-        timeout = Config.api_timeout() * len(self._requests)  # Scale timeout with batch size
-        
+        timeout = Config.api_timeout() * len(
+            self._requests
+        )  # Scale timeout with batch size
+
         for i, request in enumerate(self._requests):
             if request._done_event.wait(timeout=timeout):
                 self._results[i] = self._responses[i]  # Store WizResponse
@@ -643,11 +701,13 @@ class WizBatchRequest:
                 self._logger.error(f"Request {i} timed out")
                 # Create a timeout error result
                 request.errors.append({"message": "Request timed out in batch"})
-                self._results[i] = self._responses[i]  # Store WizResponse even on timeout
+                self._results[i] = self._responses[
+                    i
+                ]  # Store WizResponse even on timeout
                 with self._lock:
                     self._completed_count += 1
                     self._trigger_progress_callback()
-    
+
     def _trigger_progress_callback(self) -> None:
         """Trigger the progress callback if set."""
         if self._progress_callback:
@@ -655,7 +715,7 @@ class WizBatchRequest:
                 self._progress_callback(self._completed_count, self._total_count)
             except Exception as e:
                 self._logger.error(f"Progress callback error: {e}")
-    
+
     def clear(self) -> None:
         """Clear all requests from the batch."""
         self._requests.clear()
@@ -664,11 +724,11 @@ class WizBatchRequest:
         self._completed_count = 0
         self._total_count = 0
         self._logger.debug("Batch cleared")
-    
+
     def size(self) -> int:
         """Return the number of requests in the batch."""
         return len(self._requests)
-    
+
     def __len__(self) -> int:
         """Return the number of requests in the batch."""
         return len(self._requests)
@@ -679,50 +739,52 @@ class WizBatchResponse:
     Contains results from a batch request submission.
     Provides convenient access to individual results and batch statistics.
     """
-    
+
     def __init__(self, results: Dict[int, "WizResponse"]) -> None:
         """Initialize batch response with a mapping of request IDs to responses."""
         self._results = results
         self._logger = Config.get_logger()
-    
+
     def get_result(self, request_id: int) -> Optional["WizResponse"]:
         """Get result for a specific request ID."""
         return self._results.get(request_id)
-    
+
     def get_successful_results(self) -> Dict[int, "WizResponse"]:
         """Get all successful results."""
         return {id: resp for id, resp in self._results.items() if resp.success}
-    
+
     def get_failed_results(self) -> Dict[int, "WizResponse"]:
         """Get all failed results."""
         return {id: resp for id, resp in self._results.items() if not resp.success}
-    
+
     def all_successful(self) -> bool:
         """Check if all requests in the batch were successful."""
         return all(resp.success for resp in self._results.values())
-    
+
     def success_count(self) -> int:
         """Return the number of successful requests."""
         return sum(1 for resp in self._results.values() if resp.success)
-    
+
     def failure_count(self) -> int:
         """Return the number of failed requests."""
         return sum(1 for resp in self._results.values() if not resp.success)
-    
+
     def total_count(self) -> int:
         """Return the total number of requests."""
         return len(self._results)
-    
+
     def success_rate(self) -> float:
         """Return the success rate as a percentage."""
         if not self._results:
             return 0.0
         return (self.success_count() / self.total_count()) * 100
-    
+
     def get_all_data(self) -> List[Any]:
         """Get data from all successful requests."""
-        return [resp.data for resp in self._results.values() if resp.success and resp.data]
-    
+        return [
+            resp.data for resp in self._results.values() if resp.success and resp.data
+        ]
+
     def get_all_errors(self) -> List[Dict[str, Any]]:
         """Get all errors from failed requests."""
         errors = []
@@ -730,7 +792,7 @@ class WizBatchResponse:
             if resp.errors:
                 errors.extend([{**error, "request_id": id} for error in resp.errors])
         return errors
-    
+
     def iterate_results(self) -> Iterator[Tuple[int, "WizResponse"]]:
         """Iterate over all results as (request_id, response) pairs."""
         for id, resp in self._results.items():
@@ -747,7 +809,7 @@ class WizBatchResponse:
     def __iter__(self) -> Iterator[Tuple[int, "WizResponse"]]:
         """Iterate over all results as (request_id, response) pairs."""
         return iter(self._results.items())
-    
+
     def __repr__(self) -> str:
         """Return string representation with success/total counts."""
         return f"<WizBatchResponse: {self.success_count()}/{self.total_count()} successful>"
@@ -755,6 +817,7 @@ class WizBatchResponse:
 
 # ========== ASYNC CLASSES ==========
 # These classes provide async functionality using the same business logic
+
 
 class AsyncWizRequest(_RequestBase):
     """Async version of WizRequest — shares query/pagination logic via _RequestBase."""
@@ -767,10 +830,18 @@ class AsyncWizRequest(_RequestBase):
         vars: Optional[Dict[str, Any]] = None,
         paginate: bool = True,
         report_request: Optional[Dict[str, Any]] = None,
-        on_page_event: Optional[Callable] = None
+        on_page_event: Optional[Callable] = None,
     ) -> None:
         """Initialize an asynchronous Wiz GraphQL request."""
-        self._init_common(client, queryCollection, query, vars, paginate, report_request, on_page_event)
+        self._init_common(
+            client,
+            queryCollection,
+            query,
+            vars,
+            paginate,
+            report_request,
+            on_page_event,
+        )
 
     async def submit(self) -> "AsyncWizRequest":
         """Submit request asynchronously and return self on completion."""
@@ -780,11 +851,13 @@ class AsyncWizRequest(_RequestBase):
 
     async def _execute_page(self) -> None:
         """Async version of page execution — iterative pagination (no recursion)."""
-        if not hasattr(self._client, '_async_session'):
-            raise RuntimeError("Async session not initialized. Use client.async_session() context manager.")
+        if not hasattr(self._client, "_async_session"):
+            raise RuntimeError(
+                "Async session not initialized. Use client.async_session() context manager."
+            )
 
         client = self._client._async_session
-        semaphore = getattr(self._client, '_async_semaphore', asyncio.Semaphore(10))
+        semaphore = getattr(self._client, "_async_semaphore", asyncio.Semaphore(10))
         limiter = self._client._get_limiter(self._limiter_key)
 
         while True:
@@ -798,7 +871,9 @@ class AsyncWizRequest(_RequestBase):
                 try:
                     await limiter.try_acquire_async(self._limiter_key)
                     async with semaphore:
-                        response = await client.post(url=url, json=payload, headers=headers)
+                        response = await client.post(
+                            url=url, json=payload, headers=headers
+                        )
                         if response.status_code == 200:
                             response_data = response.json()
                             self.errors.extend(response_data.get("errors", []))
@@ -806,7 +881,9 @@ class AsyncWizRequest(_RequestBase):
                             self._merge_page(page_data)
                             break
                         else:
-                            error_msg = f"Query failed with status {response.status_code}"
+                            error_msg = (
+                                f"Query failed with status {response.status_code}"
+                            )
                             self.errors.append({"message": response.text})
                             self._logger.warning(error_msg)
 
@@ -835,11 +912,16 @@ class AsyncWizRequest(_RequestBase):
                 return
 
             if self._page_event:
-                self._page_event({
-                    "page_data": page_data,
-                    "page_info": {"per_page": self.vars.get("first", 0), "page": self._page},
-                    "errors": self.errors
-                })
+                self._page_event(
+                    {
+                        "page_data": page_data,
+                        "page_info": {
+                            "per_page": self.vars.get("first", 0),
+                            "page": self._page,
+                        },
+                        "errors": self.errors,
+                    }
+                )
 
             page_info = self._page_info(page_data)
             if page_info and page_info.get("hasNextPage"):
@@ -893,18 +975,18 @@ class AsyncWizBatchRequest:
         self._requests: List[AsyncWizRequest] = []
         self._max_concurrent = max_concurrent
         self._progress_callback: Optional[Callable] = None
-        
+
         # Ensure we have an async semaphore on the client
-        if not hasattr(client, '_async_semaphore'):
+        if not hasattr(client, "_async_semaphore"):
             client._async_semaphore = asyncio.Semaphore(max_concurrent)
-    
+
     def add_request(
         self,
         query: str,
         vars: Optional[Dict[str, Any]] = None,
         queryCollection: Optional[Union[str, Any]] = None,
         paginate: bool = True,
-        **kwargs
+        **kwargs,
     ) -> int:
         """Add request to batch"""
         request = AsyncWizRequest(
@@ -913,40 +995,42 @@ class AsyncWizBatchRequest:
             query=query,
             vars=vars,
             paginate=paginate,
-            **kwargs
+            **kwargs,
         )
-        
+
         request_id = len(self._requests)
         self._requests.append(request)
         self._logger.debug(f"Added async request {request_id} to batch")
         return request_id
-    
+
     def set_progress_callback(self, callback: Callable[[int, int], None]) -> None:
         """Set progress callback"""
         self._progress_callback = callback
-    
+
     async def submit(self, max_concurrent: Optional[int] = None) -> WizBatchResponse:
         """Submit all requests with high concurrency"""
         if not self._requests:
             return WizBatchResponse({})
-        
+
         concurrent_limit = max_concurrent or self._max_concurrent
         semaphore = asyncio.Semaphore(concurrent_limit)
-        
-        async def execute_request(index: int, request: AsyncWizRequest) -> Tuple[int, AsyncWizResponse]:
+
+        async def execute_request(
+            index: int, request: AsyncWizRequest
+        ) -> Tuple[int, AsyncWizResponse]:
             async with semaphore:
                 await request.submit()
                 response = AsyncWizResponse(request)
-                
+
                 if self._progress_callback:
                     self._progress_callback(index + 1, len(self._requests))
-                
+
                 return index, response
-        
+
         # Execute all requests concurrently
         tasks = [execute_request(i, req) for i, req in enumerate(self._requests)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        
+
         # Process results
         response_map = {}
         for result in results:
@@ -957,9 +1041,9 @@ class AsyncWizBatchRequest:
             else:
                 index, response = result
                 response_map[index] = response
-        
+
         return WizBatchResponse(response_map)
-    
+
     def clear(self) -> None:
         """Clear all requests from the batch."""
         self._requests.clear()
@@ -967,5 +1051,3 @@ class AsyncWizBatchRequest:
     def __len__(self) -> int:
         """Return the number of requests in the batch."""
         return len(self._requests)
-
-
