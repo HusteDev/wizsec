@@ -9,7 +9,7 @@ Demonstrates:
 
 import asyncio
 import time
-from wiz_sdk import WizClient, Config
+from wizsec import WizClient, Config
 
 Config.load()
 client = WizClient()

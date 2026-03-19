@@ -35,7 +35,7 @@ from datetime import datetime, timedelta, timezone
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from functools import wraps
-from typing import Optional, Dict, Any, List, Union, Tuple
+from typing import Callable, Optional, Dict, Any, List, Union, Tuple
 from .config import Config, parse_filepath, DEFAULT_TEMP_FOLDER
 from ._logging import logging_init
 
@@ -45,9 +45,10 @@ mimetypes.add_type('application/python-pickle', '.pickle')
 
 from .exceptions import WizFileError, WizConfigurationError
 
-def disable_in_serverless(func):
+def disable_in_serverless(func: Callable[..., Any]) -> Callable[..., Any]:
+    """Decorator that skips the wrapped function when running in serverless mode."""
     @wraps(func)
-    def wrapper(*args, **kwargs):
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
         if Config.serverless():
             Config.get_logger().debug(f"{func.__name__} disabled in serverless mode.")
             return None  # or raise, or return original input
@@ -61,22 +62,22 @@ def resource_path(relative_path: str) -> str:
     return os.path.join(os.path.abspath("."), relative_path)
 
 def safe_write_json(
-    data: Any, 
-    filename: str, 
-    save_path: Path, 
+    data: Any,
+    filename: str,
+    save_path: Path,
     temp_path: Path = DEFAULT_TEMP_FOLDER
 ) -> None:
+    """Write data as JSON atomically via a temp file, then move into place."""
     logger = Config.get_logger()
     original = Path(filename)
     temp_filename = f"{original.stem}_temp{original.suffix}"
     temp_file = temp_path / temp_filename
 
-    def serialize_object(obj):
+    def serialize_object(obj: Any) -> Any:
+        """Fallback serializer for json.dump: use vars() or str()."""
         try:
-            # Attempt to use __dict__ or vars() to get a dictionary representation of the object
             return vars(obj) if hasattr(obj, '__dict__') else str(obj)
         except TypeError:
-            # Fallback for objects that cannot be serialized
             return str(obj)
     
     try:
@@ -96,11 +97,12 @@ def safe_write_json(
 
 @disable_in_serverless
 def dump_to_json(
-    data: Any, 
-    filename: Optional[str] = None, 
-    filepath: Optional[str] = None, 
+    data: Any,
+    filename: Optional[str] = None,
+    filepath: Optional[str] = None,
     retry: bool = True
 ) -> None:
+    """Serialize data to a JSON (or pickle) file if saved_data is enabled."""
     logger = Config.get_logger()
     try:
         logger.verbose('Attempting to dump_to_json')
@@ -182,7 +184,8 @@ def dump_to_json(
     else:
         logger.debug("No Data to save")
 
-def store_data(data, file_path: str = None):
+def store_data(data: Any, file_path: Optional[str] = None) -> Any:
+    """Pickle data to disk and return it."""
     import pickle
     import mimetypes
     mimetypes.add_type('application/python-pickle', '.pkl')
@@ -196,10 +199,8 @@ def store_data(data, file_path: str = None):
     except Exception as e:
         logging.error(f'Data not saved due to error: {e}', exc_info=True)
 
-def return_formatted_duration(duration):
-    """
-    Takes in a number of seconds and converts it to a string for hours, minutes, seconds.
-    """
+def return_formatted_duration(duration: float) -> str:
+    """Convert a duration in seconds to a human-readable string (e.g. '2 hours, 3 minutes')."""
     formatted_duration = {"hour": "",
                           "minute": "",
                           "second": "",
@@ -229,8 +230,8 @@ def return_formatted_duration(duration):
 
     return ', '.join(formatted_parts)
 
-def extract_fields(selection_set):
-    """Recursively extracts fields from a selection set."""
+def extract_fields(selection_set: Any) -> Dict[str, Any]:
+    """Recursively extract fields from a GraphQL selection set."""
     fields = {}
     for selection in selection_set.selections:
         if selection.kind == "field":
@@ -250,6 +251,7 @@ def extract_fields(selection_set):
     return fields
 
 def parse_query_metadata(query: str) -> Dict[str, Any]:
+    """Parse a GraphQL query string and return its type, name, fields, and source."""
     document = parse(query)
     request_type = ""
     request_name = ""
@@ -345,6 +347,7 @@ def ensure_pagination_variables(query: str) -> str:
 
 @disable_in_serverless
 def load_credentials_from_file(profile: str, credentials_file: str) -> Dict[str, Optional[str]]:
+    """Load client_id, client_secret, and environment from an INI credentials file."""
     logger = Config.get_logger()
     config = configparser.ConfigParser()
     path = Path(credentials_file)
@@ -362,7 +365,14 @@ def load_credentials_from_file(profile: str, credentials_file: str) -> Dict[str,
     return {}
 
 @disable_in_serverless
-def write_credentials_to_file(profile: str, client_id: str, client_secret: str, credentials_file: str, environment: str = None) -> None:
+def write_credentials_to_file(
+    profile: str,
+    client_id: str,
+    client_secret: str,
+    credentials_file: str,
+    environment: Optional[str] = None,
+) -> None:
+    """Write credentials for a profile to an INI credentials file."""
     config = configparser.ConfigParser()
     path = Path(credentials_file)
     try:
@@ -384,7 +394,12 @@ def write_credentials_to_file(profile: str, client_id: str, client_secret: str, 
         Config.get_logger().error(f"Unexpected error writing credentials to {credentials_file}: {e}", exc_info=True)
         raise WizFileError(f"Unexpected error writing credentials to {credentials_file}", e)
 
-def is_in_last_x_intervals(timestamp_str, interval_value=1, interval_type="days") -> bool:
+def is_in_last_x_intervals(
+    timestamp_str: Union[str, datetime],
+    interval_value: int = 1,
+    interval_type: str = "days",
+) -> bool:
+    """Check whether a timestamp falls within the last N days/minutes/seconds."""
     if interval_type not in ['days', 'minutes', 'seconds']:
         raise ValueError("Invalid interval type. Use 'days', 'minutes', or 'seconds'.")
 
@@ -406,7 +421,8 @@ def is_in_last_x_intervals(timestamp_str, interval_value=1, interval_type="days"
 
     return given_time >= (current_time - time_difference).replace(hour=0, minute=0, second=0, microsecond=0)
 
-def determine_time_format(date_str):
+def determine_time_format(date_str: str) -> Optional[str]:
+    """Return the matching strptime format string for the given date, or None."""
     possible_formats = [
         # ISO 8601 with microseconds
         '%Y-%m-%dT%H:%M:%S.%f%z',       # ISO 8601 with microseconds and timezone offset
@@ -467,7 +483,7 @@ def determine_time_format(date_str):
     
     return None
 
-def find_file_with_extension(filepath: str, extension_order: list) -> str:
+def find_file_with_extension(filepath: str, extension_order: List[str]) -> str:
     """Finds the first existing file with the specified extensions."""
     path_dir, file_name = os.path.split(filepath)
     filename, extension = os.path.splitext(file_name)
@@ -484,10 +500,12 @@ def find_file_with_extension(filepath: str, extension_order: list) -> str:
     return ""
 
 def load_file_if_in_last_x_interval(
-    filepath: str, 
-    interval_value: int = None, 
+    filepath: str,
+    interval_value: Optional[int] = None,
     interval_type: str = "days",
-    extension_order: list = [".pkl", ".json", ".csv"]) -> dict:
+    extension_order: List[str] = [".pkl", ".json", ".csv"],
+) -> Any:
+    """Load a file only if it was modified within the given interval."""
     
     if interval_value:
         if interval_value < 0:
@@ -508,8 +526,8 @@ def load_file_if_in_last_x_interval(
     
     return {}
 
-def load_file(full_path: str):
-    """Loads a file based on its MIME type."""
+def load_file(full_path: str) -> Any:
+    """Load a file based on its MIME type."""
     mime_type, _ = mimetypes.guess_type(full_path)
     
     if mime_type == 'application/json':
@@ -526,8 +544,8 @@ def load_file(full_path: str):
         return {}
         # raise ValueError(f"Unsupported file type for {full_path}")
 
-def load_json(full_path: str) -> dict:
-    """Loads and normalizes a JSON file."""
+def load_json(full_path: str) -> Any:
+    """Load and normalize a JSON file."""
     with open(full_path, 'r') as f:
         file_data = json.load(f)
         
@@ -542,23 +560,24 @@ def load_json(full_path: str) -> dict:
         
         return file_data
 
-def load_csv(full_path: str) -> list:
-    """Loads a CSV file into a list of dictionaries."""
+def load_csv(full_path: str) -> List[Dict[str, str]]:
+    """Load a CSV file into a list of dictionaries."""
     with open(full_path, 'r') as f:
         reader = csv.DictReader(f)
         return list(reader)
 
-def load_xml(full_path: str):
-    """Loads an XML file."""
+def load_xml(full_path: str) -> ET.Element:
+    """Load an XML file and return the root element."""
     tree = ET.parse(full_path)
     return tree.getroot()
 
 def load_text(full_path: str) -> str:
-    """Loads a plain text file."""
+    """Load a plain text file and return its contents."""
     with open(full_path, 'r') as f:
         return f.read()
 
-def load_data(file_path):
+def load_data(file_path: str) -> Any:
+    """Load a pickled data file from disk."""
     try:
         with open(file_path, 'rb') as pickled_data:  
             dataFile = pickle.load(pickled_data)

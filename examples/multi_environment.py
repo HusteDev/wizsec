@@ -7,7 +7,7 @@ Demonstrates:
 - How shared-environment rate limiting works automatically
 """
 
-from wiz_sdk import WizClient, Config
+from wizsec import WizClient, Config
 
 Config.load()
 

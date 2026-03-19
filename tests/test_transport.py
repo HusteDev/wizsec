@@ -4,7 +4,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from wiz_sdk._transport import post, get, stream_get, create_async_client, TransportError
+from wizsec._transport import post, get, stream_get, create_async_client, TransportError
 
 
 class TestTransportError:
@@ -20,7 +20,7 @@ class TestTransportError:
 
 
 class TestPost:
-    @patch("wiz_sdk._transport.httpx.post")
+    @patch("wizsec._transport.httpx.post")
     def test_success(self, mock_post):
         mock_post.return_value = MagicMock(status_code=200)
         resp = post("https://example.com", json={"key": "val"}, headers={"X-Test": "1"})
@@ -35,7 +35,7 @@ class TestPost:
             timeout=None,
         )
 
-    @patch("wiz_sdk._transport.httpx.post")
+    @patch("wizsec._transport.httpx.post")
     def test_with_proxy_and_verify(self, mock_post):
         mock_post.return_value = MagicMock(status_code=200)
         post("https://example.com", proxy="http://proxy:8080", verify="/ca.pem", timeout=30)
@@ -44,7 +44,7 @@ class TestPost:
         assert kwargs["verify"] == "/ca.pem"
         assert kwargs["timeout"] == 30
 
-    @patch("wiz_sdk._transport.httpx.post")
+    @patch("wizsec._transport.httpx.post")
     def test_wraps_httpx_error(self, mock_post):
         import httpx
         mock_post.side_effect = httpx.ConnectError("refused")
@@ -55,13 +55,13 @@ class TestPost:
 
 
 class TestGet:
-    @patch("wiz_sdk._transport.httpx.get")
+    @patch("wizsec._transport.httpx.get")
     def test_success(self, mock_get):
         mock_get.return_value = MagicMock(status_code=200)
         resp = get("https://example.com/file")
         assert resp.status_code == 200
 
-    @patch("wiz_sdk._transport.httpx.get")
+    @patch("wizsec._transport.httpx.get")
     def test_wraps_httpx_error(self, mock_get):
         import httpx
         mock_get.side_effect = httpx.TimeoutException("timed out")
@@ -70,7 +70,7 @@ class TestGet:
 
 
 class TestStreamGet:
-    @patch("wiz_sdk._transport.httpx.stream")
+    @patch("wizsec._transport.httpx.stream")
     def test_returns_context_manager(self, mock_stream):
         mock_stream.return_value = MagicMock()
         result = stream_get("https://example.com/stream")

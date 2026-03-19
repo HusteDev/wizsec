@@ -1,20 +1,42 @@
 """Tests for utils.py — utility functions."""
 
+import configparser
+import csv
 import json
 import logging
+import os
+import pickle
+import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
 
-from wiz_sdk.utils import (
+from wizsec.utils import (
     extract_fields,
     parse_query_metadata,
     ensure_pagination_variables,
     return_formatted_duration,
     resource_path,
     safe_write_json,
+    disable_in_serverless,
+    dump_to_json,
+    store_data,
+    load_credentials_from_file,
+    write_credentials_to_file,
+    is_in_last_x_intervals,
+    determine_time_format,
+    find_file_with_extension,
+    load_file_if_in_last_x_interval,
+    load_file,
+    load_json,
+    load_csv,
+    load_xml,
+    load_text,
+    load_data,
 )
+from wizsec.exceptions import WizFileError
 
 
 # ── extract_fields ──────────────────────────────────────────────────
@@ -187,3 +209,476 @@ class TestSafeWriteJson:
         # Temp file should not remain
         temp_files = list(temp_dir.glob("*"))
         assert len(temp_files) == 0
+
+
+# ── disable_in_serverless ──────────────────────────────────────────
+
+class TestDisableInServerless:
+    def test_runs_normally_when_not_serverless(self, mock_config):
+        @disable_in_serverless
+        def my_func(x):
+            return x * 2
+
+        with patch.object(mock_config, "serverless", return_value=False):
+            assert my_func(5) == 10
+
+    def test_skips_when_serverless(self, mock_config):
+        @disable_in_serverless
+        def my_func(x):
+            return x * 2
+
+        with patch.object(mock_config, "serverless", return_value=True):
+            assert my_func(5) is None
+
+    def test_preserves_function_name(self, mock_config):
+        @disable_in_serverless
+        def my_special_func():
+            pass
+
+        assert my_special_func.__name__ == "my_special_func"
+
+
+# ── dump_to_json ───────────────────────────────────────────────────
+
+class TestDumpToJson:
+    def test_writes_json_file(self, tmp_path, mock_config):
+        save_dir = tmp_path / "saved-data"
+        save_dir.mkdir(parents=True)
+        mock_config._CONFIG["saved_data"]["enabled"] = True
+        mock_config._CONFIG["saved_data"]["directory"] = str(save_dir)
+
+        with patch.object(mock_config, "serverless", return_value=False), \
+             patch.object(mock_config, "saved_data_enabled", return_value=True), \
+             patch.object(mock_config, "saved_data_directory", return_value=save_dir):
+            dump_to_json({"key": "val"}, filename="test_dump.json")
+
+        output = save_dir / "test_dump.json"
+        assert output.exists()
+        assert json.loads(output.read_text())["key"] == "val"
+
+    def test_no_data_does_not_write(self, mock_config):
+        with patch.object(mock_config, "serverless", return_value=False):
+            # Should not raise, just log debug
+            dump_to_json(None, filename="empty.json")
+
+    def test_saved_data_disabled_does_not_write(self, tmp_path, mock_config):
+        with patch.object(mock_config, "serverless", return_value=False), \
+             patch.object(mock_config, "saved_data_enabled", return_value=False):
+            dump_to_json({"data": 1}, filename="no_write.json")
+
+        assert not (tmp_path / "no_write.json").exists()
+
+
+# ── store_data ─────────────────────────────────────────────────────
+
+class TestStoreData:
+    def test_pickle_round_trip(self, tmp_path):
+        data = {"items": [1, 2, 3], "nested": {"a": "b"}}
+        pkl_path = tmp_path / "test.pkl"
+
+        result = store_data(data, str(pkl_path))
+        assert result == data
+        assert pkl_path.exists()
+
+        with open(pkl_path, "rb") as f:
+            loaded = pickle.load(f)
+        assert loaded == data
+
+    def test_default_path_when_none(self, tmp_path):
+        with patch("pathlib.Path.cwd", return_value=tmp_path):
+            store_data({"x": 1})
+        assert (tmp_path / "data.pkl").exists()
+
+    def test_handles_write_error(self, tmp_path):
+        # Writing to a directory path should fail gracefully (returns None)
+        result = store_data({"x": 1}, str(tmp_path))
+        assert result is None
+
+
+# ── load_credentials_from_file ─────────────────────────────────────
+
+class TestLoadCredentialsFromFile:
+    def test_loads_existing_profile(self, tmp_path, mock_config):
+        cred_file = tmp_path / "creds.ini"
+        config = configparser.ConfigParser()
+        config["myprofile"] = {
+            "client_id": "id123",
+            "client_secret": "secret456",
+            "environment": "prod",
+        }
+        with open(cred_file, "w") as f:
+            config.write(f)
+
+        with patch.object(mock_config, "serverless", return_value=False):
+            result = load_credentials_from_file("myprofile", str(cred_file))
+
+        assert result["client_id"] == "id123"
+        assert result["client_secret"] == "secret456"
+        assert result["environment"] == "prod"
+
+    def test_missing_file_returns_empty(self, tmp_path, mock_config):
+        with patch.object(mock_config, "serverless", return_value=False):
+            result = load_credentials_from_file("default", str(tmp_path / "nonexistent.ini"))
+        assert result == {}
+
+    def test_missing_profile_returns_empty(self, tmp_path, mock_config):
+        cred_file = tmp_path / "creds.ini"
+        config = configparser.ConfigParser()
+        config["other"] = {"client_id": "x", "client_secret": "y"}
+        with open(cred_file, "w") as f:
+            config.write(f)
+
+        with patch.object(mock_config, "serverless", return_value=False):
+            result = load_credentials_from_file("missing_profile", str(cred_file))
+        assert result == {}
+
+    def test_profile_without_environment(self, tmp_path, mock_config):
+        cred_file = tmp_path / "creds.ini"
+        config = configparser.ConfigParser()
+        config["simple"] = {"client_id": "abc", "client_secret": "def"}
+        with open(cred_file, "w") as f:
+            config.write(f)
+
+        with patch.object(mock_config, "serverless", return_value=False):
+            result = load_credentials_from_file("simple", str(cred_file))
+        assert result["client_id"] == "abc"
+        assert result["environment"] is None
+
+    def test_skipped_in_serverless(self, mock_config):
+        with patch.object(mock_config, "serverless", return_value=True):
+            result = load_credentials_from_file("any", "/fake/path")
+        assert result is None
+
+
+# ── write_credentials_to_file ──────────────────────────────────────
+
+class TestWriteCredentialsToFile:
+    def test_creates_new_file_with_profile(self, tmp_path, mock_config):
+        cred_file = tmp_path / "new_creds.ini"
+
+        with patch.object(mock_config, "serverless", return_value=False):
+            write_credentials_to_file("default", "myid", "mysecret", str(cred_file))
+
+        config = configparser.ConfigParser()
+        config.read(cred_file)
+        assert config["default"]["client_id"] == "myid"
+        assert config["default"]["client_secret"] == "mysecret"
+
+    def test_updates_existing_profile(self, tmp_path, mock_config):
+        cred_file = tmp_path / "creds.ini"
+        config = configparser.ConfigParser()
+        config["default"] = {"client_id": "old", "client_secret": "old"}
+        with open(cred_file, "w") as f:
+            config.write(f)
+
+        with patch.object(mock_config, "serverless", return_value=False):
+            write_credentials_to_file("default", "new_id", "new_secret", str(cred_file))
+
+        config2 = configparser.ConfigParser()
+        config2.read(cred_file)
+        assert config2["default"]["client_id"] == "new_id"
+        assert config2["default"]["client_secret"] == "new_secret"
+
+    def test_writes_environment(self, tmp_path, mock_config):
+        cred_file = tmp_path / "creds.ini"
+
+        with patch.object(mock_config, "serverless", return_value=False):
+            write_credentials_to_file("prod", "id", "secret", str(cred_file), environment="us1")
+
+        config = configparser.ConfigParser()
+        config.read(cred_file)
+        assert config["prod"]["environment"] == "us1"
+
+    def test_no_environment_key_when_none(self, tmp_path, mock_config):
+        cred_file = tmp_path / "creds.ini"
+
+        with patch.object(mock_config, "serverless", return_value=False):
+            write_credentials_to_file("test", "id", "secret", str(cred_file))
+
+        config = configparser.ConfigParser()
+        config.read(cred_file)
+        assert "environment" not in config["test"]
+
+    def test_skipped_in_serverless(self, mock_config):
+        with patch.object(mock_config, "serverless", return_value=True):
+            result = write_credentials_to_file("a", "b", "c", "/fake")
+        assert result is None
+
+
+# ── is_in_last_x_intervals ────────────────────────────────────────
+
+class TestIsInLastXIntervals:
+    def test_recent_datetime_within_interval(self):
+        recent = datetime.now(timezone.utc) - timedelta(hours=1)
+        assert is_in_last_x_intervals(recent, interval_value=1, interval_type="days") is True
+
+    def test_old_datetime_outside_interval(self):
+        old = datetime.now(timezone.utc) - timedelta(days=10)
+        assert is_in_last_x_intervals(old, interval_value=1, interval_type="days") is False
+
+    def test_string_input_iso_format(self):
+        recent = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        assert is_in_last_x_intervals(recent, interval_value=1, interval_type="days") is True
+
+    def test_invalid_interval_type_raises(self):
+        with pytest.raises(ValueError, match="Invalid interval type"):
+            is_in_last_x_intervals(datetime.now(timezone.utc), interval_type="weeks")
+
+    def test_zero_or_negative_interval_returns_true(self):
+        old = datetime.now(timezone.utc) - timedelta(days=100)
+        assert is_in_last_x_intervals(old, interval_value=0, interval_type="days") is True
+
+    def test_minutes_interval(self):
+        recent = datetime.now(timezone.utc) - timedelta(minutes=2)
+        assert is_in_last_x_intervals(recent, interval_value=5, interval_type="minutes") is True
+
+    def test_seconds_interval(self):
+        old = datetime.now(timezone.utc) - timedelta(days=1)
+        assert is_in_last_x_intervals(old, interval_value=10, interval_type="seconds") is False
+
+    def test_naive_datetime_treated_as_utc(self):
+        recent = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1)
+        assert is_in_last_x_intervals(recent, interval_value=1, interval_type="days") is True
+
+
+# ── determine_time_format ──────────────────────────────────────────
+
+class TestDetermineTimeFormat:
+    def test_iso_8601_with_z(self):
+        fmt = determine_time_format("2024-07-31T16:14:51Z")
+        assert fmt is not None
+        assert "T" in fmt
+
+    def test_iso_8601_with_microseconds(self):
+        fmt = determine_time_format("2024-07-31T16:14:51.123456")
+        assert fmt is not None
+
+    def test_date_only(self):
+        fmt = determine_time_format("2024-07-31")
+        assert fmt == "%Y-%m-%d"
+
+    def test_compact_date(self):
+        fmt = determine_time_format("20240731")
+        assert fmt == "%Y%m%d"
+
+    def test_time_only(self):
+        fmt = determine_time_format("16:14:51")
+        assert fmt == "%H:%M:%S"
+
+    def test_unrecognized_format_returns_none(self):
+        assert determine_time_format("not-a-date") is None
+
+    def test_date_with_slashes(self):
+        fmt = determine_time_format("2024/07/31")
+        assert fmt == "%Y/%m/%d"
+
+    def test_full_datetime_space_separated(self):
+        fmt = determine_time_format("2024-07-31 16:14:51")
+        assert fmt == "%Y-%m-%d %H:%M:%S"
+
+
+# ── find_file_with_extension ──────────────────────────────────────
+
+class TestFindFileWithExtension:
+    def test_finds_file_with_given_extension(self, tmp_path):
+        target = tmp_path / "data.json"
+        target.write_text("{}")
+        result = find_file_with_extension(str(tmp_path / "data.json"), [".pkl", ".json"])
+        assert result == str(target)
+
+    def test_tries_extension_order(self, tmp_path):
+        # Only CSV exists
+        csv_file = tmp_path / "data.csv"
+        csv_file.write_text("a,b")
+        result = find_file_with_extension(str(tmp_path / "data"), [".json", ".pkl", ".csv"])
+        assert result == str(csv_file)
+
+    def test_returns_empty_when_not_found(self, tmp_path):
+        result = find_file_with_extension(str(tmp_path / "missing"), [".json", ".csv"])
+        assert result == ""
+
+    def test_prefers_explicit_extension(self, tmp_path):
+        json_file = tmp_path / "data.json"
+        json_file.write_text("{}")
+        pkl_file = tmp_path / "data.pkl"
+        pkl_file.write_bytes(b"")
+        # When extension is explicit, only check that exact file
+        result = find_file_with_extension(str(tmp_path / "data.json"), [".pkl", ".json"])
+        assert result == str(json_file)
+
+    def test_explicit_extension_not_found(self, tmp_path):
+        result = find_file_with_extension(str(tmp_path / "data.xml"), [".json"])
+        assert result == ""
+
+
+# ── load_file_if_in_last_x_interval ───────────────────────────────
+
+class TestLoadFileIfInLastXInterval:
+    def test_loads_recent_file(self, tmp_path):
+        json_file = tmp_path / "data.json"
+        # File must be > 1000 bytes to pass the size check
+        data = {"result": 42, "padding": "x" * 1100}
+        json_file.write_text(json.dumps(data))
+        result = load_file_if_in_last_x_interval(
+            str(tmp_path / "data"), interval_value=1, interval_type="days"
+        )
+        assert result["result"] == 42
+
+    def test_negative_interval_returns_empty(self, tmp_path):
+        json_file = tmp_path / "data.json"
+        json_file.write_text(json.dumps({"x": 1}))
+        result = load_file_if_in_last_x_interval(
+            str(tmp_path / "data"), interval_value=-1, interval_type="days"
+        )
+        assert result == {}
+
+    def test_no_interval_loads_directly(self, tmp_path):
+        json_file = tmp_path / "data.json"
+        json_file.write_text(json.dumps({"direct": True}))
+        result = load_file_if_in_last_x_interval(
+            str(tmp_path / "data"), interval_value=None
+        )
+        assert result == {"direct": True}
+
+    def test_file_not_found_returns_empty(self, tmp_path):
+        result = load_file_if_in_last_x_interval(
+            str(tmp_path / "nonexistent"), interval_value=1, interval_type="days"
+        )
+        assert result == {}
+
+
+# ── load_file ──────────────────────────────────────────────────────
+
+class TestLoadFile:
+    def test_dispatches_json(self, tmp_path):
+        f = tmp_path / "test.json"
+        f.write_text(json.dumps({"a": 1}))
+        result = load_file(str(f))
+        assert result == {"a": 1}
+
+    def test_dispatches_csv(self, tmp_path):
+        f = tmp_path / "test.csv"
+        f.write_text("name,age\nAlice,30\nBob,25\n")
+        with patch("wizsec.utils.mimetypes.guess_type", return_value=("text/csv", None)):
+            result = load_file(str(f))
+        assert len(result) == 2
+        assert result[0]["name"] == "Alice"
+
+    def test_dispatches_xml(self, tmp_path):
+        f = tmp_path / "test.xml"
+        f.write_text("<root><item>hello</item></root>")
+        result = load_file(str(f))
+        assert result.tag == "root"
+
+    def test_dispatches_text(self, tmp_path):
+        f = tmp_path / "test.txt"
+        f.write_text("hello world")
+        result = load_file(str(f))
+        assert result == "hello world"
+
+    def test_dispatches_pickle(self, tmp_path):
+        f = tmp_path / "test.pkl"
+        data = {"key": [1, 2, 3]}
+        with open(f, "wb") as fh:
+            pickle.dump(data, fh)
+        result = load_file(str(f))
+        assert result == data
+
+    def test_unknown_mime_returns_empty(self, tmp_path):
+        f = tmp_path / "test.xyz"
+        f.write_text("unknown")
+        result = load_file(str(f))
+        assert result == {}
+
+
+# ── load_json ──────────────────────────────────────────────────────
+
+class TestLoadJson:
+    def test_loads_plain_dict(self, tmp_path):
+        f = tmp_path / "test.json"
+        f.write_text(json.dumps({"x": 1, "y": 2}))
+        assert load_json(str(f)) == {"x": 1, "y": 2}
+
+    def test_normalizes_single_key_list(self, tmp_path):
+        """When JSON is {key: [list-of-dicts]}, missing keys are filled with None."""
+        data = {"items": [{"a": 1}, {"b": 2}]}
+        f = tmp_path / "test.json"
+        f.write_text(json.dumps(data))
+        result = load_json(str(f))
+        # Both items should have keys 'a' and 'b'
+        for item in result["items"]:
+            assert "a" in item
+            assert "b" in item
+
+    def test_loads_list_directly(self, tmp_path):
+        f = tmp_path / "test.json"
+        f.write_text(json.dumps([1, 2, 3]))
+        assert load_json(str(f)) == [1, 2, 3]
+
+
+# ── load_csv ───────────────────────────────────────────────────────
+
+class TestLoadCsv:
+    def test_loads_csv_to_dicts(self, tmp_path):
+        f = tmp_path / "test.csv"
+        f.write_text("name,value\nfoo,1\nbar,2\n")
+        result = load_csv(str(f))
+        assert len(result) == 2
+        assert result[0]["name"] == "foo"
+        assert result[1]["value"] == "2"
+
+    def test_empty_csv(self, tmp_path):
+        f = tmp_path / "test.csv"
+        f.write_text("name,value\n")
+        result = load_csv(str(f))
+        assert result == []
+
+
+# ── load_xml ───────────────────────────────────────────────────────
+
+class TestLoadXml:
+    def test_returns_root_element(self, tmp_path):
+        f = tmp_path / "test.xml"
+        f.write_text("<root><child attr='val'>text</child></root>")
+        root = load_xml(str(f))
+        assert isinstance(root, ET.Element)
+        assert root.tag == "root"
+        assert root.find("child").text == "text"
+        assert root.find("child").attrib["attr"] == "val"
+
+
+# ── load_text ──────────────────────────────────────────────────────
+
+class TestLoadText:
+    def test_loads_plain_text(self, tmp_path):
+        f = tmp_path / "test.txt"
+        content = "line1\nline2\nline3"
+        f.write_text(content)
+        assert load_text(str(f)) == content
+
+    def test_empty_file(self, tmp_path):
+        f = tmp_path / "empty.txt"
+        f.write_text("")
+        assert load_text(str(f)) == ""
+
+
+# ── load_data ──────────────────────────────────────────────────────
+
+class TestLoadData:
+    def test_loads_pickle(self, tmp_path):
+        f = tmp_path / "test.pkl"
+        data = {"nested": {"list": [1, 2, 3]}}
+        with open(f, "wb") as fh:
+            pickle.dump(data, fh)
+        result = load_data(str(f))
+        assert result == data
+
+    def test_corrupt_pickle_raises(self, tmp_path):
+        f = tmp_path / "bad.pkl"
+        f.write_bytes(b"not a pickle")
+        with pytest.raises(WizFileError, match="Failed to load data"):
+            load_data(str(f))
+
+    def test_missing_file_raises(self, tmp_path):
+        with pytest.raises(WizFileError, match="Failed to load data"):
+            load_data(str(tmp_path / "nonexistent.pkl"))

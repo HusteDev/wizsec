@@ -8,7 +8,7 @@ class TestMergePage:
 
     def _make_base(self):
         """Create a minimal _RequestBase instance for testing."""
-        from wiz_sdk._request import _RequestBase
+        from wizsec._request import _RequestBase
 
         obj = object.__new__(_RequestBase)
         obj._aggregated_data = None
@@ -39,7 +39,7 @@ class TestMergePage:
 
 class TestPageInfo:
     def _make_base(self):
-        from wiz_sdk._request import _RequestBase
+        from wizsec._request import _RequestBase
 
         obj = object.__new__(_RequestBase)
         return obj
@@ -61,7 +61,7 @@ class TestPageInfo:
 
 class TestCleanPageInfo:
     def _make_base(self):
-        from wiz_sdk._request import _RequestBase
+        from wizsec._request import _RequestBase
 
         obj = object.__new__(_RequestBase)
         return obj
@@ -80,7 +80,7 @@ class TestCleanPageInfo:
 
 class TestSuccess:
     def _make_base(self):
-        from wiz_sdk._request import _RequestBase
+        from wizsec._request import _RequestBase
 
         obj = object.__new__(_RequestBase)
         return obj

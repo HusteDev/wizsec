@@ -1,6 +1,6 @@
 # Config
 
-::: wiz_sdk.config.Config
+::: wizsec.config.Config
     options:
       members:
         - load

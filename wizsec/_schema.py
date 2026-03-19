@@ -14,14 +14,14 @@ import json
 import logging
 import threading
 from pathlib import Path
-from typing import Optional, List
+from typing import Any, Dict, List, Optional
 
 from graphql import parse as gql_parse, validate, build_client_schema, GraphQLSchema
 
 from .config import Config, DEFAULT_WIZ_DIR
 from .exceptions import WizSchemaValidationError
 
-logger = logging.getLogger("wiz_sdk._schema")
+logger = logging.getLogger("wizsec._schema")
 
 # Standard introspection query used to fetch the schema from the API
 INTROSPECTION_QUERY = """
@@ -102,7 +102,7 @@ class SchemaValidator:
     _fetching: set[str] = set()  # prevents recursive introspection
 
     @classmethod
-    def get_schema(cls, environment: str, client=None) -> Optional[GraphQLSchema]:
+    def get_schema(cls, environment: str, client: Any = None) -> Optional[GraphQLSchema]:
         """Load or fetch the GraphQL schema for a given environment."""
         if environment in cls._schemas:
             return cls._schemas[environment]
@@ -128,7 +128,7 @@ class SchemaValidator:
         return None
 
     @classmethod
-    def validate_query(cls, query_str: str, environment: str, client=None) -> None:
+    def validate_query(cls, query_str: str, environment: str, client: Any = None) -> None:
         """Validate a query against the schema. Raises WizSchemaValidationError on failure."""
         schema = cls.get_schema(environment, client)
         if schema is None:
@@ -161,10 +161,12 @@ class SchemaValidator:
 
     @classmethod
     def _schema_cache_path(cls, environment: str) -> Path:
+        """Return the filesystem path for the cached schema JSON."""
         return DEFAULT_WIZ_DIR / f"schema_{environment}.json"
 
     @classmethod
     def _load_from_cache(cls, environment: str) -> Optional[GraphQLSchema]:
+        """Load and build a GraphQL schema from the disk cache, or return None."""
         cache_path = cls._schema_cache_path(environment)
         if not cache_path.exists():
             return None
@@ -182,7 +184,7 @@ class SchemaValidator:
             return None
 
     @classmethod
-    def _fetch_and_cache(cls, environment: str, client) -> Optional[GraphQLSchema]:
+    def _fetch_and_cache(cls, environment: str, client: Any) -> Optional[GraphQLSchema]:
         """Fetch schema via introspection and cache to disk."""
         cls._fetching.add(environment)
         try:
