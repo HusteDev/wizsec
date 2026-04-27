@@ -389,7 +389,7 @@ class WizClient:
             self._logger.verbose(f"Response status code: {response.status_code}")
             return response
         except TransportError as e:
-            self._logger.error(f"POST request failed: {e}", exc_info=True)
+            self._logger.debug(f"POST request failed: {e}")
             raise
 
     # ========== RATE LIMITING ==========
