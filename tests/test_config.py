@@ -140,7 +140,7 @@ class TestConfigLoad:
     def test_load_from_yaml_file(self, tmp_path):
         """load() should read a YAML config file and populate _CONFIG."""
         config_data = {
-            "app": {"name": "test-app", "release": "2.0.0"},
+            "app": {"name": "test-app", "release": "2.0.0", "config_schema": 1},
             "auth": {
                 "grant_type": "client_credentials",
                 "credentials": {"storage_method": "env"},
@@ -155,7 +155,6 @@ class TestConfigLoad:
         with (
             patch("wizsec.config.DEFAULT_WIZ_DIR", tmp_path),
             patch("wizsec.config.SERVERLESS", False),
-            patch("wizsec.config.get_version", side_effect=Exception("not installed")),
         ):
             Config.load(config_path=str(config_file))
 
@@ -165,7 +164,7 @@ class TestConfigLoad:
     def test_load_applies_overrides(self, tmp_path):
         """load() should apply dot-notation overrides on top of YAML values."""
         config_data = {
-            "app": {"name": "original", "release": "1.0.0"},
+            "app": {"name": "original", "release": "1.0.0", "config_schema": 1},
             "auth": {
                 "grant_type": "client_credentials",
                 "credentials": {"storage_method": "env"},
@@ -181,7 +180,6 @@ class TestConfigLoad:
         with (
             patch("wizsec.config.DEFAULT_WIZ_DIR", tmp_path),
             patch("wizsec.config.SERVERLESS", False),
-            patch("wizsec.config.get_version", side_effect=Exception("not installed")),
         ):
             Config.load(config_path=str(config_file), overrides=overrides)
 
@@ -191,7 +189,7 @@ class TestConfigLoad:
     def test_load_sets_env_vars_for_credentials(self, tmp_path):
         """load() should set WIZ_CLIENT_ID / WIZ_CLIENT_SECRET env vars when provided."""
         config_data = {
-            "app": {"name": "t", "release": "0"},
+            "app": {"name": "t", "release": "0", "config_schema": 1},
             "auth": {
                 "grant_type": "client_credentials",
                 "credentials": {"storage_method": "env"},
@@ -207,7 +205,6 @@ class TestConfigLoad:
             with (
                 patch("wizsec.config.DEFAULT_WIZ_DIR", tmp_path),
                 patch("wizsec.config.SERVERLESS", False),
-                patch("wizsec.config.get_version", side_effect=Exception("skip")),
             ):
                 Config.load(
                     config_path=str(config_file),
@@ -224,7 +221,7 @@ class TestConfigLoad:
     def test_load_skips_overrides_without_equals(self, tmp_path):
         """Overrides without '=' should be silently skipped."""
         config_data = {
-            "app": {"name": "t", "release": "0"},
+            "app": {"name": "t", "release": "0", "config_schema": 1},
             "auth": {
                 "grant_type": "client_credentials",
                 "credentials": {"storage_method": "env"},
@@ -240,12 +237,143 @@ class TestConfigLoad:
         with (
             patch("wizsec.config.DEFAULT_WIZ_DIR", tmp_path),
             patch("wizsec.config.SERVERLESS", False),
-            patch("wizsec.config.get_version", side_effect=Exception("skip")),
         ):
             Config.load(config_path=str(config_file), overrides=overrides)
 
         # Should load successfully despite bad overrides
         assert Config._loaded is True
+
+
+# ---------------------------------------------------------------------------
+# Config schema migration
+# ---------------------------------------------------------------------------
+
+
+class TestConfigMigration:
+    def _write_config(self, tmp_path, extra_app_fields=None):
+        config_data = {
+            "app": {"name": "wizsec", "release": "1.0.0", **(extra_app_fields or {})},
+            "auth": {
+                "grant_type": "client_credentials",
+                "credentials": {"storage_method": "env"},
+            },
+            "domain": {"default": "gov"},
+            "api": {"max_retries": 1, "retry_time": 0, "timeout": 5},
+            "logging": {"enabled": False},
+        }
+        config_file = tmp_path / "wiz.config"
+        config_file.write_text(yaml.dump(config_data))
+        return config_file
+
+    def test_migration_adds_schema_field_when_missing(self, tmp_path):
+        """Config without config_schema should have it added after load."""
+        config_file = self._write_config(tmp_path)
+
+        with (
+            patch("wizsec.config.DEFAULT_WIZ_DIR", tmp_path),
+            patch("wizsec.config.SERVERLESS", False),
+        ):
+            Config.load(config_path=str(config_file))
+
+        assert Config._CONFIG["app"]["config_schema"] == 1
+
+    def test_migration_updates_file_when_schema_missing(self, tmp_path):
+        """_run_migrations should write config_schema into the config file."""
+        config_file = self._write_config(tmp_path)
+        assert "config_schema" not in config_file.read_text()
+
+        with (
+            patch("wizsec.config.DEFAULT_WIZ_DIR", tmp_path),
+            patch("wizsec.config.SERVERLESS", False),
+        ):
+            Config.load(config_path=str(config_file))
+
+        assert "config_schema: 1" in config_file.read_text()
+
+    def test_migration_skips_when_already_current(self, tmp_path):
+        """Config at current schema version should not trigger migration."""
+        config_file = self._write_config(tmp_path, {"config_schema": 1})
+
+        with (
+            patch("wizsec.config.DEFAULT_WIZ_DIR", tmp_path),
+            patch("wizsec.config.SERVERLESS", False),
+        ):
+            Config.load(config_path=str(config_file))
+
+        # Schema field is still 1 and file was not re-written needlessly
+        assert Config._CONFIG["app"]["config_schema"] == 1
+
+    def test_migration_runs_registered_function(self, tmp_path):
+        """A registered migration function should be called and its changes reported."""
+        from wizsec.config import _MIGRATIONS
+
+        def fake_migration(config):
+            config.setdefault("api", {})["new_field"] = "default_value"
+            return ["Added: 'api.new_field' (default: default_value)"]
+
+        config_file = self._write_config(tmp_path)
+
+        try:
+            _MIGRATIONS[(0, 1)] = fake_migration
+            with (
+                patch("wizsec.config.DEFAULT_WIZ_DIR", tmp_path),
+                patch("wizsec.config.SERVERLESS", False),
+            ):
+                Config.load(config_path=str(config_file))
+
+            assert Config._CONFIG["api"]["new_field"] == "default_value"
+            assert Config._CONFIG["app"]["config_schema"] == 1
+        finally:
+            _MIGRATIONS.pop((0, 1), None)
+
+    def test_migration_prints_changes_to_stdout(self, tmp_path, capsys):
+        """Migration with changes should print an info message to stdout."""
+        from wizsec.config import _MIGRATIONS
+
+        def fake_migration(config):
+            return ["Added: 'app.timeout' (default: 30)"]
+
+        config_file = self._write_config(tmp_path)
+
+        try:
+            _MIGRATIONS[(0, 1)] = fake_migration
+            with (
+                patch("wizsec.config.DEFAULT_WIZ_DIR", tmp_path),
+                patch("wizsec.config.SERVERLESS", False),
+            ):
+                Config.load(config_path=str(config_file))
+
+            captured = capsys.readouterr()
+            assert "Info: Config migrated to schema v1" in captured.out
+            assert "Added: 'app.timeout'" in captured.out
+        finally:
+            _MIGRATIONS.pop((0, 1), None)
+
+    def test_migration_no_output_when_no_changes(self, tmp_path, capsys):
+        """Migration with no registered functions should produce no stdout output."""
+        config_file = self._write_config(tmp_path)
+
+        with (
+            patch("wizsec.config.DEFAULT_WIZ_DIR", tmp_path),
+            patch("wizsec.config.SERVERLESS", False),
+        ):
+            Config.load(config_path=str(config_file))
+
+        captured = capsys.readouterr()
+        assert "migrated" not in captured.out
+
+    def test_migration_file_write_failure_does_not_raise(self, tmp_path):
+        """If the config file cannot be written, migration should not raise."""
+        from wizsec import config as cfg
+
+        config_without_schema = {"app": {"name": "wizsec", "release": "1.0.0"}}
+        nonexistent = tmp_path / "no" / "such" / "wiz.config"
+
+        # Should not raise even though the file path is invalid
+        cfg._run_migrations(config_without_schema, nonexistent)
+
+        # In-memory dict is still updated
+        assert config_without_schema["app"]["config_schema"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +385,7 @@ class TestEnsureLoaded:
     def test_ensure_loaded_calls_load_when_not_loaded(self, tmp_path):
         """ensure_loaded decorator should call load() when _loaded is False."""
         config_data = {
-            "app": {"name": "auto", "release": "0.1"},
+            "app": {"name": "auto", "release": "0.1", "config_schema": 1},
             "auth": {
                 "grant_type": "client_credentials",
                 "credentials": {"storage_method": "env"},
@@ -274,7 +402,6 @@ class TestEnsureLoaded:
         with (
             patch("wizsec.config.DEFAULT_WIZ_DIR", tmp_path),
             patch("wizsec.config.SERVERLESS", False),
-            patch("wizsec.config.get_version", side_effect=Exception("skip")),
         ):
             # Calling an accessor should auto-load
             result = Config.app_name()
