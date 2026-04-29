@@ -682,7 +682,9 @@ def generate_default_config(
     yaml_content = template_path.read_text(encoding="utf-8")
     yaml_content = yaml_content.replace("${SDK_NAME}", LIBRARY_NAME)
     yaml_content = yaml_content.replace("${SDK_VERSION}", CURRENT_VERSION)
-    yaml_content = yaml_content.replace("${CONFIG_SCHEMA_VERSION}", str(CONFIG_SCHEMA_VERSION))
+    yaml_content = yaml_content.replace(
+        "${CONFIG_SCHEMA_VERSION}", str(CONFIG_SCHEMA_VERSION)
+    )
 
     if not DEFAULT_WIZ_DIR.exists():
         DEFAULT_WIZ_DIR.mkdir(parents=True, exist_ok=True)
