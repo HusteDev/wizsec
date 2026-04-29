@@ -27,6 +27,7 @@ def _minimal_config(tmp_path: Path) -> dict:
         "app": {
             "name": "wizsec",
             "release": "1.0.0",
+            "config_schema": 1,
         },
         "auth": {
             "grant_type": "client_credentials",

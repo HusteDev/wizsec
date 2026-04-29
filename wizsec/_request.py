@@ -259,7 +259,9 @@ class WizRequest(_RequestBase):
                         return
 
             except TransportError as e:
-                self._handle_network_error(e, attempt=retries, max_retries=self._client._max_retries)
+                self._handle_network_error(
+                    e, attempt=retries, max_retries=self._client._max_retries
+                )
             except Exception as e:
                 self._handle_unexpected_error(e)
 
@@ -361,12 +363,13 @@ class WizRequest(_RequestBase):
         # 4xx errors are client-side — retrying will never help
         return 400 <= response.status_code < 500
 
-    def _handle_network_error(self, e: TransportError, attempt: int = 0, max_retries: int = 0) -> None:
+    def _handle_network_error(
+        self, e: TransportError, attempt: int = 0, max_retries: int = 0
+    ) -> None:
         """Handle network-related errors. Logs a clean warning per attempt; final result logged by _handle_final_failure."""
         self.errors.append({"message": str(e), "trace": traceback.format_exc()})
         self._logger.warning(
-            "Network error (attempt %d/%d): %s",
-            attempt + 1, max_retries + 1, e
+            "Network error (attempt %d/%d): %s", attempt + 1, max_retries + 1, e
         )
 
     def _handle_unexpected_error(self, e: Exception) -> None:
@@ -384,7 +387,9 @@ class WizRequest(_RequestBase):
     def _handle_final_failure(self) -> None:
         """Handle final failure after all retries exhausted."""
         last_error = self.errors[-1]["message"] if self.errors else "unknown error"
-        self._logger.error("Query failed after %d retries: %s", self._client._max_retries, last_error)
+        self._logger.error(
+            "Query failed after %d retries: %s", self._client._max_retries, last_error
+        )
         self._set_done_event()
 
     def _set_done_event(self) -> None:

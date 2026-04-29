@@ -11,6 +11,7 @@
 
 # config.py
 from pathlib import Path
+import re
 import yaml
 import sys
 import os
@@ -19,12 +20,6 @@ import tempfile
 import inspect
 from functools import wraps
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-
-try:
-    from importlib.metadata import version as get_version
-except ImportError:
-    # Python <3.8 fallback (not typical in modern environments, but just in case)
-    from importlib_metadata import version as get_version  # type: ignore[no-redef]
 
 from .version import __version__ as wizsec_version
 from ._logging import (
@@ -36,6 +31,17 @@ from ._logging import (
 LIBRARY_NAME = "wizsec"
 CURRENT_VERSION = wizsec_version
 
+# Increment this when the config file structure changes (fields added, renamed, removed).
+# Adding a migration function to _MIGRATIONS is required for each bump.
+CONFIG_SCHEMA_VERSION = 1
+
+# Keys are (from_schema, to_schema). Each function receives the in-memory config
+# dict, modifies it in place, and returns a list of human-readable change descriptions.
+_MIGRATIONS: Dict[Tuple[int, int], Callable[[Dict[str, Any]], List[str]]] = {
+    # Example for a future schema bump:
+    # (1, 2): _migrate_v1_to_v2,
+}
+
 # _CONFIG = None
 SERVERLESS = str(os.environ.get("WIZ_SERVERLESS", "")).lower() in (
     "1",
@@ -45,6 +51,55 @@ SERVERLESS = str(os.environ.get("WIZ_SERVERLESS", "")).lower() in (
 DEFAULT_WIZ_DIR = Path("/var/task/.wiz") if SERVERLESS else Path.home() / ".wiz"
 DEFAULT_TEMP_FOLDER = "/tmp" if SERVERLESS else Path(tempfile.gettempdir())
 CWD = "/tmp" if SERVERLESS else str(os.getcwd()).replace("\\", "/")
+
+
+def _update_config_schema_in_file(config_file_path: Path, schema_version: int) -> bool:
+    """Insert or update config_schema in the config file, preserving comments and formatting."""
+    try:
+        content = config_file_path.read_text(encoding="utf-8")
+        if re.search(r"^\s+config_schema:", content, re.MULTILINE):
+            content = re.sub(
+                r"([ \t]+config_schema:[ \t]*)\d+",
+                lambda m: m.group(1) + str(schema_version),
+                content,
+            )
+        else:
+            content = re.sub(
+                r"([ \t]+release:[ \t]*[^\n]*\n)",
+                r"\1  config_schema: " + str(schema_version) + "\n",
+                content,
+                count=1,
+            )
+        config_file_path.write_text(content, encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def _run_migrations(config: Dict[str, Any], config_file_path: Path) -> None:
+    """Apply any pending config schema migrations and persist the updated file."""
+    file_schema = int(config.get("app", {}).get("config_schema", 0))
+    if file_schema >= CONFIG_SCHEMA_VERSION:
+        return
+
+    all_changes: List[str] = []
+    current = file_schema
+    while current < CONFIG_SCHEMA_VERSION:
+        next_ver = current + 1
+        migration_fn = _MIGRATIONS.get((current, next_ver))
+        if migration_fn:
+            all_changes.extend(migration_fn(config))
+        current = next_ver
+
+    config.setdefault("app", {})["config_schema"] = CONFIG_SCHEMA_VERSION
+    _update_config_schema_in_file(config_file_path, CONFIG_SCHEMA_VERSION)
+
+    if all_changes:
+        msg = f"Info: Config migrated to schema v{CONFIG_SCHEMA_VERSION}.\n"
+        for change in all_changes:
+            msg += f"  - {change}\n"
+        sys.stdout.write(msg)
+        sys.stdout.flush()
 
 
 class Config:
@@ -117,17 +172,9 @@ class Config:
 
             if not cls.serverless():
                 assert cls._CONFIG is not None
-                config_version = cls._CONFIG.get("app", {}).get("release")
-                try:
-                    library_version = get_version("wizsec")
-                    if config_version != library_version:
-                        sys.stdout.write(
-                            f"Warning: Config file version [{config_version}] doesn't match the installed library version [{library_version}]\n"
-                        )
-                        sys.stdout.flush()
-                except Exception as e:
-                    sys.stdout.write(f"Error checking library version: {str(e)}\n")
-                    sys.stdout.flush()
+                _config_file = path / filename if filename else None
+                if _config_file and _config_file.exists():
+                    _run_migrations(cls._CONFIG, _config_file)
 
                 # CA Certificate
                 ca_file_path, filename = parse_filepath(
@@ -635,6 +682,7 @@ def generate_default_config(
     yaml_content = template_path.read_text(encoding="utf-8")
     yaml_content = yaml_content.replace("${SDK_NAME}", LIBRARY_NAME)
     yaml_content = yaml_content.replace("${SDK_VERSION}", CURRENT_VERSION)
+    yaml_content = yaml_content.replace("${CONFIG_SCHEMA_VERSION}", str(CONFIG_SCHEMA_VERSION))
 
     if not DEFAULT_WIZ_DIR.exists():
         DEFAULT_WIZ_DIR.mkdir(parents=True, exist_ok=True)

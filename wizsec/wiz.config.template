@@ -1,6 +1,7 @@
 app:
   name: ${SDK_NAME}
   release: ${SDK_VERSION}
+  config_schema: ${CONFIG_SCHEMA_VERSION}
 # serverless: false                   # Enables additional functions to support Serverless execution | default = false
 # wiz_dir: ""                         # Default directory for Wiz config, auth, and logging files
 # env_path: ""                        # Custom directory for .env file | default = $CWD

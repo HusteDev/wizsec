@@ -62,6 +62,10 @@ version_file = "wizsec/version.py"
 version_scheme = "post-release"
 local_scheme = "no-local-version"
 
+[tool.black]
+target-version = ["py39", "py310", "py311", "py312", "py313"]
+line-length = 88
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
