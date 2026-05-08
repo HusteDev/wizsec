@@ -314,7 +314,9 @@ class TestQueryCollectionSetter:
             mock_import.assert_called_once_with(fake_mod_name)
         assert req.queryCollection is fake_mod
 
-    @pytest.mark.parametrize("bad_value", [42, 3.14, True, None, b"x", [], (), set(), frozenset(), {}])
+    @pytest.mark.parametrize(
+        "bad_value", [42, 3.14, True, None, b"x", [], (), set(), frozenset(), {}]
+    )
     def test_set_query_collection_invalid_type_raises(self, mock_wiz_client, bad_value):
         """Primitive and container types are rejected with WizQueryError."""
         req = _make_wiz_request(mock_wiz_client)
