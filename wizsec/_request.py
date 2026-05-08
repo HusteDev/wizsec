@@ -28,12 +28,19 @@ from .client import WizClient
 from .exceptions import WizQueryError, WizAPIError, WizReportError, WizTimeoutError
 from ._transport import stream_get, get as transport_get, TransportError
 
-
 # Types rejected as queryCollection — anything else (including SimpleNamespace,
 # dataclasses, class instances) is accepted and resolved via getattr at use time.
 _REJECTED_QC_TYPES = (
-    int, float, bool, bytes, bytearray,
-    list, tuple, set, frozenset, dict,
+    int,
+    float,
+    bool,
+    bytes,
+    bytearray,
+    list,
+    tuple,
+    set,
+    frozenset,
+    dict,
     type(None),
 )
 
