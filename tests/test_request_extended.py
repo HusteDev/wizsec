@@ -314,11 +314,12 @@ class TestQueryCollectionSetter:
             mock_import.assert_called_once_with(fake_mod_name)
         assert req.queryCollection is fake_mod
 
-    def test_set_query_collection_invalid_type_raises(self, mock_wiz_client):
-        """Setting queryCollection with an invalid type raises WizQueryError."""
+    @pytest.mark.parametrize("bad_value", [42, 3.14, True, None, b"x", [], (), set(), frozenset(), {}])
+    def test_set_query_collection_invalid_type_raises(self, mock_wiz_client, bad_value):
+        """Primitive and container types are rejected with WizQueryError."""
         req = _make_wiz_request(mock_wiz_client)
         with pytest.raises(WizQueryError, match="QueryCollection must be a module"):
-            req.queryCollection = 42
+            req.queryCollection = bad_value
 
     def test_query_collection_getter_returns_none_when_unset(self, mock_wiz_client):
         """queryCollection returns None when not set."""
@@ -333,6 +334,30 @@ class TestQueryCollectionSetter:
         mod.MY_QUERY = "query MyQuery { users { id } }"
         req = _make_wiz_request(mock_wiz_client, paginate=False)
         req.queryCollection = mod
+        req.query = "MY_QUERY"
+        assert "users" in req.query
+
+    def test_set_query_collection_from_simple_namespace(self, mock_wiz_client):
+        """SimpleNamespace is accepted as-is and resolves query attributes."""
+        from types import SimpleNamespace
+
+        ns = SimpleNamespace(MY_QUERY="query MyQuery { users { id } }")
+        req = _make_wiz_request(mock_wiz_client, paginate=False)
+        req.queryCollection = ns
+        assert req.queryCollection is ns
+        req.query = "MY_QUERY"
+        assert "users" in req.query
+
+    def test_set_query_collection_from_class_instance(self, mock_wiz_client):
+        """A plain class instance with query attributes is accepted as-is."""
+
+        class Queries:
+            MY_QUERY = "query MyQuery { users { id } }"
+
+        qc = Queries()
+        req = _make_wiz_request(mock_wiz_client, paginate=False)
+        req.queryCollection = qc
+        assert req.queryCollection is qc
         req.query = "MY_QUERY"
         assert "users" in req.query
 

@@ -83,3 +83,21 @@ response = client.create_request(
     vars={"first": 100},
 )
 ```
+
+`queryCollection` accepts a module, a module name string (auto-imported), or any object whose attributes are the query strings. For one-off scripts where a dedicated `queries.py` module is overkill, a `types.SimpleNamespace` works just as well:
+
+```python
+from types import SimpleNamespace
+
+queries = SimpleNamespace(
+    LIST_PROJECTS="query ListProjects($first: Int) { projects(first: $first) { nodes { id } } }",
+)
+
+response = client.create_request(
+    queryCollection=queries,
+    query="LIST_PROJECTS",
+    vars={"first": 100},
+)
+```
+
+Dataclass instances and plain class instances work the same way — anything with attributes named after your queries.

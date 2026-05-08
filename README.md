@@ -28,6 +28,12 @@ A Python SDK for the [Wiz](https://www.wiz.io/) Cloud Security GraphQL API. Prov
 
 ## Installation
 
+Install from [Pypi](https://pypi.org/project/wizsec/):
+
+```bash
+pip install wizsec
+```
+
 Install from source:
 
 ```bash
@@ -192,6 +198,18 @@ response = client.create_request(
     vars={"id": "some-project-id"},
     paginate=False,
 )
+```
+
+`queryCollection` accepts a module, a module name string (auto-imported), or any object whose attributes are the query strings — for example a `types.SimpleNamespace` for one-off scripts that don't warrant a separate `queries.py`:
+
+```python
+from types import SimpleNamespace
+
+queries = SimpleNamespace(
+    ListUsers="query ListUsers($first: Int) { users(first: $first) { nodes { id } } }",
+)
+
+response = client.create_request(queryCollection=queries, query="ListUsers", vars={"first": 50})
 ```
 
 See [`examples/query_collection/`](examples/query_collection/) for a complete working example.
