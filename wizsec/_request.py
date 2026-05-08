@@ -29,6 +29,15 @@ from .exceptions import WizQueryError, WizAPIError, WizReportError, WizTimeoutEr
 from ._transport import stream_get, get as transport_get, TransportError
 
 
+# Types rejected as queryCollection — anything else (including SimpleNamespace,
+# dataclasses, class instances) is accepted and resolved via getattr at use time.
+_REJECTED_QC_TYPES = (
+    int, float, bool, bytes, bytearray,
+    list, tuple, set, frozenset, dict,
+    type(None),
+)
+
+
 class _RequestBase:
     """Shared logic for sync and async request classes."""
 
@@ -76,7 +85,18 @@ class _RequestBase:
 
     @queryCollection.setter
     def queryCollection(self, module: Union[str, Any]) -> None:
-        """Set the query collection by module name or module object."""
+        """Set the query collection.
+
+        Accepts:
+          - a module name string (auto-imported)
+          - a module object (registered in sys.modules for downstream resolvers)
+          - any object whose attributes are the GraphQL query strings
+            (e.g. types.SimpleNamespace, a dataclass instance, a class instance,
+            or sys.modules[__name__] — the calling module itself)
+
+        Primitive and container types (int, float, bool, bytes, list, tuple,
+        set, dict, None) are rejected with WizQueryError.
+        """
         import importlib, sys, types
 
         if isinstance(module, str):
@@ -87,13 +107,17 @@ class _RequestBase:
             if module_name not in sys.modules:
                 sys.modules[module_name] = module
                 self._logger.debug("Manually added [%s] to sys.modules", module_name)
-        else:
+        elif isinstance(module, _REJECTED_QC_TYPES):
             self._logger.warning(
                 "Unexpected type for queryCollection: %s", type(module)
             )
             raise WizQueryError(
-                "QueryCollection must be a module or a module name string"
+                "QueryCollection must be a module, a module name string, "
+                "or an object with attributes for each query (e.g. SimpleNamespace)."
             )
+        # else: namespace-like object (SimpleNamespace, dataclass, class
+        # instance, etc.) — accepted as-is. Missing attributes fall back
+        # gracefully via the existing AttributeError handling in `query.setter`.
 
         self._queryCollection = module
 

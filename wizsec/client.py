@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Optional, Dict, Any, Iterator, Union
 import asyncio
 from contextlib import contextmanager
 from .config import Config
+from .version import __version__ as wizsec_version
 from . import utils
 import webbrowser
 from .exceptions import (
@@ -104,9 +105,6 @@ class WizClient:
         self._logger.debug(
             f"Client Request: environment={self.environment}, profile={self.profile}, grant_type={self._grant_type}"
         )
-        self._logger.info(
-            f"WizClient Initialized:  environment={self.environment}, profile={self.profile}, grant_type={self._grant_type}"
-        )
 
         self._initialize_headers()
         self._preload_credentials()
@@ -163,10 +161,9 @@ class WizClient:
     def _initialize_headers(self) -> None:
         """Set default HTTP headers on the environment state."""
         self._logger.debug("Initializing headers")
-        user_agent = f"{Config.app_name()}/{Config.release_version()}"
         self._env_state.headers = {
             "Content-Type": "application/json",
-            "User-Agent": user_agent,
+            "User-Agent": f"wizsec/{wizsec_version}",
         }
 
     # ========== QUEUE & WORKER ==========
