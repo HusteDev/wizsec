@@ -277,6 +277,35 @@ class Config:
 
     @classmethod
     @ensure_loaded
+    def set(cls, *keys: str, value: Any) -> None:
+        """Set a nested config value by key path, creating intermediate dicts as needed.
+
+        Runtime override only — does not persist back to the YAML config file.
+
+        Args:
+            *keys: Sequence of keys to traverse; the last key is the leaf to assign.
+            value: Value to store at the leaf.
+
+        Raises:
+            ValueError: If no keys are provided.
+        """
+        if not keys:
+            raise ValueError("Config.set() requires at least one key")
+        if cls._CONFIG is None:
+            cls._CONFIG = {}
+        d = cls._CONFIG
+        for key in keys[:-1]:
+            existing = d.get(key)
+            if not isinstance(existing, dict):
+                existing = {}
+                d[key] = existing
+            d = existing
+        d[keys[-1]] = value
+        if cls._logger:
+            cls.get_logger().debug(f"set() called with keys={keys} -> {value}")
+
+    @classmethod
+    @ensure_loaded
     def set_log_level(
         cls,
         level: Union[int, str],
@@ -662,6 +691,51 @@ class Config:
     def console_handler_logging_level(cls) -> str:
         """Return the logging level for the console handler."""
         return cls.get("logging", "console_handler", "logging_level", default="INFO")
+
+    ##################
+    # Query Splitting
+    ##################
+    @classmethod
+    @ensure_loaded
+    def query_splitting_enabled(cls) -> bool:
+        """Return whether pre-emptive totalCount probing and query splitting is enabled."""
+        return cls.get("query_splitting", "enabled", default=False)
+
+    @classmethod
+    @ensure_loaded
+    def query_splitting_threshold(cls) -> int:
+        """Return the record count above which splitting is triggered."""
+        return int(cls.get("query_splitting", "threshold", default=10000))
+
+    @classmethod
+    @ensure_loaded
+    def query_splitting_max_concurrent(cls) -> int:
+        """Return the maximum number of concurrent async sub-queries when splitting."""
+        return int(cls.get("query_splitting", "max_concurrent", default=10))
+
+    @classmethod
+    @ensure_loaded
+    def query_splitting_detection_mode(cls) -> str:
+        """Return the totalCount detection mode: 'static' or 'schema'."""
+        return str(cls.get("query_splitting", "detection_mode", default="static"))
+
+    @classmethod
+    @ensure_loaded
+    def query_splitting_split_by(cls) -> str:
+        """Return the dimension to split by: 'cloudAccounts' or 'projects'."""
+        return str(cls.get("query_splitting", "split_by", default="cloudAccounts"))
+
+    @classmethod
+    @ensure_loaded
+    def query_splitting_filter_path(cls) -> str:
+        """Return the dot-notation path in vars where subscription IDs are injected."""
+        return str(cls.get("query_splitting", "filter_path", default=""))
+
+    @classmethod
+    @ensure_loaded
+    def query_splitting_cache_subscriptions(cls) -> bool:
+        """Return whether the subscription/project list should be cached per session."""
+        return cls.get("query_splitting", "cache_subscriptions", default=True)
 
 
 def generate_default_config(

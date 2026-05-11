@@ -21,12 +21,136 @@ import threading
 from typing import Optional, Dict, Any, List, Tuple, Union, Callable, Iterator
 from graphql import parse, GraphQLError
 import asyncio
-from .utils import parse_query_metadata, ensure_pagination_variables
+from .utils import (
+    parse_query_metadata,
+    ensure_pagination_variables,
+    has_totalcount_field,
+    build_totalcount_probe_query,
+    inject_subscription_filter,
+)
 from ._schema import SchemaValidator
 from .config import Config
 from .client import WizClient
 from .exceptions import WizQueryError, WizAPIError, WizReportError, WizTimeoutError
 from ._transport import stream_get, get as transport_get, TransportError
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Built-in queries used by the query-splitting feature.
+# Prefixed "WizsecInternal" to avoid collisions with user query collections.
+# ──────────────────────────────────────────────────────────────────────────────
+_SPLIT_QUERY_CLOUD_ACCOUNTS = """
+query WizsecInternalCloudAccounts($first: Int, $after: String) {
+  cloudAccounts(first: $first, after: $after) {
+    nodes { id externalId name cloudProvider }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+
+_SPLIT_QUERY_PROJECTS = """
+query WizsecInternalProjects($first: Int, $after: String) {
+  projects(first: $first, after: $after) {
+    nodes { id name slug }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+
+
+def _extract_totalcount(data: Optional[Dict[str, Any]], source: str) -> int:
+    """Extract the totalCount integer from a probe response."""
+    if not data:
+        return 0
+    return int((data.get(source) or {}).get("totalCount", 0))
+
+
+def _schema_supports_totalcount(source: str, client: Any) -> bool:
+    """Return True if the schema reports the root field's connection type has totalCount."""
+    try:
+        schema = SchemaValidator.get_schema(client.environment, client)
+        if schema is None:
+            return False
+        query_type = schema.query_type
+        if query_type is None:
+            return False
+        root_field = query_type.fields.get(source)
+        if root_field is None:
+            return False
+        # Unwrap NonNull / List wrappers to get the named type
+        named_type = root_field.type
+        while hasattr(named_type, "of_type"):
+            named_type = named_type.of_type  # type: ignore[union-attr]
+        connection_fields = getattr(named_type, "fields", {})
+        return "totalCount" in connection_fields
+    except Exception:
+        return False
+
+
+def _get_cached_or_fetch_entities(client: Any) -> List[Dict[str, Any]]:
+    """Return the session-cached split entities, fetching and caching them if needed."""
+    env_state = client._env_state
+    split_by = Config.query_splitting_split_by()
+    cache_enabled = Config.query_splitting_cache_subscriptions()
+
+    with env_state._split_entities_lock:
+        if cache_enabled and env_state._cached_split_entities is not None:
+            return env_state._cached_split_entities
+
+        query = (
+            _SPLIT_QUERY_CLOUD_ACCOUNTS
+            if split_by == "cloudAccounts"
+            else _SPLIT_QUERY_PROJECTS
+        )
+        node_key = "cloudAccounts" if split_by == "cloudAccounts" else "projects"
+
+        fetch_req = WizRequest(
+            client=client,
+            query=query,
+            vars={"first": 500},
+            paginate=True,
+        )
+        fetch_req._is_sub_request = True  # type: ignore[attr-defined]
+        fetch_req.submit()
+
+        if not fetch_req.success() or fetch_req.data is None:
+            entities: List[Dict[str, Any]] = []
+        else:
+            entities = (fetch_req.data.get(node_key) or {}).get("nodes", [])
+
+        if cache_enabled:
+            env_state._cached_split_entities = entities
+
+    return entities
+
+
+def _merge_split_results(
+    responses: List[Any],
+    source: str,
+    logger: Any,
+) -> Dict[str, Any]:
+    """Merge nodes from multiple per-entity responses into a single data dict."""
+    all_nodes: List[Any] = []
+    total_count = 0
+    sample_structure: Optional[Dict[str, Any]] = None
+
+    for resp in responses:
+        if not resp.success or resp.data is None:
+            if resp.errors:
+                logger.warning("Splitting sub-query failed: %s", resp.errors)
+            continue
+        connection = resp.data.get(source) or {}
+        nodes = connection.get("nodes", [])
+        all_nodes.extend(nodes)
+        total_count += connection.get("totalCount", len(nodes))
+        if sample_structure is None:
+            sample_structure = {k: v for k, v in connection.items() if k != "nodes"}
+
+    merged_connection: Dict[str, Any] = dict(sample_structure or {})
+    merged_connection["nodes"] = all_nodes
+    merged_connection["totalCount"] = total_count
+    merged_connection.pop("pageInfo", None)
+    return {source: merged_connection}
+
 
 # Types rejected as queryCollection — anything else (including SimpleNamespace,
 # dataclasses, class instances) is accepted and resolved via getattr at use time.
@@ -254,6 +378,9 @@ class WizRequest(_RequestBase):
 
     def submit(self) -> "WizRequest":
         """Enqueue this request and wait for completion."""
+        if self._maybe_split():
+            return self
+
         if Config.serverless():
             # Skip threading in serverless mode
             self._client._enqueue_request(self)
@@ -263,6 +390,129 @@ class WizRequest(_RequestBase):
         self._client._enqueue_request(self)
         self._done_event.wait()
         return self
+
+    def _maybe_split(self) -> bool:
+        """Run a pre-emptive totalCount probe and split across entities if over threshold.
+
+        Returns True if splitting took over (self.data is populated); False to proceed normally.
+        Splitting is permanently disabled in serverless mode — that check is first and
+        unconditional regardless of any config setting.
+        """
+        # Hard guard: splitting relies on asyncio and threading patterns that are
+        # unsafe in serverless (Lambda) environments.
+        if Config.serverless():
+            return False
+
+        if not Config.query_splitting_enabled():
+            return False
+
+        # Prevent recursive probing on sub-requests fired by the splitter itself.
+        if getattr(self, "_is_sub_request", False):
+            return False
+
+        if self._current_query_info.get("request_type", "").lower() != "query":
+            return False
+
+        source = self._current_query_info.get("source", "")
+        if not source:
+            return False
+
+        # Detection: check whether this query supports totalCount
+        detection_mode = Config.query_splitting_detection_mode()
+        if detection_mode == "schema":
+            if not _schema_supports_totalcount(source, self._client):
+                return False
+        else:  # static
+            if not has_totalcount_field(self._current_query_info.get("fields", {})):
+                return False
+
+        # Build the probe query (totalCount-only version of the original)
+        probe_query = build_totalcount_probe_query(self._query)
+        if probe_query is None:
+            return False
+
+        # Run the probe
+        probe = WizRequest(
+            client=self._client,
+            query=probe_query,
+            vars=self.vars,
+            paginate=False,
+        )
+        probe._is_sub_request = True  # type: ignore[attr-defined]
+        probe._done_event.clear()
+        self._client._enqueue_request(probe)
+        probe._done_event.wait()
+
+        if not probe.success():
+            self._logger.debug("query_splitting: probe failed, skipping split")
+            return False
+
+        total = _extract_totalcount(probe.data, source)
+        threshold = Config.query_splitting_threshold()
+        self._logger.info(
+            "query_splitting: probe totalCount=%d (threshold=%d)", total, threshold
+        )
+
+        if total <= threshold:
+            return False
+
+        # Over threshold — attempt to split
+        filter_path = Config.query_splitting_filter_path()
+        if not filter_path:
+            self._logger.warning(
+                "query_splitting: totalCount=%d exceeds threshold but query_splitting.filter_path "
+                "is not configured; running original query without splitting",
+                total,
+            )
+            return False
+
+        entities = _get_cached_or_fetch_entities(self._client)
+        if not entities:
+            self._logger.warning(
+                "query_splitting: no entities returned for split_by=%s; running original query",
+                Config.query_splitting_split_by(),
+            )
+            return False
+
+        self._logger.info(
+            "query_splitting: splitting query across %d entities (max_concurrent=%d)",
+            len(entities),
+            Config.query_splitting_max_concurrent(),
+        )
+
+        # Fire async sub-queries, one per entity
+        results = asyncio.run(self._run_split_async(entities, filter_path))
+        self.data = _merge_split_results(results, source, self._logger)
+        self._set_done_event()
+        return True
+
+    async def _run_split_async(
+        self, entities: List[Dict[str, Any]], filter_path: str
+    ) -> List[Any]:
+        """Run one async sub-query per entity and return all responses."""
+        async with self._client.async_session() as async_client:
+            batch = AsyncWizBatchRequest(
+                client=async_client,
+                max_concurrent=Config.query_splitting_max_concurrent(),
+            )
+            for entity in entities:
+                entity_id = entity.get(id_field)
+                if not entity_id:
+                    continue
+                scoped_vars = inject_subscription_filter(
+                    self.vars, filter_path, [entity_id]
+                )
+                req_id = batch.add_request(
+                    query=self._query,
+                    vars=scoped_vars,
+                    paginate=self._paginate,
+                )
+                # Mark the internal request as a sub-request to skip recursive probing
+                batch._requests[req_id]._is_sub_request = True  # type: ignore[attr-defined]
+
+            batch_response = await batch.submit()
+
+        return [resp for _, resp in batch_response]
 
     def _execute_page(self) -> None:
         """Execute a single page of this request."""
@@ -895,8 +1145,114 @@ class AsyncWizRequest(_RequestBase):
     async def submit(self) -> "AsyncWizRequest":
         """Submit request asynchronously and return self on completion."""
         self._client._check_token()
+        if await self._maybe_split_async():
+            return self
         await self._execute_page()
         return self
+
+    async def _maybe_split_async(self) -> bool:
+        """Async counterpart of WizRequest._maybe_split().
+
+        Identical logic but uses await throughout — no asyncio.run() needed
+        since we are already in an async context.
+        Splitting is permanently disabled in serverless mode.
+        """
+        if Config.serverless():
+            return False
+
+        if not Config.query_splitting_enabled():
+            return False
+
+        if getattr(self, "_is_sub_request", False):
+            return False
+
+        if self._current_query_info.get("request_type", "").lower() != "query":
+            return False
+
+        source = self._current_query_info.get("source", "")
+        if not source:
+            return False
+
+        detection_mode = Config.query_splitting_detection_mode()
+        if detection_mode == "schema":
+            if not _schema_supports_totalcount(source, self._client):
+                return False
+        else:
+            if not has_totalcount_field(self._current_query_info.get("fields", {})):
+                return False
+
+        probe_query = build_totalcount_probe_query(self._query)
+        if probe_query is None:
+            return False
+
+        probe = AsyncWizRequest(
+            client=self._client,
+            query=probe_query,
+            vars=self.vars,
+            paginate=False,
+        )
+        probe._is_sub_request = True  # type: ignore[attr-defined]
+        await probe.submit()
+
+        if not probe.success():
+            self._logger.debug("query_splitting: async probe failed, skipping split")
+            return False
+
+        total = _extract_totalcount(probe.data, source)
+        threshold = Config.query_splitting_threshold()
+        self._logger.info(
+            "query_splitting: async probe totalCount=%d (threshold=%d)", total, threshold
+        )
+
+        if total <= threshold:
+            return False
+
+        filter_path = Config.query_splitting_filter_path()
+        if not filter_path:
+            self._logger.warning(
+                "query_splitting: totalCount=%d exceeds threshold but query_splitting.filter_path "
+                "is not configured; running original query without splitting",
+                total,
+            )
+            return False
+
+        # Run the blocking sync entity fetch in a thread executor to avoid
+        # stalling the event loop while waiting on _done_event.wait().
+        loop = asyncio.get_event_loop()
+        entities = await loop.run_in_executor(
+            None, _get_cached_or_fetch_entities, self._client
+        )
+        if not entities:
+            self._logger.warning(
+                "query_splitting: no entities for split_by=%s; running original query",
+                Config.query_splitting_split_by(),
+            )
+            return False
+
+        self._logger.info(
+            "query_splitting: async splitting across %d entities", len(entities)
+        )
+
+        batch = AsyncWizBatchRequest(
+            client=self._client,
+            max_concurrent=Config.query_splitting_max_concurrent(),
+        )
+        for entity in entities:
+            entity_id = entity.get("id")
+            if not entity_id:
+                continue
+            scoped_vars = inject_subscription_filter(self.vars, filter_path, [entity_id])
+            req_id = batch.add_request(
+                query=self._query,
+                vars=scoped_vars,
+                paginate=self._paginate,
+            )
+            batch._requests[req_id]._is_sub_request = True  # type: ignore[attr-defined]
+
+        batch_response = await batch.submit()
+        responses = [resp for _, resp in batch_response]
+        self.data = _merge_split_results(responses, source, self._logger)
+        return True
 
     async def _execute_page(self) -> None:
         """Async version of page execution — iterative pagination (no recursion)."""

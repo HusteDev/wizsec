@@ -11,7 +11,7 @@
 
 import queue
 import threading
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from pyrate_limiter import Duration, Limiter, Rate
 
 
@@ -32,6 +32,10 @@ class EnvironmentState:
         self.headers: Dict[str, str] = {"Content-Type": "application/json"}
         self.dc: Optional[str] = None
         self._limiters: Optional[Dict[str, Limiter]] = None
+        # Cached split entities (cloud accounts or projects) for query splitting.
+        # None = not yet fetched; [] = fetch returned empty; list = cached results.
+        self._cached_split_entities: Optional[List[Dict[str, Any]]] = None
+        self._split_entities_lock: threading.Lock = threading.Lock()
 
     @property
     def limiters(self) -> Dict[str, Limiter]:
