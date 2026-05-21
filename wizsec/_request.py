@@ -501,7 +501,7 @@ class WizRequest(_RequestBase):
                 max_concurrent=Config.query_splitting_max_concurrent(),
             )
             for entity in entities:
-                entity_id = entity.get(id_field)
+                entity_id = entity.get("id")
                 if not entity_id:
                     continue
                 scoped_vars = inject_subscription_filter(
