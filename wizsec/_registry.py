@@ -11,7 +11,7 @@
 
 import queue
 import threading
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from pyrate_limiter import Duration, Limiter, Rate
 
 
@@ -32,18 +32,32 @@ class EnvironmentState:
         self.headers: Dict[str, str] = {"Content-Type": "application/json"}
         self.dc: Optional[str] = None
         self._limiters: Optional[Dict[str, Limiter]] = None
+        # Cached split entities (cloud accounts or projects) for query splitting.
+        # None = not yet fetched; [] = fetch returned empty; list = cached results.
+        self._cached_split_entities: Optional[List[Dict[str, Any]]] = None
+        self._split_entities_lock: threading.Lock = threading.Lock()
 
     @property
     def limiters(self) -> Dict[str, Limiter]:
         """Lazily initialize and return the per-request-type rate limiters."""
         if self._limiters is None:
-            rate_configs = {
-                "query_user": Rate(100, Duration.SECOND),
-                "query_service": Rate(10, Duration.SECOND),
-                "mutation_user": Rate(10, Duration.SECOND),
-                "mutation_service": Rate(3, Duration.SECOND),
+            # Limiter accepts List[Rate] as its first argument; multiple
+            # Rate objects in a list are AND-ed together so both constraints
+            # must have capacity before a slot is granted.  Using a fast
+            # per-interval rate alongside the sustained cap prevents the
+            # token bucket from releasing all tokens at once (burst), which
+            # is what triggers server-side 429s.
+            rate_configs: Dict[str, List[Rate]] = {
+                # query_user: 100/s sustained, no more than 1 per 10 ms
+                "query_user": [Rate(1, 10), Rate(100, Duration.SECOND)],
+                # query_service: 10/s sustained, no more than 1 per 100 ms
+                "query_service": [Rate(1, 100), Rate(10, Duration.SECOND)],
+                # mutation_user: 10/s sustained, no more than 1 per 100 ms
+                "mutation_user": [Rate(1, 100), Rate(10, Duration.SECOND)],
+                # mutation_service: 3/s sustained, no more than 1 per 333 ms
+                "mutation_service": [Rate(1, 333), Rate(3, Duration.SECOND)],
             }
-            self._limiters = {k: Limiter(v) for k, v in rate_configs.items()}
+            self._limiters = {k: Limiter(rates) for k, rates in rate_configs.items()}
         return self._limiters
 
     def get_limiter(self, key: str) -> Limiter:

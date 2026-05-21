@@ -35,6 +35,30 @@ class TestConfigLoading:
         assert result is not None
 
 
+class TestConfigSet:
+    def test_set_then_get_round_trip(self, mock_config):
+        Config.set("api", "timeout", value=99)
+        assert Config.get("api", "timeout") == 99
+
+    def test_set_creates_missing_intermediates(self, mock_config):
+        Config.set("new_section", "nested", "leaf", value="hello")
+        assert Config.get("new_section", "nested", "leaf") == "hello"
+
+    def test_set_overwrites_non_dict_intermediate(self, mock_config):
+        Config.set("api", "timeout", value=10)  # leaf is currently an int
+        Config.set("api", "timeout", "nested", value="ok")
+        assert Config.get("api", "timeout", "nested") == "ok"
+
+    def test_set_with_no_keys_raises(self, mock_config):
+        with pytest.raises(ValueError):
+            Config.set(value="x")
+
+    def test_set_saved_data_directory_reflected(self, mock_config, tmp_path):
+        new_dir = tmp_path / "alt-saved"
+        Config.set("saved_data", "directory", value=str(new_dir))
+        assert Config.saved_data_directory() == new_dir
+
+
 class TestConfigAccessors:
     def test_default_domain(self, mock_config):
         result = Config.get("domain", "default", default="gov")

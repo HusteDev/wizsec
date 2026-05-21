@@ -410,6 +410,117 @@ def ensure_pagination_variables(query: str) -> str:
     return query
 
 
+def has_totalcount_field(query_fields: Dict[str, Any]) -> bool:
+    """Return True if the root connection field in parsed query metadata includes totalCount.
+
+    Expects the 'fields' dict from parse_query_metadata() — a single top-level key
+    whose value is a dict of the connection's child fields.
+    """
+    if not query_fields:
+        return False
+    root_children = next(iter(query_fields.values()), None)
+    if not isinstance(root_children, dict):
+        return False
+    return "totalCount" in root_children
+
+
+def build_totalcount_probe_query(query: str) -> Optional[str]:
+    """AST-transform a query to select only { totalCount } on the root connection field.
+
+    Preserves all variable definitions and field arguments (filterBy, first, etc.) so
+    the probe uses identical filter variables to the original query.
+
+    Returns None if the query cannot be transformed (mutation, no connection field,
+    connection field has no totalCount child, etc.).
+    """
+    try:
+        document = parse(query)
+    except Exception:
+        return None
+
+    for definition in document.definitions:
+        if definition.kind != "operation_definition":
+            continue
+        assert isinstance(definition, OperationDefinitionNode)
+        if str(definition.operation).split(".")[-1].lower() != "query":
+            return None  # mutations and subscriptions are never split
+
+        # Find the root connection field — must have a totalCount child
+        connection_field: Optional[FieldNode] = None
+        for selection in definition.selection_set.selections:
+            if not isinstance(selection, FieldNode) or not selection.selection_set:
+                continue
+            child_names = {
+                s.name.value
+                for s in selection.selection_set.selections
+                if isinstance(s, FieldNode)
+            }
+            if "totalCount" in child_names:
+                connection_field = selection
+                break
+
+        if connection_field is None:
+            return None
+
+        # Build a minimal selection set: just totalCount
+        totalcount_field = FieldNode(name=NameNode(value="totalCount"))
+        from graphql.language.ast import SelectionSetNode
+
+        minimal_selection = SelectionSetNode(selections=(totalcount_field,))
+
+        # Deep-copy and replace the connection field's selection set
+        new_doc = copy.deepcopy(document)
+        new_defn = new_doc.definitions[document.definitions.index(definition)]
+        assert isinstance(new_defn, OperationDefinitionNode)
+        for sel in new_defn.selection_set.selections:
+            if (
+                isinstance(sel, FieldNode)
+                and sel.name.value == connection_field.name.value
+            ):
+                sel.selection_set = minimal_selection
+                # Drop $first/$after variable definitions — they're irrelevant for a count query
+                new_defn.variable_definitions = tuple(
+                    v
+                    for v in (new_defn.variable_definitions or [])
+                    if v.variable.name.value not in ("first", "after")
+                )
+                # Drop first/after arguments from the connection field too
+                sel.arguments = tuple(
+                    a
+                    for a in (sel.arguments or [])
+                    if a.name.value not in ("first", "after")
+                )
+                break
+
+        return print_ast(new_doc)
+
+    return None
+
+
+def inject_subscription_filter(
+    vars: Dict[str, Any], filter_path: str, ids: List[str]
+) -> Dict[str, Any]:
+    """Return a deep copy of vars with filter_path set to ids.
+
+    filter_path uses dot-notation, e.g. 'filterBy.subscriptionId'.
+    Intermediate dicts are created as needed; existing sibling keys are preserved.
+
+    Example:
+        inject_subscription_filter({'filterBy': {'severity': 'HIGH'}},
+                                   'filterBy.subscriptionId', ['abc'])
+        -> {'filterBy': {'severity': 'HIGH', 'subscriptionId': ['abc']}}
+    """
+    result = copy.deepcopy(vars)
+    keys = filter_path.split(".")
+    d: Any = result
+    for key in keys[:-1]:
+        if not isinstance(d.get(key), dict):
+            d[key] = {}
+        d = d[key]
+    d[keys[-1]] = ids
+    return result
+
+
 @disable_in_serverless
 def load_credentials_from_file(
     profile: str, credentials_file: str
