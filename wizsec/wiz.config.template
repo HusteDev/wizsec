@@ -55,6 +55,21 @@ app:
 #   auto_cleanup: false               # Removes any reports sent to /temp. Deletes old Reports from Wiz
 #   save_incomplete_reports: true     # Save partial reports if at least 1 page is successfully retrieved before error
 
+# query_splitting:
+#   enabled: false                    # Enable pre-emptive totalCount probe + auto splitting | default = false
+#                                     # NOTE: always disabled in serverless mode regardless of this setting
+#   threshold: 10000                  # Record count above which splitting is triggered | default = 10000
+#   max_concurrent: 10               # Max concurrent async sub-queries when splitting | default = 10
+#   detection_mode: static           # "static" = probe only when query already selects totalCount
+#                                     # "schema" = use introspection schema to detect eligible queries | default = static
+#   split_by: cloudAccounts          # Dimension to split by: "cloudAccounts" (Azure/AWS/GCP accounts)
+#                                     # or "projects" (Wiz organizational projects) | default = cloudAccounts
+#   filter_path: ""                  # Dot-notation path in vars where entity IDs are injected
+#                                     # Required for splitting to function. Examples:
+#                                     #   "filterBy.subscriptionId"   (for cloudAccounts)
+#                                     #   "filterBy.projectId"        (for projects)
+#   cache_subscriptions: true        # Cache entity list per session to avoid re-fetching | default = true
+
 # logging:
 #   enabled: false                    # Enables logging for library | default = false
 #   verbose: false                    # Enable VERBOSE messages | default = false

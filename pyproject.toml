@@ -20,7 +20,7 @@ authors = [
 
 dependencies = [
     "httpx",
-    "pyrate-limiter",
+    "pyrate-limiter>=3.6,<4.0",
     "python-dotenv",
     "PyYAML",
     "graphql-core"
@@ -71,3 +71,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+asyncio_mode = "strict"
+
+[tool.anyio]
+backends = ["asyncio"]
