@@ -20,7 +20,7 @@ authors = [
 
 dependencies = [
     "httpx",
-    "pyrate-limiter",
+    "pyrate-limiter>=3.0",
     "python-dotenv",
     "PyYAML",
     "graphql-core"
