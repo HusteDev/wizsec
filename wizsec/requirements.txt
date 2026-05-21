@@ -1,5 +1,5 @@
 httpx>=0.27
 pyrate-limiter>=3.9.0
 python-dotenv>=1.0
-PyYAML>=6.0
+PyYAML>=6.0.3
 graphql-core>=3.2
