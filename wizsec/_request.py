@@ -19,6 +19,7 @@ import re
 import json
 import threading
 from typing import Optional, Dict, Any, List, Tuple, Union, Callable, Iterator
+from pyrate_limiter import BucketFullException
 from graphql import parse, GraphQLError
 import asyncio
 from .utils import (
@@ -1265,6 +1266,15 @@ class AsyncWizRequest(_RequestBase):
         semaphore = getattr(self._client, "_async_semaphore", asyncio.Semaphore(10))
         limiter = self._client._get_limiter(self._limiter_key)
 
+        # Lazily attach a shared rate-ok event to the client so every
+        # coroutine in the same batch coordinates through one object.
+        # asyncio.Event must be created inside the running loop, so we
+        # can't do this at client construction time.
+        if not hasattr(self._client, "_rate_ok"):
+            self._client._rate_ok = asyncio.Event()  # type: ignore[attr-defined]
+            self._client._rate_ok.set()              # type: ignore[attr-defined]
+        rate_ok: asyncio.Event = self._client._rate_ok  # type: ignore[attr-defined]
+
         while True:
             url = self._client._api_endpoint()
             headers = self._client._get_headers()
@@ -1274,7 +1284,17 @@ class AsyncWizRequest(_RequestBase):
 
             while retries <= self._client._max_retries:
                 try:
-                    await limiter.try_acquire_async(self._limiter_key)
+                    # Wait for any server-side 429 backoff to clear, then
+                    # acquire a local rate-limit slot — neither counts as a
+                    # retry so failures here never burn retry attempts.
+                    while True:
+                        await rate_ok.wait()          # blocks while event is clear
+                        try:
+                            await asyncio.to_thread(limiter.try_acquire, self._limiter_key)
+                            break
+                        except BucketFullException:
+                            await asyncio.sleep(0.1)
+
                     async with semaphore:
                         response = await client.post(
                             url=url, json=payload, headers=headers
@@ -1285,6 +1305,23 @@ class AsyncWizRequest(_RequestBase):
                             page_data = response_data.get("data", {})
                             self._merge_page(page_data)
                             break
+                        elif response.status_code == 429:
+                            # Pause every coroutine sharing this client by
+                            # clearing the event.  Only the first 429 winner
+                            # clears it; subsequent ones see it already clear
+                            # and just sleep for their own retry_after window.
+                            retry_after = int(
+                                response.headers.get("Retry-After", "10")
+                            )
+                            rate_ok.clear()
+                            self._logger.warning(
+                                f"Rate limited by server (429) — "
+                                f"backing off {retry_after}s"
+                            )
+                            retries += 1
+                            await asyncio.sleep(retry_after)
+                            rate_ok.set()   # unblocks all waiting coroutines
+                            continue
                         else:
                             error_msg = (
                                 f"Query failed with status {response.status_code}"
