@@ -19,7 +19,11 @@ import re
 import json
 import threading
 from typing import Optional, Dict, Any, List, Tuple, Union, Callable, Iterator
-from pyrate_limiter import BucketFullException
+
+try:
+    from pyrate_limiter import BucketFullException
+except ImportError:  # older 3.x releases don't re-export via __init__
+    from pyrate_limiter.exceptions import BucketFullException  # type: ignore[no-redef]
 from graphql import parse, GraphQLError
 import asyncio
 from .utils import (
