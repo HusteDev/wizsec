@@ -49,13 +49,13 @@ class EnvironmentState:
             # is what triggers server-side 429s.
             rate_configs: Dict[str, List[Rate]] = {
                 # query_user: 100/s sustained, no more than 1 per 10 ms
-                "query_user":      [Rate(1, 10),  Rate(100, Duration.SECOND)],
+                "query_user": [Rate(1, 10), Rate(100, Duration.SECOND)],
                 # query_service: 10/s sustained, no more than 1 per 100 ms
-                "query_service":   [Rate(1, 100), Rate(10,  Duration.SECOND)],
+                "query_service": [Rate(1, 100), Rate(10, Duration.SECOND)],
                 # mutation_user: 10/s sustained, no more than 1 per 100 ms
-                "mutation_user":   [Rate(1, 100), Rate(10,  Duration.SECOND)],
+                "mutation_user": [Rate(1, 100), Rate(10, Duration.SECOND)],
                 # mutation_service: 3/s sustained, no more than 1 per 333 ms
-                "mutation_service":[Rate(1, 333), Rate(3,   Duration.SECOND)],
+                "mutation_service": [Rate(1, 333), Rate(3, Duration.SECOND)],
             }
             self._limiters = {k: Limiter(rates) for k, rates in rate_configs.items()}
         return self._limiters
