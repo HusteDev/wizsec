@@ -37,7 +37,6 @@ from wizsec._request import (
     _schema_supports_totalcount,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers / fixtures
 # ---------------------------------------------------------------------------
@@ -204,7 +203,9 @@ class TestMergeSplitResults:
     def test_skips_failed_responses(self, mock_config):
         logger = MagicMock()
         r_fail = self._make_resp(success=False, data=None, errors=[{"message": "err"}])
-        r_ok = self._make_resp(data={"issues": {"nodes": [{"id": "1"}], "totalCount": 1}})
+        r_ok = self._make_resp(
+            data={"issues": {"nodes": [{"id": "1"}], "totalCount": 1}}
+        )
         result = _merge_split_results([r_fail, r_ok], "issues", logger)
         assert len(result["issues"]["nodes"]) == 1
         logger.warning.assert_called()
@@ -355,7 +356,9 @@ class TestWizRequestErrorHandlers:
         from wizsec._transport import TransportError
 
         req = _make_req(mock_client)
-        req._handle_network_error(TransportError("connection reset"), attempt=0, max_retries=2)
+        req._handle_network_error(
+            TransportError("connection reset"), attempt=0, max_retries=2
+        )
         assert any("connection reset" in e["message"] for e in req.errors)
 
     def test_unexpected_error_appends_to_errors(self, mock_client):
@@ -451,10 +454,7 @@ class TestWizBatchRequestConcurrent:
 
         # Timed-out request still ends up in results with an error
         assert result.total_count() == 1
-        assert any(
-            "timed out" in e["message"]
-            for e in mock_inner_req.errors
-        )
+        assert any("timed out" in e["message"] for e in mock_inner_req.errors)
 
     def test_submit_sequential_with_exception(self, mock_client):
         """Sequential submit handles exceptions in individual requests."""
@@ -473,7 +473,9 @@ class TestWizBatchRequestConcurrent:
             result = batch.submit()
 
         assert isinstance(result, WizBatchResponse)
-        assert any("Batch execution failed" in e["message"] for e in mock_inner_req.errors)
+        assert any(
+            "Batch execution failed" in e["message"] for e in mock_inner_req.errors
+        )
 
     def test_progress_callback_fires_on_concurrent(self, mock_client):
         """Progress callback is triggered in concurrent submit."""
@@ -1078,7 +1080,9 @@ class TestAsyncWizBatchRequest:
             self_req.errors = []
             return self_req
 
-        with patch.object(AsyncWizRequest, "submit", autospec=True, side_effect=fake_submit):
+        with patch.object(
+            AsyncWizRequest, "submit", autospec=True, side_effect=fake_submit
+        ):
             result = await batch.submit()
 
         assert isinstance(result, WizBatchResponse)
@@ -1101,7 +1105,9 @@ class TestAsyncWizBatchRequest:
             self_req.errors = []
             return self_req
 
-        with patch.object(AsyncWizRequest, "submit", autospec=True, side_effect=fake_submit):
+        with patch.object(
+            AsyncWizRequest, "submit", autospec=True, side_effect=fake_submit
+        ):
             await batch.submit()
 
         assert len(progress_calls) == 2
@@ -1117,7 +1123,9 @@ class TestAsyncWizBatchRequest:
         async def raise_submit(self_req):
             raise RuntimeError("request failed hard")
 
-        with patch.object(AsyncWizRequest, "submit", autospec=True, side_effect=raise_submit):
+        with patch.object(
+            AsyncWizRequest, "submit", autospec=True, side_effect=raise_submit
+        ):
             result = await batch.submit()
 
         # Exception is caught by gather(return_exceptions=True) and logged
@@ -1153,7 +1161,9 @@ class TestAsyncWizBatchRequest:
             self_req.errors = []
             return self_req
 
-        with patch.object(AsyncWizRequest, "submit", autospec=True, side_effect=fake_submit):
+        with patch.object(
+            AsyncWizRequest, "submit", autospec=True, side_effect=fake_submit
+        ):
             result = await batch.submit(max_concurrent=1)
 
         assert isinstance(result, WizBatchResponse)
@@ -1206,8 +1216,12 @@ class TestMaybeSplitAsync:
         req = _make_async_req(mock_client)
         with patch.object(Config, "serverless", return_value=False):
             with patch.object(Config, "query_splitting_enabled", return_value=True):
-                with patch.object(Config, "query_splitting_detection_mode", return_value="static"):
-                    with patch("wizsec._request.has_totalcount_field", return_value=False):
+                with patch.object(
+                    Config, "query_splitting_detection_mode", return_value="static"
+                ):
+                    with patch(
+                        "wizsec._request.has_totalcount_field", return_value=False
+                    ):
                         result = await req._maybe_split_async()
         assert result is False
 
@@ -1216,9 +1230,16 @@ class TestMaybeSplitAsync:
         req = _make_async_req(mock_client)
         with patch.object(Config, "serverless", return_value=False):
             with patch.object(Config, "query_splitting_enabled", return_value=True):
-                with patch.object(Config, "query_splitting_detection_mode", return_value="static"):
-                    with patch("wizsec._request.has_totalcount_field", return_value=True):
-                        with patch("wizsec._request.build_totalcount_probe_query", return_value=None):
+                with patch.object(
+                    Config, "query_splitting_detection_mode", return_value="static"
+                ):
+                    with patch(
+                        "wizsec._request.has_totalcount_field", return_value=True
+                    ):
+                        with patch(
+                            "wizsec._request.build_totalcount_probe_query",
+                            return_value=None,
+                        ):
                             result = await req._maybe_split_async()
         assert result is False
 
@@ -1233,10 +1254,22 @@ class TestMaybeSplitAsync:
 
         with patch.object(Config, "serverless", return_value=False):
             with patch.object(Config, "query_splitting_enabled", return_value=True):
-                with patch.object(Config, "query_splitting_detection_mode", return_value="static"):
-                    with patch("wizsec._request.has_totalcount_field", return_value=True):
-                        with patch("wizsec._request.build_totalcount_probe_query", return_value="query Probe { issues { totalCount } }"):
-                            with patch.object(AsyncWizRequest, "submit", autospec=True, side_effect=fake_probe_submit):
+                with patch.object(
+                    Config, "query_splitting_detection_mode", return_value="static"
+                ):
+                    with patch(
+                        "wizsec._request.has_totalcount_field", return_value=True
+                    ):
+                        with patch(
+                            "wizsec._request.build_totalcount_probe_query",
+                            return_value="query Probe { issues { totalCount } }",
+                        ):
+                            with patch.object(
+                                AsyncWizRequest,
+                                "submit",
+                                autospec=True,
+                                side_effect=fake_probe_submit,
+                            ):
                                 result = await req._maybe_split_async()
         assert result is False
 
@@ -1251,12 +1284,30 @@ class TestMaybeSplitAsync:
 
         with patch.object(Config, "serverless", return_value=False):
             with patch.object(Config, "query_splitting_enabled", return_value=True):
-                with patch.object(Config, "query_splitting_detection_mode", return_value="static"):
-                    with patch("wizsec._request.has_totalcount_field", return_value=True):
-                        with patch("wizsec._request.build_totalcount_probe_query", return_value="query Probe { issues { totalCount } }"):
-                            with patch("wizsec._request._extract_totalcount", return_value=5):
-                                with patch.object(Config, "query_splitting_threshold", return_value=1000):
-                                    with patch.object(AsyncWizRequest, "submit", autospec=True, side_effect=fake_probe_submit):
+                with patch.object(
+                    Config, "query_splitting_detection_mode", return_value="static"
+                ):
+                    with patch(
+                        "wizsec._request.has_totalcount_field", return_value=True
+                    ):
+                        with patch(
+                            "wizsec._request.build_totalcount_probe_query",
+                            return_value="query Probe { issues { totalCount } }",
+                        ):
+                            with patch(
+                                "wizsec._request._extract_totalcount", return_value=5
+                            ):
+                                with patch.object(
+                                    Config,
+                                    "query_splitting_threshold",
+                                    return_value=1000,
+                                ):
+                                    with patch.object(
+                                        AsyncWizRequest,
+                                        "submit",
+                                        autospec=True,
+                                        side_effect=fake_probe_submit,
+                                    ):
                                         result = await req._maybe_split_async()
         assert result is False
 
@@ -1271,13 +1322,35 @@ class TestMaybeSplitAsync:
 
         with patch.object(Config, "serverless", return_value=False):
             with patch.object(Config, "query_splitting_enabled", return_value=True):
-                with patch.object(Config, "query_splitting_detection_mode", return_value="static"):
-                    with patch("wizsec._request.has_totalcount_field", return_value=True):
-                        with patch("wizsec._request.build_totalcount_probe_query", return_value="query Probe { issues { totalCount } }"):
-                            with patch("wizsec._request._extract_totalcount", return_value=9999):
-                                with patch.object(Config, "query_splitting_threshold", return_value=100):
-                                    with patch.object(Config, "query_splitting_filter_path", return_value=""):
-                                        with patch.object(AsyncWizRequest, "submit", autospec=True, side_effect=fake_probe_submit):
+                with patch.object(
+                    Config, "query_splitting_detection_mode", return_value="static"
+                ):
+                    with patch(
+                        "wizsec._request.has_totalcount_field", return_value=True
+                    ):
+                        with patch(
+                            "wizsec._request.build_totalcount_probe_query",
+                            return_value="query Probe { issues { totalCount } }",
+                        ):
+                            with patch(
+                                "wizsec._request._extract_totalcount", return_value=9999
+                            ):
+                                with patch.object(
+                                    Config,
+                                    "query_splitting_threshold",
+                                    return_value=100,
+                                ):
+                                    with patch.object(
+                                        Config,
+                                        "query_splitting_filter_path",
+                                        return_value="",
+                                    ):
+                                        with patch.object(
+                                            AsyncWizRequest,
+                                            "submit",
+                                            autospec=True,
+                                            side_effect=fake_probe_submit,
+                                        ):
                                             result = await req._maybe_split_async()
         assert result is False
 
@@ -1292,14 +1365,39 @@ class TestMaybeSplitAsync:
 
         with patch.object(Config, "serverless", return_value=False):
             with patch.object(Config, "query_splitting_enabled", return_value=True):
-                with patch.object(Config, "query_splitting_detection_mode", return_value="static"):
-                    with patch("wizsec._request.has_totalcount_field", return_value=True):
-                        with patch("wizsec._request.build_totalcount_probe_query", return_value="query Probe { issues { totalCount } }"):
-                            with patch("wizsec._request._extract_totalcount", return_value=9999):
-                                with patch.object(Config, "query_splitting_threshold", return_value=100):
-                                    with patch.object(Config, "query_splitting_filter_path", return_value="subscriptionFilters.cloudAccount"):
-                                        with patch("wizsec._request._get_cached_or_fetch_entities", return_value=[]):
-                                            with patch.object(AsyncWizRequest, "submit", autospec=True, side_effect=fake_probe_submit):
+                with patch.object(
+                    Config, "query_splitting_detection_mode", return_value="static"
+                ):
+                    with patch(
+                        "wizsec._request.has_totalcount_field", return_value=True
+                    ):
+                        with patch(
+                            "wizsec._request.build_totalcount_probe_query",
+                            return_value="query Probe { issues { totalCount } }",
+                        ):
+                            with patch(
+                                "wizsec._request._extract_totalcount", return_value=9999
+                            ):
+                                with patch.object(
+                                    Config,
+                                    "query_splitting_threshold",
+                                    return_value=100,
+                                ):
+                                    with patch.object(
+                                        Config,
+                                        "query_splitting_filter_path",
+                                        return_value="subscriptionFilters.cloudAccount",
+                                    ):
+                                        with patch(
+                                            "wizsec._request._get_cached_or_fetch_entities",
+                                            return_value=[],
+                                        ):
+                                            with patch.object(
+                                                AsyncWizRequest,
+                                                "submit",
+                                                autospec=True,
+                                                side_effect=fake_probe_submit,
+                                            ):
                                                 result = await req._maybe_split_async()
         assert result is False
 
@@ -1307,6 +1405,7 @@ class TestMaybeSplitAsync:
 # ---------------------------------------------------------------------------
 # Helper for to_thread simulation in tests
 # ---------------------------------------------------------------------------
+
 
 async def _sync_to_coro(fn, *args, **kwargs):
     """Run a sync function as if in a thread (synchronously in tests)."""
