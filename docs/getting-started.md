@@ -109,3 +109,5 @@ Set the environment in your credentials file, config, or constructor:
 ```python
 client = WizClient(environment="gov")
 ```
+
+The requested environment must be enabled in `~/.wiz/wiz.config` under `domain.<environment>.enabled`. Auth state is scoped by `(environment, profile)`, so the same profile name can be used against different enabled environments without token reuse.
