@@ -44,6 +44,12 @@ class TestEnvironmentState:
         with pytest.raises(ValueError, match="No limiter for key"):
             state.get_limiter("nonexistent")
 
+    def test_rate_backoff_tracks_remaining_deadline(self):
+        state = EnvironmentState("gov")
+        assert state.rate_backoff_remaining() == 0
+        state.set_rate_backoff(1)
+        assert state.rate_backoff_remaining() > 0
+
 
 class TestEnvironmentRegistry:
     def test_get_or_create_returns_same_instance(self):
@@ -116,17 +122,22 @@ class TestProfileState:
 
 class TestProfileRegistry:
     def test_get_or_create_returns_same_instance(self):
-        p1 = ProfileRegistry.get_or_create("default")
-        p2 = ProfileRegistry.get_or_create("default")
+        p1 = ProfileRegistry.get_or_create("gov", "default")
+        p2 = ProfileRegistry.get_or_create("gov", "default")
         assert p1 is p2
 
     def test_different_profiles(self):
-        a = ProfileRegistry.get_or_create("alpha")
-        b = ProfileRegistry.get_or_create("beta")
+        a = ProfileRegistry.get_or_create("gov", "alpha")
+        b = ProfileRegistry.get_or_create("gov", "beta")
+        assert a is not b
+
+    def test_same_profile_different_environment(self):
+        a = ProfileRegistry.get_or_create("gov", "default")
+        b = ProfileRegistry.get_or_create("app", "default")
         assert a is not b
 
     def test_cleanup(self):
-        ProfileRegistry.get_or_create("tmp")
-        ProfileRegistry.cleanup("tmp")
-        new_p = ProfileRegistry.get_or_create("tmp")
+        ProfileRegistry.get_or_create("gov", "tmp")
+        ProfileRegistry.cleanup("gov", "tmp")
+        new_p = ProfileRegistry.get_or_create("gov", "tmp")
         assert new_p.access_token is None

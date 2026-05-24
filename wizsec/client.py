@@ -86,7 +86,7 @@ class WizClient:
         self._logger = Config.get_logger()
         self.profile = profile or "default"
         self.environment = environment or Config.default_domain()
-        self._domain = Config.domain_root(self.environment)
+        self._domain = Config.validate_domain(self.environment)
         self._client_id = client_id
         self._client_secret = client_secret
         self._grant_type = grant_type or Config.grant_type()
@@ -100,7 +100,9 @@ class WizClient:
 
         # Obtain shared per-environment and per-profile state
         self._env_state = EnvironmentRegistry.get_or_create(self.environment)
-        self._profile_state = ProfileRegistry.get_or_create(self.profile)
+        self._profile_state = ProfileRegistry.get_or_create(
+            self.environment, self.profile
+        )
 
         self._logger.debug(
             f"Client Request: environment={self.environment}, profile={self.profile}, grant_type={self._grant_type}"
@@ -231,6 +233,7 @@ class WizClient:
         queryCollection: Optional[str] = None,
         query: Optional[str] = None,
         vars: Optional[Dict[str, Any]] = None,
+        paginate: Optional[bool] = None,
         **kwargs,
     ) -> "WizResponse":
         self._logger.debug(
@@ -243,6 +246,7 @@ class WizClient:
             queryCollection=queryCollection,
             query=query,
             vars=vars,
+            paginate=Config.api_auto_paginate() if paginate is None else paginate,
             **kwargs,
         )
         return WizResponse(request)
@@ -272,6 +276,7 @@ class WizClient:
         queryCollection: Optional[str] = None,
         query: Optional[str] = None,
         vars: Optional[Dict[str, Any]] = None,
+        paginate: Optional[bool] = None,
         **kwargs,
     ) -> "AsyncWizResponse":
         """
@@ -292,6 +297,7 @@ class WizClient:
             queryCollection=queryCollection,
             query=query,
             vars=vars,
+            paginate=Config.api_auto_paginate() if paginate is None else paginate,
             **kwargs,
         )
         return AsyncWizResponse(request)
@@ -728,5 +734,5 @@ class WizClient:
     def cleanup_for_lambda(self) -> None:
         """Clean up resources after Lambda execution -- scoped to this client only."""
         if self.serverless:
-            ProfileRegistry.cleanup(self.profile)
+            ProfileRegistry.cleanup(self.environment, self.profile)
             EnvironmentRegistry.cleanup(self.environment)
