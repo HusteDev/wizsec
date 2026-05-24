@@ -19,7 +19,7 @@ A Python SDK for the [Wiz](https://www.wiz.io/) Cloud Security GraphQL API. Prov
 - **Report generation** — create, poll, stream, and download Wiz reports (JSON and CSV)
 - **Multiple auth flows** — client credentials and device code (OAuth)
 - **Flexible credential storage** — environment variables, credential files, or interactive prompt
-- **Multi-environment / multi-profile** — connect to `app`, `gov`, or custom Wiz tenants with separate credential profiles
+- **Multi-environment / multi-profile** — connect to enabled `app`, `gov`, or `fedramp` environments with isolated credential profiles
 - **Serverless support** — optimized for AWS Lambda and similar environments
 - **YAML configuration** via `~/.wiz/wiz.config`
 - **Client-side schema validation** — catch query typos before they hit the API
@@ -155,7 +155,7 @@ You don't need to declare `$after` in your query — the SDK adds it when:
 - The query selects both `nodes` and `pageInfo` subfields
 - `$after` isn't already declared
 
-If you set `paginate=False`, no injection occurs and only the first page is returned.
+Pagination defaults to `api.auto_paginate` in `~/.wiz/wiz.config`. If you set `paginate=False`, no injection occurs and only the first page is returned.
 
 ### Query Collections
 
@@ -262,6 +262,8 @@ async with client.async_session() as async_client:
     results = await batch.submit(max_concurrent=50)
     print(results.success_rate())
 ```
+
+Async batch responses preserve one result per submitted request. Failed tasks remain indexed in the batch response with their errors attached.
 
 ### Sync vs Async: When to Use Each
 
@@ -383,7 +385,7 @@ Validate GraphQL queries against the Wiz schema before they hit the API. Catches
 from wizsec import WizClient, Config, SchemaValidator, WizSchemaValidationError
 
 Config.load()
-Config._CONFIG.setdefault("api", {})["validate_queries"] = True  # or set in wiz.config
+Config.set("api", "validate_queries", value=True)  # or set in wiz.config
 
 client = WizClient()
 
@@ -405,17 +407,17 @@ except WizSchemaValidationError as e:
     # "Cannot query field 'fakeEndpoint' on type 'Query'. Did you mean 'apiEndpoint'?"
 ```
 
-The schema is cached locally at `~/.wiz/schema_<env>.json` and reloaded automatically.
+The schema is cached under the configured `app.wiz_dir` as `schema_<env>.json` and reloaded automatically.
 
 See [`examples/schema_validation.py`](examples/schema_validation.py) for more examples.
 
 ## Rate Limiting
 
-The SDK automatically enforces Wiz's API rate limits so you don't have to think about throttling. Rate limiters are shared across all `WizClient` instances on the same environment — even if you create multiple clients, they coordinate through a single limiter.
+The SDK automatically enforces Wiz's API rate limits so you don't have to think about throttling. Rate limiters are shared across all `WizClient` instances on the same environment, even across different profiles.
 
 Limits are applied per request type (query vs. mutation) and account type (user vs. service account), matching [Wiz's published rate limits](https://docs.wiz.io/wiz-docs/docs/rate-limiting).
 
-If a rate limit is hit, the SDK waits and retries automatically. You only need to handle `WizRateLimitError` if retries are exhausted.
+Local limiter waits and server `429` backoffs are handled automatically. Async clients on the same environment share the same server backoff window.
 
 ## Configuration
 
@@ -424,23 +426,46 @@ The SDK reads `~/.wiz/wiz.config` (YAML). Example:
 ```yaml
 app:
   name: wizsec
-  release: "1.0.0"
+  release: "1.1.0"
+  config_schema: 2
 
 auth:
   grant_type: client_credentials
-  credential_file: ~/.wiz/wiz.credentials
-  storage_method: file
+  credentials:
+    storage_method: file
+    file_path: ~/.wiz/
+  proxy:
+    http:
+      url: ""
+      port: 80
+    https:
+      url: ""
+      port: 80
+
+domain:
+  default: gov
+  app:
+    enabled: false
+  gov:
+    enabled: true
+  fedramp:
+    enabled: false
 
 api:
   timeout: 60
   max_retries: 3
   retry_time: 2
+  auto_paginate: true
+  validate_queries: false
 
 logging:
-  level: INFO
+  enabled: false
+  console_handler:
+    enabled: true
+    logging_level: INFO
 ```
 
-Config can also be set via `Config.load(overrides=["api.timeout=120"])`.
+Blank proxy URLs use environment proxy variables. Config can also be set via `Config.load(overrides=["api.timeout=120"])`.
 
 ## Multi-Environment & Multi-Profile
 
@@ -455,6 +480,7 @@ readonly = WizClient(environment="app", profile="readonly")
 ```
 
 Clients sharing the same environment automatically share a single request queue and rate limiter.
+Requested environments must be enabled under `domain.<environment>.enabled`. Auth state is isolated by `(environment, profile)`, so the same profile name can be used safely against different environments.
 
 ## Serverless / Lambda
 

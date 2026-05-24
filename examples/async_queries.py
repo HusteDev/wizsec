@@ -68,7 +68,7 @@ async def async_batch():
                 count = len(response.data.get("issues", {}).get("nodes", []))
                 print(f"  {label}: {count} issues")
             else:
-                print(f"  {label}: FAILED")
+                print(f"  {label}: FAILED ({request_id}) {response.errors}")
 
 
 if __name__ == "__main__":
