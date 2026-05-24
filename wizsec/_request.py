@@ -20,10 +20,6 @@ import json
 import threading
 from typing import Optional, Dict, Any, List, Tuple, Union, Callable, Iterator
 
-try:
-    from pyrate_limiter import BucketFullException
-except ImportError:  # older 3.x releases don't re-export via __init__
-    from pyrate_limiter.exceptions import BucketFullException  # type: ignore[no-redef]
 from graphql import parse, GraphQLError
 import asyncio
 from .utils import (
@@ -60,6 +56,11 @@ query WizsecInternalProjects($first: Int, $after: String) {
   }
 }
 """
+
+
+def _is_bucket_full_exception(exc: Exception) -> bool:
+    """Return True for pyrate-limiter bucket-full errors across package layouts."""
+    return exc.__class__.__name__ == "BucketFullException"
 
 
 def _extract_totalcount(data: Optional[Dict[str, Any]], source: str) -> int:
@@ -535,7 +536,9 @@ class WizRequest(_RequestBase):
                     try:
                         limiter.try_acquire(self._limiter_key)
                         break
-                    except BucketFullException:
+                    except Exception as e:
+                        if not _is_bucket_full_exception(e):
+                            raise
                         time.sleep(0.1)
                 response = self._client._post(url=url, headers=headers, json=payload)
                 self._status_code = response.status_code
@@ -1302,7 +1305,9 @@ class AsyncWizRequest(_RequestBase):
                                 limiter.try_acquire, self._limiter_key
                             )
                             break
-                        except BucketFullException:
+                        except Exception as e:
+                            if not _is_bucket_full_exception(e):
+                                raise
                             await asyncio.sleep(0.1)
 
                     async with semaphore:

@@ -299,7 +299,9 @@ class TestHandleFailedResponseRetryLogic:
 class TestExecutePageBucketFull:
     def test_bucket_full_exception_waits_without_recording_error(self, mock_client):
         """BucketFullException from the local limiter waits without poisoning success."""
-        from pyrate_limiter import BucketFullException, Duration, Rate, RateItem
+
+        class BucketFullException(Exception):
+            pass
 
         mock_client._check_token.return_value = None
         mock_client._api_endpoint.return_value = "https://api.wiz.io/graphql"
@@ -310,7 +312,7 @@ class TestExecutePageBucketFull:
         def try_acquire_side_effect(key):
             call_count[0] += 1
             if call_count[0] < 3:
-                raise BucketFullException(RateItem("key", 1), Rate(1, Duration.SECOND))
+                raise BucketFullException("bucket full")
 
         mock_limiter = MagicMock()
         mock_limiter.try_acquire.side_effect = try_acquire_side_effect
@@ -759,19 +761,19 @@ class TestAsyncExecutePage:
     @pytest.mark.asyncio
     async def test_bucket_full_exception_spins(self, mock_client):
         """BucketFullException from async limiter causes a spin-wait (sleep 0.1)."""
-        from pyrate_limiter import BucketFullException, RateItem, Rate, Duration
+
+        class BucketFullException(Exception):
+            pass
 
         req = _make_async_req(mock_client, paginate=False)
 
         # Limiter raises BucketFullException twice then succeeds
         acquire_calls = [0]
-        _item = RateItem("key", 1)
-        _rate = Rate(10, Duration.SECOND)
 
         def try_acquire(key):
             acquire_calls[0] += 1
             if acquire_calls[0] < 3:
-                raise BucketFullException(_item, _rate)
+                raise BucketFullException("bucket full")
 
         mock_limiter = MagicMock()
         mock_limiter.try_acquire = try_acquire
