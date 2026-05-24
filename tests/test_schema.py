@@ -9,6 +9,7 @@ import pytest
 from graphql import build_client_schema, introspection_from_schema, build_schema
 
 from wizsec._schema import SchemaValidator, INTROSPECTION_QUERY
+from wizsec.config import Config
 from wizsec.exceptions import WizSchemaValidationError
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -134,6 +135,10 @@ class TestGetSchema:
         ):
             schema = SchemaValidator.get_schema("bad")
         assert schema is None
+
+    def test_schema_cache_path_uses_configured_wiz_dir(self, mock_config, tmp_path):
+        Config.set("app", "wiz_dir", value=str(tmp_path))
+        assert SchemaValidator._schema_cache_path("gov") == tmp_path / "schema_gov.json"
 
 
 class TestClear:

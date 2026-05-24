@@ -20,7 +20,7 @@ app:
 #   device:
 #     quiet: true                     # Device Code logins automatically authorize on load | default = true
 #     poll_time: 5                    # Interval (in seconds) for checking if device auth is complete | default = 5
-#   proxy:                            # Custom Proxy Settings if necessary | default = use system settings
+#   proxy:                            # Custom Proxy Settings if necessary; blank URLs use environment proxies
 #     http:
 #       url: ""
 #       port: 80

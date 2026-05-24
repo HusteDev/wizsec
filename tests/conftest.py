@@ -27,17 +27,23 @@ def _minimal_config(tmp_path: Path) -> dict:
         "app": {
             "name": "wizsec",
             "release": "1.0.0",
-            "config_schema": 1,
+            "config_schema": 2,
         },
         "auth": {
             "grant_type": "client_credentials",
             "credentials": {"storage_method": "env"},
         },
-        "domain": {"default": "gov"},
+        "domain": {
+            "default": "gov",
+            "app": {"enabled": True},
+            "gov": {"enabled": True},
+            "fedramp": {"enabled": False},
+        },
         "api": {
             "max_retries": 2,
             "retry_time": 0.01,
             "timeout": 5,
+            "auto_paginate": True,
         },
         "logging": {
             "enabled": False,
