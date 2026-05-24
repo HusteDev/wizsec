@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from wizsec.config import Config, generate_default_config, DEFAULT_WIZ_DIR
+from wizsec.exceptions import WizConfigurationError
 
 
 class TestConfigLoading:
@@ -25,6 +26,20 @@ class TestConfigLoading:
 
     def test_get_missing_key_returns_default(self, mock_config):
         assert mock_config.get("nonexistent", "key", default="fallback") == "fallback"
+
+    @pytest.mark.parametrize(
+        ("value", "default"),
+        [
+            (False, True),
+            (0, 99),
+            ("", "fallback"),
+            ({}, {"fallback": True}),
+            ([], ["fallback"]),
+        ],
+    )
+    def test_get_preserves_falsy_config_values(self, mock_config, value, default):
+        Config.set("falsy", "value", value=value)
+        assert Config.get("falsy", "value", default=default) == value
 
     def test_get_deeply_nested(self, mock_config):
         assert mock_config.get("auth", "credentials", "storage_method") == "env"
@@ -299,7 +314,7 @@ class TestConfigMigration:
         ):
             Config.load(config_path=str(config_file))
 
-        assert Config._CONFIG["app"]["config_schema"] == 1
+        assert Config._CONFIG["app"]["config_schema"] == 2
 
     def test_migration_updates_file_when_schema_missing(self, tmp_path):
         """_run_migrations should write config_schema into the config file."""
@@ -312,11 +327,11 @@ class TestConfigMigration:
         ):
             Config.load(config_path=str(config_file))
 
-        assert "config_schema: 1" in config_file.read_text()
+        assert "config_schema: 2" in config_file.read_text()
 
     def test_migration_skips_when_already_current(self, tmp_path):
         """Config at current schema version should not trigger migration."""
-        config_file = self._write_config(tmp_path, {"config_schema": 1})
+        config_file = self._write_config(tmp_path, {"config_schema": 2})
 
         with (
             patch("wizsec.config.DEFAULT_WIZ_DIR", tmp_path),
@@ -324,8 +339,8 @@ class TestConfigMigration:
         ):
             Config.load(config_path=str(config_file))
 
-        # Schema field is still 1 and file was not re-written needlessly
-        assert Config._CONFIG["app"]["config_schema"] == 1
+        # Schema field is still current and file was not re-written needlessly
+        assert Config._CONFIG["app"]["config_schema"] == 2
 
     def test_migration_runs_registered_function(self, tmp_path):
         """A registered migration function should be called and its changes reported."""
@@ -346,7 +361,8 @@ class TestConfigMigration:
                 Config.load(config_path=str(config_file))
 
             assert Config._CONFIG["api"]["new_field"] == "default_value"
-            assert Config._CONFIG["app"]["config_schema"] == 1
+            assert Config._CONFIG["app"]["config_schema"] == 2
+            assert Config._CONFIG["api"]["auto_paginate"] is True
         finally:
             _MIGRATIONS.pop((0, 1), None)
 
@@ -368,14 +384,14 @@ class TestConfigMigration:
                 Config.load(config_path=str(config_file))
 
             captured = capsys.readouterr()
-            assert "Info: Config migrated to schema v1" in captured.out
+            assert "Info: Config migrated to schema v2" in captured.out
             assert "Added: 'app.timeout'" in captured.out
         finally:
             _MIGRATIONS.pop((0, 1), None)
 
     def test_migration_no_output_when_no_changes(self, tmp_path, capsys):
-        """Migration with no registered functions should produce no stdout output."""
-        config_file = self._write_config(tmp_path)
+        """Current-schema config should produce no migration stdout."""
+        config_file = self._write_config(tmp_path, {"config_schema": 2})
 
         with (
             patch("wizsec.config.DEFAULT_WIZ_DIR", tmp_path),
@@ -385,6 +401,49 @@ class TestConfigMigration:
 
         captured = capsys.readouterr()
         assert "migrated" not in captured.out
+
+    def test_v2_migration_preserves_existing_values(self, tmp_path):
+        config_file = self._write_config(tmp_path)
+        config_data = yaml.safe_load(config_file.read_text())
+        config_data["api"]["auto_paginate"] = False
+        config_data["domain"]["app"] = {"enabled": True}
+        config_file.write_text(yaml.dump(config_data))
+
+        with (
+            patch("wizsec.config.DEFAULT_WIZ_DIR", tmp_path),
+            patch("wizsec.config.SERVERLESS", False),
+        ):
+            Config.load(config_path=str(config_file))
+
+        assert Config._CONFIG["api"]["auto_paginate"] is False
+        assert Config._CONFIG["domain"]["app"]["enabled"] is True
+
+    def test_v2_file_update_preserves_comments(self, tmp_path):
+        config_file = tmp_path / "wiz.config"
+        config_file.write_text(
+            "\n".join(
+                [
+                    "app:",
+                    "  name: wizsec",
+                    "  release: 1.0.0",
+                    "  # custom user comment",
+                    "api:",
+                    "  timeout: 5",
+                    "",
+                ]
+            )
+        )
+
+        with (
+            patch("wizsec.config.DEFAULT_WIZ_DIR", tmp_path),
+            patch("wizsec.config.SERVERLESS", False),
+        ):
+            Config.load(config_path=str(config_file))
+
+        content = config_file.read_text()
+        assert "# custom user comment" in content
+        assert "config_schema: 2" in content
+        assert "auto_paginate: true" in content
 
     def test_migration_file_write_failure_does_not_raise(self, tmp_path):
         """If the config file cannot be written, migration should not raise."""
@@ -397,7 +456,7 @@ class TestConfigMigration:
         cfg._run_migrations(config_without_schema, nonexistent)
 
         # In-memory dict is still updated
-        assert config_without_schema["app"]["config_schema"] == 1
+        assert config_without_schema["app"]["config_schema"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -531,8 +590,24 @@ class TestConfigAccessorsExtended:
         assert "http://proxy:8080" == result["http"]
         assert "https://proxy:8443" == result["https"]
 
+    def test_get_proxies_blank_config_falls_back_to_env(self, mock_config):
+        mock_config._CONFIG["auth"]["proxy"] = {
+            "http": {"url": "", "port": "8080"},
+            "https": {"url": "", "port": "8443"},
+        }
+        with patch.dict(
+            os.environ,
+            {
+                "HTTP_PROXY": "http://env-proxy:8080",
+                "HTTPS_PROXY": "https://env-proxy:8443",
+            },
+        ):
+            result = Config.get_proxies()
+        assert result["http"] == "http://env-proxy:8080"
+        assert result["https"] == "https://env-proxy:8443"
+
     def test_domain_enabled_false_by_default(self, mock_config):
-        assert Config.domain_enabled("app") is False
+        assert Config.domain_enabled("fedramp") is False
 
     def test_domain_enabled_when_set(self, mock_config):
         mock_config._CONFIG["domain"]["app"] = {"enabled": True}
@@ -543,10 +618,20 @@ class TestConfigAccessorsExtended:
         assert Config.domain_root("gov") == "gov.wiz.io"
         assert Config.domain_root("fedramp") == "app.wiz.us"
 
-    def test_domain_root_unknown_falls_back(self, mock_config):
-        # Unknown env should fall back to default_domain ("gov")
+    def test_domain_root_unknown_returns_none(self, mock_config):
         result = Config.domain_root("unknown")
-        assert result == "gov.wiz.io"
+        assert result is None
+
+    def test_validate_domain_rejects_unknown(self, mock_config):
+        with pytest.raises(WizConfigurationError):
+            Config.validate_domain("unknown")
+
+    def test_validate_domain_rejects_disabled(self, mock_config):
+        with pytest.raises(WizConfigurationError):
+            Config.validate_domain("fedramp")
+
+    def test_api_auto_paginate(self, mock_config):
+        assert Config.api_auto_paginate() is True
 
     def test_api_max_retries(self, mock_config):
         assert Config.api_max_retries() == 2

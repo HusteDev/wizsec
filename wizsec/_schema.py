@@ -24,7 +24,7 @@ from graphql import (
     IntrospectionQuery,
 )
 
-from .config import Config, DEFAULT_WIZ_DIR
+from .config import Config
 from .exceptions import WizSchemaValidationError
 
 logger = logging.getLogger("wizsec._schema")
@@ -174,7 +174,7 @@ class SchemaValidator:
     @classmethod
     def _schema_cache_path(cls, environment: str) -> Path:
         """Return the filesystem path for the cached schema JSON."""
-        return DEFAULT_WIZ_DIR / f"schema_{environment}.json"
+        return Config.wiz_dir() / f"schema_{environment}.json"
 
     @classmethod
     def _load_from_cache(cls, environment: str) -> Optional[GraphQLSchema]:
