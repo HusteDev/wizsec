@@ -183,7 +183,7 @@ class _RequestBase:
         queryCollection: Optional[Union[str, Any]] = None,
         query: Optional[str] = None,
         vars: Optional[Dict[str, Any]] = None,
-        paginate: bool = True,
+        paginate: Optional[bool] = None,
         report_request: Optional[Dict[str, Any]] = None,
         on_page_event: Optional[Callable] = None,
     ) -> None:
@@ -195,7 +195,8 @@ class _RequestBase:
         self.errors: List[Dict[str, Any]] = []
         self.data: Optional[Dict[str, Any]] = None
         self._status_code = None
-        self._paginate = paginate and not Config.serverless()
+        use_pagination = Config.api_auto_paginate() if paginate is None else paginate
+        self._paginate = use_pagination and not Config.serverless()
         self._report_request = report_request or {}
         self._page_event = on_page_event
         self._page = 0
@@ -365,7 +366,7 @@ class WizRequest(_RequestBase):
         queryCollection: Optional[Union[str, Any]] = None,
         query: Optional[str] = None,
         vars: Optional[Dict[str, Any]] = None,
-        paginate: bool = True,
+        paginate: Optional[bool] = None,
         report_request: Optional[Dict[str, Any]] = None,
         on_page_event: Optional[Callable] = None,
     ) -> None:
@@ -530,7 +531,12 @@ class WizRequest(_RequestBase):
 
         while retries <= self._client._max_retries:
             try:
-                limiter.try_acquire(self._limiter_key)
+                while True:
+                    try:
+                        limiter.try_acquire(self._limiter_key)
+                        break
+                    except BucketFullException:
+                        time.sleep(0.1)
                 response = self._client._post(url=url, headers=headers, json=payload)
                 self._status_code = response.status_code
 
@@ -889,7 +895,7 @@ class WizBatchRequest:
         query: str,
         vars: Optional[Dict[str, Any]] = None,
         queryCollection: Optional[Union[str, Any]] = None,
-        paginate: bool = True,
+        paginate: Optional[bool] = None,
         **kwargs,
     ) -> int:
         """
@@ -1132,7 +1138,7 @@ class AsyncWizRequest(_RequestBase):
         queryCollection: Optional[Union[str, Any]] = None,
         query: Optional[str] = None,
         vars: Optional[Dict[str, Any]] = None,
-        paginate: bool = True,
+        paginate: Optional[bool] = None,
         report_request: Optional[Dict[str, Any]] = None,
         on_page_event: Optional[Callable] = None,
     ) -> None:
@@ -1274,18 +1280,6 @@ class AsyncWizRequest(_RequestBase):
         semaphore = getattr(self._client, "_async_semaphore", asyncio.Semaphore(10))
         limiter = self._client._get_limiter(self._limiter_key)
 
-        # Lazily attach a shared rate-ok event to the client so every
-        # coroutine in the same batch coordinates through one object.
-        # asyncio.Event must be created inside the running loop, so we
-        # can't do this at client construction time.
-        # Use isinstance rather than hasattr: MagicMock (used in tests)
-        # always returns True for hasattr, causing rate_ok.wait() to
-        # await a MagicMock instead of a real coroutine.
-        if not isinstance(getattr(self._client, "_rate_ok", None), asyncio.Event):
-            self._client._rate_ok = asyncio.Event()  # type: ignore[attr-defined]
-            self._client._rate_ok.set()  # type: ignore[attr-defined]
-        rate_ok: asyncio.Event = self._client._rate_ok  # type: ignore[attr-defined]
-
         while True:
             url = self._client._api_endpoint()
             headers = self._client._get_headers()
@@ -1295,11 +1289,14 @@ class AsyncWizRequest(_RequestBase):
 
             while retries <= self._client._max_retries:
                 try:
-                    # Wait for any server-side 429 backoff to clear, then
-                    # acquire a local rate-limit slot — neither counts as a
-                    # retry so failures here never burn retry attempts.
+                    # Wait for any environment-wide server 429 backoff to clear,
+                    # then acquire a local rate-limit slot. Neither wait consumes
+                    # API retry attempts.
                     while True:
-                        await rate_ok.wait()  # blocks while event is clear
+                        remaining = self._client._env_state.rate_backoff_remaining()
+                        if remaining > 0:
+                            await asyncio.sleep(remaining)
+                            continue
                         try:
                             await asyncio.to_thread(
                                 limiter.try_acquire, self._limiter_key
@@ -1319,19 +1316,14 @@ class AsyncWizRequest(_RequestBase):
                             self._merge_page(page_data)
                             break
                         elif response.status_code == 429:
-                            # Pause every coroutine sharing this client by
-                            # clearing the event.  Only the first 429 winner
-                            # clears it; subsequent ones see it already clear
-                            # and just sleep for their own retry_after window.
                             retry_after = int(response.headers.get("Retry-After", "10"))
-                            rate_ok.clear()
+                            self._client._env_state.set_rate_backoff(retry_after)
                             self._logger.warning(
                                 f"Rate limited by server (429) — "
                                 f"backing off {retry_after}s"
                             )
                             retries += 1
                             await asyncio.sleep(retry_after)
-                            rate_ok.set()  # unblocks all waiting coroutines
                             continue
                         else:
                             error_msg = (
@@ -1438,7 +1430,7 @@ class AsyncWizBatchRequest:
         query: str,
         vars: Optional[Dict[str, Any]] = None,
         queryCollection: Optional[Union[str, Any]] = None,
-        paginate: bool = True,
+        paginate: Optional[bool] = None,
         **kwargs,
     ) -> int:
         """Add request to batch"""
@@ -1472,7 +1464,11 @@ class AsyncWizBatchRequest:
             index: int, request: AsyncWizRequest
         ) -> Tuple[int, AsyncWizResponse]:
             async with semaphore:
-                await request.submit()
+                try:
+                    await request.submit()
+                except Exception as e:
+                    self._logger.error(f"Async batch request {index} failed: {e}")
+                    request.errors.append({"message": f"Batch execution failed: {e}"})
                 response = AsyncWizResponse(request)
 
                 if self._progress_callback:
@@ -1484,13 +1480,10 @@ class AsyncWizBatchRequest:
         tasks = [execute_request(i, req) for i, req in enumerate(self._requests)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Process results
         response_map: Dict[int, "AsyncWizResponse"] = {}
         for result in results:
             if isinstance(result, BaseException):
                 self._logger.error(f"Batch request failed: {result}")
-                # Create failed response
-                # This would need error handling logic
             else:
                 index, response = result
                 response_map[index] = response

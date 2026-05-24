@@ -51,6 +51,7 @@ def mock_client(mock_config):
     client._max_retries = 1
     client._is_service_account = True
     client._limiter_key.return_value = "query_service"
+    client._env_state.rate_backoff_remaining.return_value = 0
 
     mock_limiter = MagicMock()
     mock_limiter.try_acquire = MagicMock(return_value=None)
@@ -296,9 +297,9 @@ class TestHandleFailedResponseRetryLogic:
 
 
 class TestExecutePageBucketFull:
-    def test_bucket_full_exception_retries(self, mock_client):
-        """BucketFullException from limiter causes infinite spin but is caught generically."""
-        from pyrate_limiter import BucketFullException
+    def test_bucket_full_exception_waits_without_recording_error(self, mock_client):
+        """BucketFullException from the local limiter waits without poisoning success."""
+        from pyrate_limiter import BucketFullException, Duration, Rate, RateItem
 
         mock_client._check_token.return_value = None
         mock_client._api_endpoint.return_value = "https://api.wiz.io/graphql"
@@ -309,7 +310,7 @@ class TestExecutePageBucketFull:
         def try_acquire_side_effect(key):
             call_count[0] += 1
             if call_count[0] < 3:
-                raise BucketFullException("key", 1, 0.1)
+                raise BucketFullException(RateItem("key", 1), Rate(1, Duration.SECOND))
 
         mock_limiter = MagicMock()
         mock_limiter.try_acquire.side_effect = try_acquire_side_effect
@@ -325,10 +326,9 @@ class TestExecutePageBucketFull:
         with patch("wizsec._request.time.sleep"):
             req._execute_page()
 
-        # BucketFullException is caught by the generic Exception handler
-        # so it will have errors recorded
-        # The important thing is it doesn't crash
         assert call_count[0] >= 2
+        assert req.errors == []
+        assert req.data == {"users": [{"id": "1"}]}
 
 
 # ---------------------------------------------------------------------------
@@ -730,12 +730,9 @@ class TestAsyncExecutePage:
         assert any("async connection error" in e["message"] for e in req.errors)
 
     @pytest.mark.asyncio
-    async def test_rate_ok_event_created_when_missing(self, mock_client):
-        """_rate_ok event is lazily created when not already an asyncio.Event."""
+    async def test_async_rate_limit_uses_environment_backoff_state(self, mock_client):
+        """Async request checks shared environment backoff instead of client-local state."""
         req = _make_async_req(mock_client, paginate=False)
-        # Ensure _rate_ok is not set (MagicMock attributes are truthy but not asyncio.Event)
-        if hasattr(mock_client, "_rate_ok"):
-            del mock_client._rate_ok
 
         _make_async_client(
             mock_client,
@@ -743,24 +740,21 @@ class TestAsyncExecutePage:
             json_data={"data": {"users": []}},
         )
         await req._execute_page()
-        # After execution, _rate_ok should have been set to an asyncio.Event
-        assert isinstance(mock_client._rate_ok, asyncio.Event)
+        mock_client._env_state.rate_backoff_remaining.assert_called()
 
     @pytest.mark.asyncio
-    async def test_rate_ok_event_reused_when_already_event(self, mock_client):
-        """Pre-existing asyncio.Event is reused (not replaced)."""
+    async def test_async_429_sets_environment_backoff(self, mock_client):
+        """429 responses set shared environment backoff state."""
         req = _make_async_req(mock_client, paginate=False)
-        existing_event = asyncio.Event()
-        existing_event.set()
-        mock_client._rate_ok = existing_event
+        mock_client._max_retries = 0
 
         _make_async_client(
             mock_client,
-            status_code=200,
-            json_data={"data": {"users": []}},
+            status_code=429,
         )
-        await req._execute_page()
-        assert mock_client._rate_ok is existing_event
+        with patch("wizsec._request.asyncio.sleep", new_callable=AsyncMock):
+            await req._execute_page()
+        mock_client._env_state.set_rate_backoff.assert_called_once_with(10)
 
     @pytest.mark.asyncio
     async def test_bucket_full_exception_spins(self, mock_client):
@@ -1128,9 +1122,12 @@ class TestAsyncWizBatchRequest:
         ):
             result = await batch.submit()
 
-        # Exception is caught by gather(return_exceptions=True) and logged
-        # The response_map may be empty or only contain non-exception results
         assert isinstance(result, WizBatchResponse)
+        assert result.total_count() == 1
+        failed = result.get_result(0)
+        assert failed is not None
+        assert failed.success is False
+        assert "request failed hard" in failed.errors[0]["message"]
 
     @pytest.mark.asyncio
     async def test_semaphore_created_if_missing(self, mock_client):

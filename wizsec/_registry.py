@@ -11,7 +11,8 @@
 
 import queue
 import threading
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Dict, List, Optional, Tuple
 from pyrate_limiter import Duration, Limiter, Rate
 
 
@@ -36,6 +37,8 @@ class EnvironmentState:
         # None = not yet fetched; [] = fetch returned empty; list = cached results.
         self._cached_split_entities: Optional[List[Dict[str, Any]]] = None
         self._split_entities_lock: threading.Lock = threading.Lock()
+        self._rate_backoff_lock: threading.Lock = threading.Lock()
+        self._rate_backoff_until: float = 0.0
 
     @property
     def limiters(self) -> Dict[str, Limiter]:
@@ -66,6 +69,18 @@ class EnvironmentState:
         if limiter is None:
             raise ValueError(f"No limiter for key: {key}")
         return limiter
+
+    def set_rate_backoff(self, retry_after: int) -> None:
+        """Set a shared environment-level server backoff deadline."""
+        with self._rate_backoff_lock:
+            self._rate_backoff_until = max(
+                self._rate_backoff_until, time.monotonic() + retry_after
+            )
+
+    def rate_backoff_remaining(self) -> float:
+        """Return remaining shared server backoff seconds for this environment."""
+        with self._rate_backoff_lock:
+            return max(0.0, self._rate_backoff_until - time.monotonic())
 
 
 class EnvironmentRegistry:
@@ -140,22 +155,24 @@ class ProfileRegistry:
     ProfileState for a given profile name.
     """
 
-    _profiles: Dict[str, ProfileState] = {}
+    _profiles: Dict[Tuple[str, str], ProfileState] = {}
     _lock = threading.Lock()
 
     @classmethod
-    def get_or_create(cls, profile: str) -> ProfileState:
+    def get_or_create(cls, environment: str, profile: str) -> ProfileState:
         """Return the auth state for the profile, creating it if needed."""
+        key = (environment, profile)
         with cls._lock:
-            if profile not in cls._profiles:
-                cls._profiles[profile] = ProfileState(profile)
-            return cls._profiles[profile]
+            if key not in cls._profiles:
+                cls._profiles[key] = ProfileState(profile)
+            return cls._profiles[key]
 
     @classmethod
-    def cleanup(cls, profile: str) -> None:
+    def cleanup(cls, environment: str, profile: str) -> None:
         """Clean up a specific profile's state."""
+        key = (environment, profile)
         with cls._lock:
-            state = cls._profiles.pop(profile, None)
+            state = cls._profiles.pop(key, None)
             if state:
                 state.clear()
 
