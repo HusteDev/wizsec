@@ -1410,3 +1410,801 @@ class TestMaybeSplitAsync:
 async def _sync_to_coro(fn, *args, **kwargs):
     """Run a sync function as if in a thread (synchronously in tests)."""
     return fn(*args, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# lines 25-26: fallback BucketFullException import (pyrate_limiter.exceptions)
+# ---------------------------------------------------------------------------
+
+
+class TestBucketFullExceptionFallbackImport:
+    def test_bucket_full_exception_importable(self):
+        """BucketFullException can be imported regardless of pyrate_limiter version."""
+        try:
+            from pyrate_limiter import BucketFullException
+        except ImportError:
+            from pyrate_limiter.exceptions import BucketFullException  # type: ignore
+        assert BucketFullException is not None
+
+    def test_bucket_full_exception_can_be_raised(self):
+        """BucketFullException is a proper exception class."""
+        try:
+            from pyrate_limiter import BucketFullException, RateItem, Rate, Duration
+
+            item = RateItem("key", 1)
+            rate = Rate(10, Duration.SECOND)
+            with pytest.raises(BucketFullException):
+                raise BucketFullException(item, rate)
+        except ImportError:
+            pytest.skip("pyrate_limiter not available in expected version")
+
+
+# ---------------------------------------------------------------------------
+# lines 96-128: _get_cached_or_fetch_entities — cache hit, miss, empty result
+# ---------------------------------------------------------------------------
+
+
+class TestGetCachedOrFetchEntities:
+    def _make_env_state(self, cached=None):
+        """Create a minimal env_state mock."""
+        import threading
+
+        env_state = MagicMock()
+        env_state._cached_split_entities = cached
+        env_state._split_entities_lock = threading.Lock()
+        return env_state
+
+    def test_cache_hit_returns_cached_entities(self, mock_client):
+        """When cache is enabled and populated, returns cached entities without fetch."""
+        from wizsec._request import _get_cached_or_fetch_entities
+
+        cached = [{"id": "sub-1", "name": "Sub 1"}]
+        env_state = self._make_env_state(cached=cached)
+        mock_client._env_state = env_state
+
+        with patch.object(
+            Config, "query_splitting_cache_subscriptions", return_value=True
+        ):
+            with patch.object(
+                Config, "query_splitting_split_by", return_value="cloudAccounts"
+            ):
+                result = _get_cached_or_fetch_entities(mock_client)
+
+        assert result == cached
+
+    def test_cache_miss_fetches_and_caches(self, mock_client):
+        """When cache is empty, fetches entities and stores them in cache."""
+        from wizsec._request import _get_cached_or_fetch_entities, WizRequest
+
+        env_state = self._make_env_state(cached=None)
+        mock_client._env_state = env_state
+
+        nodes = [{"id": "ca-1"}]
+
+        def success_submit(self_req):
+            self_req.data = {
+                "cloudAccounts": {"nodes": nodes, "pageInfo": {"hasNextPage": False}}
+            }
+            self_req.errors = []
+            self_req._done_event.set()
+            return self_req
+
+        with patch.object(
+            WizRequest, "submit", autospec=True, side_effect=success_submit
+        ):
+            with patch.object(
+                Config, "query_splitting_cache_subscriptions", return_value=True
+            ):
+                with patch.object(
+                    Config, "query_splitting_split_by", return_value="cloudAccounts"
+                ):
+                    with patch.object(Config, "serverless", return_value=False):
+                        result = _get_cached_or_fetch_entities(mock_client)
+
+        assert result == nodes
+        assert env_state._cached_split_entities == nodes
+
+    def test_empty_result_when_request_fails(self, mock_client):
+        """When the internal fetch request fails, returns empty list."""
+        from wizsec._request import _get_cached_or_fetch_entities, WizRequest
+
+        env_state = self._make_env_state(cached=None)
+        mock_client._env_state = env_state
+
+        def fail_submit(self_req):
+            self_req.data = None
+            self_req.errors = [{"message": "fetch failed"}]
+            self_req._done_event.set()
+            return self_req
+
+        with patch.object(WizRequest, "submit", autospec=True, side_effect=fail_submit):
+            with patch.object(
+                Config, "query_splitting_cache_subscriptions", return_value=False
+            ):
+                with patch.object(
+                    Config, "query_splitting_split_by", return_value="cloudAccounts"
+                ):
+                    with patch.object(Config, "serverless", return_value=False):
+                        result = _get_cached_or_fetch_entities(mock_client)
+
+        assert result == []
+
+    def test_cache_disabled_does_not_store(self, mock_client):
+        """When cache is disabled, fetched entities are not stored."""
+        from wizsec._request import _get_cached_or_fetch_entities, WizRequest
+
+        env_state = self._make_env_state(cached=None)
+        mock_client._env_state = env_state
+
+        nodes = [{"id": "proj-1"}]
+
+        def success_submit(self_req):
+            self_req.data = {
+                "projects": {"nodes": nodes, "pageInfo": {"hasNextPage": False}}
+            }
+            self_req.errors = []
+            self_req._done_event.set()
+            return self_req
+
+        with patch.object(
+            WizRequest, "submit", autospec=True, side_effect=success_submit
+        ):
+            with patch.object(
+                Config, "query_splitting_cache_subscriptions", return_value=False
+            ):
+                with patch.object(
+                    Config, "query_splitting_split_by", return_value="projects"
+                ):
+                    with patch.object(Config, "serverless", return_value=False):
+                        result = _get_cached_or_fetch_entities(mock_client)
+
+        # Cache should still be None (not stored)
+        assert env_state._cached_split_entities is None
+        assert result == nodes
+
+
+# ---------------------------------------------------------------------------
+# lines 415-492: WizRequest._maybe_split — full path through sync splitting
+# ---------------------------------------------------------------------------
+
+
+class TestMaybeSplitSync:
+    def test_schema_detection_mode_returns_false_when_no_totalcount(self, mock_client):
+        """Schema mode: returns False if _schema_supports_totalcount is False."""
+        req = _make_req(mock_client)
+        with patch.object(Config, "serverless", return_value=False):
+            with patch.object(Config, "query_splitting_enabled", return_value=True):
+                with patch.object(
+                    Config, "query_splitting_detection_mode", return_value="schema"
+                ):
+                    with patch(
+                        "wizsec._request._schema_supports_totalcount",
+                        return_value=False,
+                    ):
+                        result = req._maybe_split()
+        assert result is False
+
+    def test_returns_false_when_probe_query_is_none(self, mock_client):
+        """Returns False when build_totalcount_probe_query returns None."""
+        req = _make_req(mock_client)
+        with patch.object(Config, "serverless", return_value=False):
+            with patch.object(Config, "query_splitting_enabled", return_value=True):
+                with patch.object(
+                    Config, "query_splitting_detection_mode", return_value="static"
+                ):
+                    with patch(
+                        "wizsec._request.has_totalcount_field", return_value=True
+                    ):
+                        with patch(
+                            "wizsec._request.build_totalcount_probe_query",
+                            return_value=None,
+                        ):
+                            result = req._maybe_split()
+        assert result is False
+
+    def _make_enqueue_that_sets_done(self, success, total_count=0, node_key="issues"):
+        """Return an _enqueue_request side_effect that immediately resolves the probe."""
+
+        def _enqueue(req_obj):
+            if success:
+                req_obj.data = {node_key: {"totalCount": total_count}}
+                req_obj.errors = []
+            else:
+                req_obj.data = None
+                req_obj.errors = [{"message": "probe failed"}]
+            req_obj._done_event.set()
+
+        return _enqueue
+
+    def test_returns_false_when_probe_fails(self, mock_client):
+        """Returns False when the probe request fails."""
+        req = _make_req(mock_client)
+        mock_client._enqueue_request.side_effect = self._make_enqueue_that_sets_done(
+            success=False
+        )
+
+        with patch.object(Config, "serverless", return_value=False):
+            with patch.object(Config, "query_splitting_enabled", return_value=True):
+                with patch.object(
+                    Config, "query_splitting_detection_mode", return_value="static"
+                ):
+                    with patch(
+                        "wizsec._request.has_totalcount_field", return_value=True
+                    ):
+                        with patch(
+                            "wizsec._request.build_totalcount_probe_query",
+                            return_value="query Probe { issues { totalCount } }",
+                        ):
+                            result = req._maybe_split()
+        assert result is False
+
+    def test_returns_false_when_below_threshold(self, mock_client):
+        """Returns False when totalCount is below the threshold."""
+        req = _make_req(mock_client)
+        mock_client._enqueue_request.side_effect = self._make_enqueue_that_sets_done(
+            success=True, total_count=10
+        )
+
+        with patch.object(Config, "serverless", return_value=False):
+            with patch.object(Config, "query_splitting_enabled", return_value=True):
+                with patch.object(
+                    Config, "query_splitting_detection_mode", return_value="static"
+                ):
+                    with patch(
+                        "wizsec._request.has_totalcount_field", return_value=True
+                    ):
+                        with patch(
+                            "wizsec._request.build_totalcount_probe_query",
+                            return_value="query Probe { issues { totalCount } }",
+                        ):
+                            with patch(
+                                "wizsec._request._extract_totalcount", return_value=10
+                            ):
+                                with patch.object(
+                                    Config,
+                                    "query_splitting_threshold",
+                                    return_value=1000,
+                                ):
+                                    result = req._maybe_split()
+        assert result is False
+
+    def test_returns_false_when_filter_path_empty(self, mock_client):
+        """Returns False with warning when filter_path is not configured."""
+        req = _make_req(mock_client)
+        mock_client._enqueue_request.side_effect = self._make_enqueue_that_sets_done(
+            success=True, total_count=9999
+        )
+
+        with patch.object(Config, "serverless", return_value=False):
+            with patch.object(Config, "query_splitting_enabled", return_value=True):
+                with patch.object(
+                    Config, "query_splitting_detection_mode", return_value="static"
+                ):
+                    with patch(
+                        "wizsec._request.has_totalcount_field", return_value=True
+                    ):
+                        with patch(
+                            "wizsec._request.build_totalcount_probe_query",
+                            return_value="query Probe { issues { totalCount } }",
+                        ):
+                            with patch(
+                                "wizsec._request._extract_totalcount", return_value=9999
+                            ):
+                                with patch.object(
+                                    Config,
+                                    "query_splitting_threshold",
+                                    return_value=100,
+                                ):
+                                    with patch.object(
+                                        Config,
+                                        "query_splitting_filter_path",
+                                        return_value="",
+                                    ):
+                                        result = req._maybe_split()
+        assert result is False
+
+    def test_returns_false_when_no_entities(self, mock_client):
+        """Returns False when no entities are fetched for splitting."""
+        req = _make_req(mock_client)
+        mock_client._enqueue_request.side_effect = self._make_enqueue_that_sets_done(
+            success=True, total_count=9999
+        )
+
+        with patch.object(Config, "serverless", return_value=False):
+            with patch.object(Config, "query_splitting_enabled", return_value=True):
+                with patch.object(
+                    Config, "query_splitting_detection_mode", return_value="static"
+                ):
+                    with patch(
+                        "wizsec._request.has_totalcount_field", return_value=True
+                    ):
+                        with patch(
+                            "wizsec._request.build_totalcount_probe_query",
+                            return_value="query Probe { issues { totalCount } }",
+                        ):
+                            with patch(
+                                "wizsec._request._extract_totalcount", return_value=9999
+                            ):
+                                with patch.object(
+                                    Config,
+                                    "query_splitting_threshold",
+                                    return_value=100,
+                                ):
+                                    with patch.object(
+                                        Config,
+                                        "query_splitting_filter_path",
+                                        return_value="subscriptionFilters.cloudAccount",
+                                    ):
+                                        with patch(
+                                            "wizsec._request._get_cached_or_fetch_entities",
+                                            return_value=[],
+                                        ):
+                                            result = req._maybe_split()
+        assert result is False
+
+
+# ---------------------------------------------------------------------------
+# lines 498-520: WizRequest._run_split_async
+# ---------------------------------------------------------------------------
+
+
+class TestRunSplitAsync:
+    @pytest.mark.asyncio
+    async def test_run_split_async_creates_batch_and_returns_responses(
+        self, mock_client
+    ):
+        """_run_split_async builds a batch per-entity and returns all responses."""
+        req = _make_req(mock_client)
+        entities = [{"id": "e1"}, {"id": "e2"}]
+        filter_path = "filterBy.subscriptionId"
+
+        fake_resp1 = MagicMock()
+        fake_resp1.data = {"issues": {"nodes": [{"id": "i1"}]}}
+        fake_resp1.errors = []
+        fake_resp2 = MagicMock()
+        fake_resp2.data = {"issues": {"nodes": [{"id": "i2"}]}}
+        fake_resp2.errors = []
+
+        async_client_mock = MagicMock()
+        async_client_mock.environment = "gov"
+        async_client_mock._query_retry_time = 0
+        async_client_mock._max_retries = 0
+        async_client_mock._is_service_account = True
+        async_client_mock._limiter_key.return_value = "query_service"
+        mock_limiter = MagicMock()
+        mock_limiter.try_acquire = MagicMock(return_value=None)
+        async_client_mock._get_limiter.return_value = mock_limiter
+        async_client_mock._async_semaphore = asyncio.Semaphore(10)
+
+        batch_response_mock = MagicMock()
+        batch_response_mock.__iter__ = MagicMock(
+            return_value=iter([(0, fake_resp1), (1, fake_resp2)])
+        )
+
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def fake_async_session():
+            yield async_client_mock
+
+        mock_client.async_session = fake_async_session
+
+        sub_req_mock = MagicMock()
+        sub_req_mock._is_sub_request = False
+
+        with patch("wizsec._request.AsyncWizBatchRequest") as MockBatch:
+            mock_batch_instance = MagicMock()
+            MockBatch.return_value = mock_batch_instance
+            # _requests must be a list so index access works
+            mock_batch_instance._requests = [sub_req_mock]
+
+            async def fake_submit():
+                return batch_response_mock
+
+            mock_batch_instance.submit = fake_submit
+            mock_batch_instance.add_request.return_value = 0
+
+            results = await req._run_split_async(entities, filter_path)
+
+        assert len(results) == 2
+
+
+# ---------------------------------------------------------------------------
+# lines 697-738: WizRequest._report_workflow  (COMPLETED path, no URL, streaming)
+# ---------------------------------------------------------------------------
+
+
+class TestReportWorkflow:
+    def _make_report_req(self, client):
+        """Create a WizRequest configured for a report query."""
+        with patch.object(Config, "validate_queries", return_value=False):
+            req = WizRequest(
+                client=client, query="query Q { users { id } }", paginate=False
+            )
+        req._response = {"data": {"createReport": {"report": {"id": "report-123"}}}}
+        req.data = {}
+        req.stream_report = False
+        req.report_name = "TestReport"
+        return req
+
+    def test_report_workflow_completed_no_url(self, mock_client):
+        """When status is COMPLETED but URL is None, error is appended."""
+        req = self._make_report_req(mock_client)
+        mock_client._check_token.return_value = None
+        mock_client._query_retry_time = 0
+        mock_client._max_retries = 0
+
+        # Build a mock polling response that signals completion
+        mock_poll_req = MagicMock()
+        mock_poll_req.success.return_value = True
+        mock_poll_req.data = {
+            "report": {"lastRun": {"status": "COMPLETED", "progress": 100, "url": None}}
+        }
+
+        with patch.object(req, "submit", return_value=mock_poll_req):
+            result = req._report_workflow(MagicMock())
+
+        assert any("No download URL" in e["message"] for e in req.errors)
+        assert result is req
+
+    def test_report_workflow_completed_with_download(self, mock_client):
+        """When status is COMPLETED with URL, downloads the report."""
+        req = self._make_report_req(mock_client)
+        mock_client._query_retry_time = 0
+
+        mock_poll_req = MagicMock()
+        mock_poll_req.success.return_value = True
+        mock_poll_req.data = {
+            "report": {
+                "lastRun": {
+                    "status": "COMPLETED",
+                    "progress": 100,
+                    "url": "https://example.com/report.csv",
+                }
+            }
+        }
+
+        with patch.object(req, "submit", return_value=mock_poll_req):
+            with patch.object(req, "_download_report", return_value=b"csv-content"):
+                result = req._report_workflow(MagicMock())
+
+        assert result is req
+        assert req.data["report_data"] == b"csv-content"
+
+    def test_report_workflow_completed_with_streaming(self, mock_client):
+        """When stream_report=True, streams the report."""
+        req = self._make_report_req(mock_client)
+        req.stream_report = True
+        mock_client._query_retry_time = 0
+
+        mock_poll_req = MagicMock()
+        mock_poll_req.success.return_value = True
+        mock_poll_req.data = {
+            "report": {
+                "lastRun": {
+                    "status": "COMPLETED",
+                    "progress": 100,
+                    "url": "https://example.com/report.csv",
+                }
+            }
+        }
+
+        with patch.object(req, "submit", return_value=mock_poll_req):
+            with patch.object(
+                req, "_stream_report", return_value=[{"row": 1}, {"row": 2}]
+            ):
+                result = req._report_workflow(MagicMock())
+
+        assert result is req
+        assert req.data["report_data"] == [{"row": 1}, {"row": 2}]
+
+    def test_report_workflow_polls_until_complete(self, mock_client):
+        """When status is not COMPLETED, keeps polling."""
+        req = self._make_report_req(mock_client)
+        mock_client._query_retry_time = 0
+
+        # First call: IN_PROGRESS; second call: COMPLETED
+        in_progress = MagicMock()
+        in_progress.success.return_value = True
+        in_progress.data = {
+            "report": {
+                "lastRun": {"status": "IN_PROGRESS", "progress": 50, "url": None}
+            }
+        }
+
+        completed = MagicMock()
+        completed.success.return_value = True
+        completed.data = {
+            "report": {
+                "lastRun": {
+                    "status": "COMPLETED",
+                    "progress": 100,
+                    "url": "https://example.com/r.csv",
+                }
+            }
+        }
+
+        call_count = [0]
+
+        def fake_submit():
+            call_count[0] += 1
+            return in_progress if call_count[0] == 1 else completed
+
+        with patch.object(req, "submit", side_effect=fake_submit):
+            with patch.object(req, "_download_report", return_value=b"data"):
+                with patch("wizsec._request.time.sleep"):
+                    result = req._report_workflow(MagicMock())
+
+        assert call_count[0] == 2
+        assert result is req
+
+
+# ---------------------------------------------------------------------------
+# lines 749-754: _stream_report (as_generator=True path)
+# ---------------------------------------------------------------------------
+
+
+class TestStreamReport:
+    def test_stream_report_as_generator_returns_iterator(self, mock_client):
+        """_stream_report(as_generator=True) returns an iterator, not a list."""
+        req = _make_req(mock_client)
+        req.report_name = "MyReport"
+
+        def fake_generator(url, name, on_page_event, chunk_size):
+            yield {"row": 1}
+            yield {"row": 2}
+
+        with patch.object(req, "_stream_report_generator", side_effect=fake_generator):
+            result = req._stream_report(
+                "https://example.com/r.csv", "MyReport", as_generator=True
+            )
+
+        # as_generator=True returns the raw generator
+        import types
+
+        assert isinstance(result, types.GeneratorType)
+
+    def test_stream_report_as_list_returns_list(self, mock_client):
+        """_stream_report(as_generator=False) returns a list."""
+        req = _make_req(mock_client)
+
+        def fake_generator(url, name, on_page_event, chunk_size):
+            yield {"row": 1}
+
+        with patch.object(req, "_stream_report_generator", side_effect=fake_generator):
+            result = req._stream_report(
+                "https://example.com/r.csv", "MyReport", as_generator=False
+            )
+
+        assert isinstance(result, list)
+        assert result == [{"row": 1}]
+
+
+# ---------------------------------------------------------------------------
+# lines 768-799: _stream_report_generator (JSON, CSV, unsupported content types)
+# ---------------------------------------------------------------------------
+
+
+class TestStreamReportGenerator:
+    def _make_stream_response(
+        self, status_code=200, content_type="application/json", lines=None
+    ):
+        """Build a mock streaming response."""
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.status_code = status_code
+        mock_resp.headers = {"Content-Type": content_type, "content-length": "100"}
+        mock_resp.iter_lines.return_value = lines or []
+        return mock_resp
+
+    def test_json_content_type_yields_parsed_lines(self, mock_client):
+        """JSON content type lines are parsed and yielded."""
+        req = _make_req(mock_client)
+        mock_resp = self._make_stream_response(
+            content_type="application/json",
+            lines=['{"id": "1"}', '{"id": "2"}'],
+        )
+
+        with patch("wizsec._request.stream_get", return_value=mock_resp):
+            results = list(
+                req._stream_report_generator("https://example.com/r", "MyReport")
+            )
+
+        assert results == [{"id": "1"}, {"id": "2"}]
+
+    def test_csv_content_type_yields_rows(self, mock_client):
+        """CSV content type lines are parsed as CSV rows and yielded."""
+        req = _make_req(mock_client)
+        mock_resp = self._make_stream_response(
+            content_type="text/csv",
+            lines=["col1,col2", "val1,val2"],
+        )
+
+        with patch("wizsec._request.stream_get", return_value=mock_resp):
+            results = list(
+                req._stream_report_generator("https://example.com/r.csv", "MyReport")
+            )
+
+        assert results == [["col1", "col2"], ["val1", "val2"]]
+
+    def test_unsupported_content_type_logs_error(self, mock_client):
+        """Unsupported content type logs an error, yields nothing."""
+        req = _make_req(mock_client)
+        mock_resp = self._make_stream_response(
+            content_type="application/octet-stream",
+            lines=["binary data"],
+        )
+
+        with patch("wizsec._request.stream_get", return_value=mock_resp):
+            results = list(
+                req._stream_report_generator("https://example.com/r.bin", "MyReport")
+            )
+
+        assert results == []
+
+    def test_non_200_status_logs_error(self, mock_client):
+        """Non-200 response logs error and yields nothing."""
+        req = _make_req(mock_client)
+        mock_resp = self._make_stream_response(status_code=403)
+
+        with patch("wizsec._request.stream_get", return_value=mock_resp):
+            results = list(
+                req._stream_report_generator("https://example.com/r", "MyReport")
+            )
+
+        assert results == []
+
+    def test_json_stream_fires_page_event_callback(self, mock_client):
+        """on_page_event callback is fired for each JSON line."""
+        req = _make_req(mock_client)
+        events = []
+        mock_resp = self._make_stream_response(
+            content_type="application/json",
+            lines=['{"id": "1"}'],
+        )
+
+        with patch("wizsec._request.stream_get", return_value=mock_resp):
+            results = list(
+                req._stream_report_generator(
+                    "https://example.com/r",
+                    "Report",
+                    on_page_event=lambda e: events.append(e),
+                )
+            )
+
+        assert len(events) == 1
+        assert events[0]["name"] == "Report"
+        assert events[0]["status"] == "In Progress"
+
+
+# ---------------------------------------------------------------------------
+# lines 805-812: _download_report — success and failure paths
+# ---------------------------------------------------------------------------
+
+
+class TestDownloadReport:
+    def test_download_report_returns_content_on_success(self, mock_client):
+        """Successful download returns bytes content."""
+        req = _make_req(mock_client)
+
+        mock_response = MagicMock()
+        mock_response.content = b"report-bytes"
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("wizsec._request.transport_get", return_value=mock_response):
+            result = req._download_report("https://example.com/report.csv")
+
+        assert result == b"report-bytes"
+
+    def test_download_report_returns_none_on_error(self, mock_client):
+        """Exception during download returns None and appends error."""
+        req = _make_req(mock_client)
+
+        with patch(
+            "wizsec._request.transport_get",
+            side_effect=ConnectionError("download failed"),
+        ):
+            result = req._download_report("https://example.com/report.csv")
+
+        assert result is None
+        assert any("download failed" in e["message"] for e in req.errors)
+
+
+# ---------------------------------------------------------------------------
+# lines 1239-1264: AsyncWizRequest._maybe_split_async — full split path with entities
+# ---------------------------------------------------------------------------
+
+
+class TestMaybeSplitAsyncFullPath:
+    @pytest.mark.asyncio
+    async def test_splits_across_entities_returns_true(self, mock_client):
+        """_maybe_split_async returns True and populates data when all conditions met."""
+        req = _make_async_req(mock_client)
+
+        entities = [{"id": "e1"}, {"id": "e2"}, {"id": ""}]  # include one with no id
+
+        async def fake_probe_submit(probe_req):
+            probe_req.data = {"issues": {"totalCount": 9999}}
+            probe_req.errors = []
+            return probe_req
+
+        fake_resp1 = MagicMock()
+        fake_resp1.success = True
+        fake_resp1.data = {"issues": {"nodes": [{"id": "i1"}], "totalCount": 1}}
+        fake_resp1.errors = []
+
+        fake_resp2 = MagicMock()
+        fake_resp2.success = True
+        fake_resp2.data = {"issues": {"nodes": [{"id": "i2"}], "totalCount": 1}}
+        fake_resp2.errors = []
+
+        batch_response = MagicMock()
+        batch_response.__iter__ = MagicMock(
+            return_value=iter([(0, fake_resp1), (1, fake_resp2)])
+        )
+
+        with patch.object(Config, "serverless", return_value=False):
+            with patch.object(Config, "query_splitting_enabled", return_value=True):
+                with patch.object(
+                    Config, "query_splitting_detection_mode", return_value="static"
+                ):
+                    with patch(
+                        "wizsec._request.has_totalcount_field", return_value=True
+                    ):
+                        with patch(
+                            "wizsec._request.build_totalcount_probe_query",
+                            return_value="query Probe { issues { totalCount } }",
+                        ):
+                            with patch(
+                                "wizsec._request._extract_totalcount", return_value=9999
+                            ):
+                                with patch.object(
+                                    Config,
+                                    "query_splitting_threshold",
+                                    return_value=100,
+                                ):
+                                    with patch.object(
+                                        Config,
+                                        "query_splitting_filter_path",
+                                        return_value="subscriptionFilters.cloudAccount",
+                                    ):
+                                        with patch(
+                                            "wizsec._request._get_cached_or_fetch_entities",
+                                            return_value=entities,
+                                        ):
+                                            with patch.object(
+                                                AsyncWizRequest,
+                                                "submit",
+                                                autospec=True,
+                                                side_effect=fake_probe_submit,
+                                            ):
+                                                with patch(
+                                                    "wizsec._request.AsyncWizBatchRequest"
+                                                ) as MockBatch:
+                                                    mock_batch_inst = MagicMock()
+                                                    MockBatch.return_value = (
+                                                        mock_batch_inst
+                                                    )
+                                                    _inner_req = MagicMock()
+                                                    _inner_req._is_sub_request = False
+                                                    mock_batch_inst._requests = [
+                                                        _inner_req
+                                                    ]
+                                                    mock_batch_inst.add_request.return_value = (
+                                                        0
+                                                    )
+
+                                                    async def fake_batch_submit():
+                                                        return batch_response
+
+                                                    mock_batch_inst.submit = (
+                                                        fake_batch_submit
+                                                    )
+
+                                                    result = (
+                                                        await req._maybe_split_async()
+                                                    )
+
+        assert result is True
+        assert req.data is not None
