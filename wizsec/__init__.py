@@ -24,6 +24,12 @@ __all__ = [
     # Utilities
     "dump_to_json",
     "load_file_if_in_last_x_interval",
+    # Cache backends
+    "CacheBackend",
+    "FilesystemBackend",
+    "DynamoDBBackend",
+    "S3Backend",
+    "build_cache_key",
     # Registries
     "EnvironmentRegistry",
     "ProfileRegistry",
@@ -42,6 +48,7 @@ __all__ = [
     "WizTimeoutError",
     "WizFileError",
     "WizServerlessError",
+    "WizCacheError",
 ]
 
 
@@ -56,6 +63,20 @@ def __getattr__(name):
         from .utils import dump_to_json
     elif name == "load_file_if_in_last_x_interval":
         from .utils import load_file_if_in_last_x_interval
+    elif name in (
+        "CacheBackend",
+        "FilesystemBackend",
+        "DynamoDBBackend",
+        "S3Backend",
+        "build_cache_key",
+    ):
+        from ._cache import (
+            CacheBackend,
+            FilesystemBackend,
+            DynamoDBBackend,
+            S3Backend,
+            _build_cache_key as build_cache_key,
+        )
     elif name in ("EnvironmentRegistry", "ProfileRegistry"):
         from ._registry import EnvironmentRegistry, ProfileRegistry
     elif name == "SchemaValidator":
@@ -73,6 +94,7 @@ def __getattr__(name):
         "WizTimeoutError",
         "WizFileError",
         "WizServerlessError",
+        "WizCacheError",
     ):
         from .exceptions import (
             WizError,
@@ -87,6 +109,7 @@ def __getattr__(name):
             WizTimeoutError,
             WizFileError,
             WizServerlessError,
+            WizCacheError,
         )
     else:
         raise AttributeError(f"module {__name__} has no attribute {name}")

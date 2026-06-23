@@ -131,3 +131,9 @@ class WizServerlessError(WizError):
     """Raised when serverless-specific operations fail."""
 
     pass
+
+
+class WizCacheError(WizError):
+    """Raised when a cache backend operation (S3, DynamoDB, filesystem) fails."""
+
+    pass

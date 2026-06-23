@@ -6,11 +6,24 @@ app:
 # wiz_dir: ""                         # Default directory for Wiz config, auth, and logging files
 # env_path: ""                        # Custom directory for .env file | default = $CWD
 
-# saved_data:
-#   enabled: true                     # Allows application save data locally | default = true
-#   directory: ""                     # Custom directory to save non-report exports | default = $CWD/saved-data
-#   temp: ""                          # Custom directory for Temp Files | default = tempfile.gettempdir()
-#   pickle: false                     # Allow use of pickle files for storing larger files | default = false
+# cache:
+#   allow_cache: false                # Enable automatic read-through/write-through query caching | default = false
+#   backend: filesystem               # Cache backend: filesystem | s3 | dynamodb | default = filesystem
+#   directory: ""                     # Filesystem cache directory | default = ~/.wiz/.cache
+#   pickle: false                     # Allow pickle files for large filesystem cache entries | default = false
+#   default_interval: 1               # Max age of a cached entry before re-fetching (read side) | default = 1
+#   default_interval_type: days       # Unit for default_interval: days | minutes | seconds | default = days
+#   ttl_seconds: 2592000              # How long to store entries in the backend (write side, 30 days) | default = 2592000
+#   s3_bucket: ""                     # S3 bucket name (required when backend=s3)
+#   s3_prefix: wizsec-cache           # S3 key prefix | default = wizsec-cache
+#   dynamodb_table: ""                # DynamoDB table name (required when backend=dynamodb)
+#   aws_region: ""                    # AWS region override for cache backend (falls back to aws.region)
+#   aws_profile: ""                   # Named profile from ~/.aws/credentials
+#   aws_role_arn: ""                  # IAM role to assume (cross-account access)
+#   aws_role_session_name: wizsec-cache  # Session name for assumed role | default = wizsec-cache
+#   aws_access_key_id: ""             # Explicit credentials (prefer profile or role_arn instead)
+#   aws_secret_access_key: ""
+#   aws_session_token: ""
 
 # auth:
 #   grant_type: client_credentials    # Options [device_code, client_credentials] | NOTE: device_code requires WizCode license
