@@ -87,14 +87,16 @@ class TestParseQueryMetadata:
         assert result["source"] == "users"
 
     def test_nested_fields_in_metadata(self):
-        result = parse_query_metadata("""
+        result = parse_query_metadata(
+            """
             query ListProjects {
                 projects {
                     nodes { id name }
                     pageInfo { hasNextPage endCursor }
                 }
             }
-        """)
+        """
+        )
         assert "projects" in result["fields"]
         assert "nodes" in result["fields"]["projects"]
         assert "pageInfo" in result["fields"]["projects"]
@@ -742,3 +744,341 @@ class TestLoadData:
     def test_missing_file_raises(self, tmp_path):
         with pytest.raises(WizFileError, match="Failed to load data"):
             load_data(str(tmp_path / "nonexistent.pkl"))
+
+
+# ── safe_write_json — error path (lines 86-100) ─────────────────────
+
+
+class TestSafeWriteJsonErrorPath:
+    def test_raises_on_write_error(self, tmp_path, mock_config):
+        """When writing fails, the exception propagates and temp file is cleaned up."""
+        data = {"key": "value"}
+        save_dir = tmp_path / "output"
+        save_dir.mkdir()
+        temp_dir = tmp_path / "temp"
+        temp_dir.mkdir()
+
+        with patch("wizsec.utils.json.dump", side_effect=OSError("disk full")):
+            with pytest.raises(OSError, match="disk full"):
+                safe_write_json(data, "test.json", save_dir, temp_dir)
+
+    def test_temp_file_cleaned_up_on_error(self, tmp_path, mock_config):
+        """Temp file is removed in the finally block even when an error occurs."""
+        data = {"key": "value"}
+        save_dir = tmp_path / "output"
+        save_dir.mkdir()
+        temp_dir = tmp_path / "temp"
+        temp_dir.mkdir()
+
+        with patch("wizsec.utils.json.dump", side_effect=RuntimeError("boom")):
+            with pytest.raises(RuntimeError):
+                safe_write_json(data, "test.json", save_dir, temp_dir)
+
+        # No temp file should remain
+        assert len(list(temp_dir.glob("*"))) == 0
+
+    def test_serialize_object_fallback(self, tmp_path, mock_config):
+        """Custom object without __dict__ is serialized as str()."""
+
+        class NoDict:
+            __slots__ = ("x",)
+
+            def __init__(self, x):
+                self.x = x
+
+            def __str__(self):
+                return "no-dict-obj"
+
+        save_dir = tmp_path / "output"
+        save_dir.mkdir()
+        temp_dir = tmp_path / "temp"
+        temp_dir.mkdir()
+
+        safe_write_json({"item": NoDict(42)}, "test.json", save_dir, temp_dir)
+        import json as _json
+
+        content = _json.loads((save_dir / "test.json").read_text())
+        assert content["item"] == "no-dict-obj"
+
+    def test_serialize_object_uses_vars(self, tmp_path, mock_config):
+        """Custom object with __dict__ is serialized using vars()."""
+
+        class WithDict:
+            def __init__(self):
+                self.name = "example"
+
+        save_dir = tmp_path / "output"
+        save_dir.mkdir()
+        temp_dir = tmp_path / "temp"
+        temp_dir.mkdir()
+
+        safe_write_json({"obj": WithDict()}, "test.json", save_dir, temp_dir)
+        import json as _json
+
+        content = _json.loads((save_dir / "test.json").read_text())
+        assert content["obj"]["name"] == "example"
+
+
+# ── dump_to_json — additional branches (lines 118-226) ──────────────
+
+
+class TestDumpToJsonBranches:
+    def test_list_of_lists_with_duplicate_headers(self, tmp_path, mock_config):
+        """dump_to_json handles list-of-lists data with duplicate column headers."""
+        save_dir = tmp_path / "saved-data"
+        save_dir.mkdir(parents=True)
+
+        # List where first row is a header with duplicates
+        data = [["col", "col", "other"], [1, 2, 3], [4, 5, 6]]
+
+        with (
+            patch.object(mock_config, "serverless", return_value=False),
+            patch.object(mock_config, "saved_data_enabled", return_value=True),
+            patch.object(mock_config, "saved_data_directory", return_value=save_dir),
+        ):
+            dump_to_json(data, filename="dup_headers.json")
+
+        output = save_dir / "dup_headers.json"
+        assert output.exists()
+
+    def test_list_of_dicts_written_as_json(self, tmp_path, mock_config):
+        """dump_to_json handles a list of dicts (non-list-of-lists)."""
+        save_dir = tmp_path / "saved-data"
+        save_dir.mkdir(parents=True)
+
+        data = [{"a": 1}, {"a": 2}]
+
+        with (
+            patch.object(mock_config, "serverless", return_value=False),
+            patch.object(mock_config, "saved_data_enabled", return_value=True),
+            patch.object(mock_config, "saved_data_directory", return_value=save_dir),
+        ):
+            dump_to_json(data, filename="list_of_dicts.json")
+
+        output = save_dir / "list_of_dicts.json"
+        assert output.exists()
+
+    def test_filepath_takes_precedence_over_filename(self, tmp_path, mock_config):
+        """dump_to_json uses filepath when provided instead of default save directory."""
+        save_dir = tmp_path / "custom-dir"
+        save_dir.mkdir(parents=True)
+        target_file = save_dir / "custom_output.json"
+
+        with (
+            patch.object(mock_config, "serverless", return_value=False),
+            patch.object(mock_config, "saved_data_enabled", return_value=True),
+            patch.object(mock_config, "saved_data_directory", return_value=save_dir),
+        ):
+            dump_to_json({"x": 1}, filepath=str(target_file))
+
+        assert target_file.exists()
+
+    def test_no_filename_uses_dumpfile_default(self, tmp_path, mock_config):
+        """dump_to_json falls back to dumpFile.json when no filename or filepath."""
+        save_dir = tmp_path / "saved-data"
+        save_dir.mkdir(parents=True)
+
+        with (
+            patch.object(mock_config, "serverless", return_value=False),
+            patch.object(mock_config, "saved_data_enabled", return_value=True),
+            patch.object(mock_config, "saved_data_directory", return_value=save_dir),
+        ):
+            dump_to_json({"y": 2})
+
+        output = save_dir / "dumpFile.json"
+        assert output.exists()
+
+
+# ── extract_fields — fragment_spread and inline_fragment (lines 298-304) ──
+
+
+class TestExtractFieldsBranches:
+    def test_fragment_spread_recorded_as_fragment(self):
+        from graphql import parse
+
+        doc = parse("{ user { id ...UserFields } }")
+        selection_set = doc.definitions[0].selection_set.selections[0].selection_set
+        fields = extract_fields(selection_set)
+        assert "UserFields" in fields
+        assert fields["UserFields"] == "FRAGMENT"
+
+    def test_inline_fragment_fields_merged(self):
+        from graphql import parse
+
+        doc = parse("{ search { ... on User { name } } }")
+        selection_set = doc.definitions[0].selection_set.selections[0].selection_set
+        fields = extract_fields(selection_set)
+        assert "name" in fields
+
+
+# ── has_totalcount_field (lines 419-424) ──────────────────────────
+
+
+class TestHasTotalcountField:
+    def test_returns_false_for_empty_fields(self):
+        from wizsec.utils import has_totalcount_field
+
+        assert has_totalcount_field({}) is False
+
+    def test_returns_false_when_root_not_dict(self):
+        from wizsec.utils import has_totalcount_field
+
+        assert has_totalcount_field({"issues": None}) is False
+
+    def test_returns_true_when_totalcount_present(self):
+        from wizsec.utils import has_totalcount_field
+
+        assert (
+            has_totalcount_field({"issues": {"nodes": None, "totalCount": None}})
+            is True
+        )
+
+    def test_returns_false_when_totalcount_absent(self):
+        from wizsec.utils import has_totalcount_field
+
+        assert has_totalcount_field({"issues": {"nodes": None}}) is False
+
+
+# ── build_totalcount_probe_query (lines 436-497) ──────────────────
+
+
+class TestBuildTotalcountProbeQuery:
+    def test_returns_none_for_invalid_query(self):
+        from wizsec.utils import build_totalcount_probe_query
+
+        assert build_totalcount_probe_query("not graphql {{") is None
+
+    def test_returns_none_for_mutation(self):
+        from wizsec.utils import build_totalcount_probe_query
+
+        result = build_totalcount_probe_query(
+            "mutation M { createIssue(input: {}) { id } }"
+        )
+        assert result is None
+
+    def test_returns_none_when_no_connection_field(self):
+        from wizsec.utils import build_totalcount_probe_query
+
+        result = build_totalcount_probe_query("query Q { user { id name } }")
+        assert result is None
+
+    def test_returns_probe_query_with_totalcount(self):
+        from wizsec.utils import build_totalcount_probe_query
+
+        result = build_totalcount_probe_query(
+            "query Q($first: Int, $filterBy: IssueFilters) { issues(first: $first, filterBy: $filterBy) { nodes { id } totalCount } }"
+        )
+        assert result is not None
+        assert "totalCount" in result
+        # $first and $after variable definitions should be dropped
+        assert "$first" not in result
+        assert "$after" not in result
+
+    def test_returns_none_when_no_totalcount_child(self):
+        from wizsec.utils import build_totalcount_probe_query
+
+        result = build_totalcount_probe_query(
+            "query Q { issues { nodes { id } pageInfo { hasNextPage } } }"
+        )
+        assert result is None
+
+
+# ── inject_subscription_filter (lines 513-521) ────────────────────
+
+
+class TestInjectSubscriptionFilter:
+    def test_injects_at_top_level_key(self):
+        from wizsec.utils import inject_subscription_filter
+
+        result = inject_subscription_filter({}, "subscriptionId", ["id-1"])
+        assert result == {"subscriptionId": ["id-1"]}
+
+    def test_injects_nested_key(self):
+        from wizsec.utils import inject_subscription_filter
+
+        result = inject_subscription_filter(
+            {"filterBy": {"severity": "HIGH"}},
+            "filterBy.subscriptionId",
+            ["id-1"],
+        )
+        assert result["filterBy"]["severity"] == "HIGH"
+        assert result["filterBy"]["subscriptionId"] == ["id-1"]
+
+    def test_creates_intermediate_dicts(self):
+        from wizsec.utils import inject_subscription_filter
+
+        result = inject_subscription_filter({}, "a.b.c", ["x"])
+        assert result["a"]["b"]["c"] == ["x"]
+
+    def test_does_not_mutate_original(self):
+        from wizsec.utils import inject_subscription_filter
+
+        original = {"filterBy": {"severity": "HIGH"}}
+        inject_subscription_filter(original, "filterBy.subscriptionId", ["id-1"])
+        assert "subscriptionId" not in original["filterBy"]
+
+    def test_overwrites_existing_non_dict_value(self):
+        from wizsec.utils import inject_subscription_filter
+
+        # When an intermediate key exists but isn't a dict, it gets replaced
+        result = inject_subscription_filter(
+            {"filterBy": "not-a-dict"},
+            "filterBy.subscriptionId",
+            ["id-1"],
+        )
+        assert result["filterBy"]["subscriptionId"] == ["id-1"]
+
+
+# ── write_credentials_to_file — error branches (lines 575-585) ────
+
+
+class TestWriteCredentialsErrors:
+    def test_io_error_raises_wiz_file_error(self, tmp_path, mock_config):
+        """IOError during write raises WizFileError."""
+        cred_file = tmp_path / "creds.ini"
+
+        with patch.object(mock_config, "serverless", return_value=False):
+            with patch("builtins.open", side_effect=IOError("permission denied")):
+                with pytest.raises(WizFileError, match="Failed to write credentials"):
+                    write_credentials_to_file("default", "id", "secret", str(cred_file))
+
+    def test_unexpected_error_raises_wiz_file_error(self, tmp_path, mock_config):
+        """Unexpected exceptions during write raise WizFileError."""
+        cred_file = tmp_path / "creds.ini"
+
+        with patch.object(mock_config, "serverless", return_value=False):
+            with patch("builtins.open", side_effect=RuntimeError("unexpected")):
+                with pytest.raises(WizFileError, match="Unexpected error"):
+                    write_credentials_to_file("default", "id", "secret", str(cred_file))
+
+
+# ── load_file_if_in_last_x_interval — file too old path (line 720) ──
+
+
+class TestLoadFileIfInLastXIntervalOld:
+    def test_file_modified_too_long_ago_returns_empty(self, tmp_path):
+        """File that was modified before the interval returns empty dict."""
+        json_file = tmp_path / "data.json"
+        # Must be > 1000 bytes
+        json_file.write_text(json.dumps({"old": True, "padding": "x" * 1100}))
+
+        # Pretend the file is old (modified 10 days ago)
+        old_time = (datetime.now() - timedelta(days=10)).timestamp()
+        import os
+
+        os.utime(str(json_file), (old_time, old_time))
+
+        result = load_file_if_in_last_x_interval(
+            str(tmp_path / "data"), interval_value=1, interval_type="days"
+        )
+        assert result == {}
+
+    def test_file_smaller_than_1000_bytes_returns_empty(self, tmp_path):
+        """File smaller than 1000 bytes returns empty dict even if recent."""
+        json_file = tmp_path / "data.json"
+        json_file.write_text(json.dumps({"small": True}))  # well under 1000 bytes
+
+        result = load_file_if_in_last_x_interval(
+            str(tmp_path / "data"), interval_value=1, interval_type="days"
+        )
+        assert result == {}

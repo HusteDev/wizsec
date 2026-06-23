@@ -1,7 +1,6 @@
 """Tests for _schema.py — SchemaValidator."""
 
 import json
-import threading
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -16,7 +15,8 @@ from wizsec.exceptions import WizSchemaValidationError
 
 def _make_test_schema():
     """Build a minimal GraphQL schema for testing."""
-    schema = build_schema("""
+    schema = build_schema(
+        """
         type Query {
             projects(first: Int, after: String): ProjectConnection!
             user(id: ID!): User
@@ -38,7 +38,8 @@ def _make_test_schema():
             hasNextPage: Boolean!
             endCursor: String
         }
-    """)
+    """
+    )
     return schema
 
 
@@ -154,15 +155,14 @@ class TestClear:
 class TestFetchAndCache:
     def test_successful_fetch(self, tmp_path):
         schema_data = _introspection_json()
-        mock_result = MagicMock()
-        mock_result.success.return_value = True
-        mock_result.data = {"__schema": schema_data}
-
         mock_response = MagicMock()
-        mock_response.submit.return_value = mock_result
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"data": {"__schema": schema_data}}
 
         mock_client = MagicMock()
-        mock_client.create_request.return_value = mock_response
+        mock_client._post.return_value = mock_response
+        mock_client._api_endpoint.return_value = "https://example.test/graphql"
+        mock_client._get_headers.return_value = {"Authorization": "Bearer token"}
 
         cache_file = tmp_path / "schema_fetch.json"
         with patch.object(
@@ -173,17 +173,55 @@ class TestFetchAndCache:
         assert schema is not None
         assert cache_file.exists()
         assert "fetch" not in SchemaValidator._fetching
+        mock_client._check_token.assert_called_once()
+        mock_client._post.assert_called_once()
 
-    def test_failed_fetch_returns_none(self):
-        mock_result = MagicMock()
-        mock_result.success.return_value = False
-        mock_result.errors = [{"message": "unauthorized"}]
-
+    def test_fetch_bypasses_validated_request_construction(self, tmp_path):
+        """Schema bootstrap must not create a normal WizRequest while validation is enabled."""
+        schema_data = _introspection_json()
         mock_response = MagicMock()
-        mock_response.submit.return_value = mock_result
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"data": {"__schema": schema_data}}
 
         mock_client = MagicMock()
-        mock_client.create_request.return_value = mock_response
+        mock_client._post.return_value = mock_response
+        mock_client._api_endpoint.return_value = "https://example.test/graphql"
+        mock_client._get_headers.return_value = {}
+        mock_client.create_request.side_effect = AssertionError(
+            "schema introspection must bypass create_request"
+        )
+
+        cache_file = tmp_path / "schema_fetch.json"
+        with patch.object(
+            SchemaValidator, "_schema_cache_path", return_value=cache_file
+        ):
+            schema = SchemaValidator.get_schema("fetch", client=mock_client)
+
+        assert schema is not None
+        mock_client.create_request.assert_not_called()
+
+    def test_failed_fetch_returns_none(self):
+        mock_response = MagicMock()
+        mock_response.status_code = 401
+        mock_response.text = "unauthorized"
+
+        mock_client = MagicMock()
+        mock_client._post.return_value = mock_response
+        mock_client._api_endpoint.return_value = "https://example.test/graphql"
+        mock_client._get_headers.return_value = {}
+
+        schema = SchemaValidator._fetch_and_cache("fail", mock_client)
+        assert schema is None
+
+    def test_fetch_with_graphql_errors_returns_none(self):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"errors": [{"message": "unauthorized"}]}
+
+        mock_client = MagicMock()
+        mock_client._post.return_value = mock_response
+        mock_client._api_endpoint.return_value = "https://example.test/graphql"
+        mock_client._get_headers.return_value = {}
 
         schema = SchemaValidator._fetch_and_cache("fail", mock_client)
         assert schema is None
@@ -194,7 +232,7 @@ class TestFetchAndCache:
         SchemaValidator._fetching.add("recursive")
         result = SchemaValidator.get_schema("recursive", client=mock_client)
         assert result is None
-        mock_client.create_request.assert_not_called()
+        mock_client._post.assert_not_called()
         SchemaValidator._fetching.discard("recursive")
 
 

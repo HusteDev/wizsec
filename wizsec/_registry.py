@@ -57,7 +57,10 @@ class EnvironmentState:
                 # mutation_service: 3/s sustained, no more than 1 per 333 ms
                 "mutation_service": [Rate(1, 333), Rate(3, Duration.SECOND)],
             }
-            self._limiters = {k: Limiter(rates) for k, rates in rate_configs.items()}
+            self._limiters = {
+                k: Limiter(rates, raise_when_fail=False)
+                for k, rates in rate_configs.items()
+            }
         return self._limiters
 
     def get_limiter(self, key: str) -> Limiter:

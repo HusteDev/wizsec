@@ -46,7 +46,13 @@ import pickle
 mimetypes.add_type("application/python-pickle", ".pkl")
 mimetypes.add_type("application/python-pickle", ".pickle")
 
-from .exceptions import WizFileError, WizConfigurationError
+from .exceptions import WizFileError, WizConfigurationError, WizCacheError
+from ._cache import (
+    CacheBackend,
+    get_configured_backend,
+    safe_write_json,
+    find_file_with_extension,
+)
 
 
 def disable_in_serverless(func: Callable[..., Any]) -> Callable[..., Any]:
@@ -69,49 +75,14 @@ def resource_path(relative_path: str) -> str:
     return os.path.join(os.path.abspath("."), relative_path)
 
 
-def safe_write_json(
-    data: Any,
-    filename: str,
-    save_path: Path,
-    temp_path: Union[str, Path] = DEFAULT_TEMP_FOLDER,
-) -> None:
-    """Write data as JSON atomically via a temp file, then move into place."""
-    logger = Config.get_logger()
-    original = Path(filename)
-    temp_filename = f"{original.stem}_temp{original.suffix}"
-    temp_file = Path(temp_path) / temp_filename
-
-    def serialize_object(obj: Any) -> Any:
-        """Fallback serializer for json.dump: use vars() or str()."""
-        try:
-            return vars(obj) if hasattr(obj, "__dict__") else str(obj)
-        except TypeError:
-            return str(obj)
-
-    try:
-        with open(temp_file, "w+") as file:
-            json.dump(data, file, indent=2, default=serialize_object)
-        shutil.move(temp_file, save_path / filename)
-    except Exception as e:
-        _, exc_value, exc_traceback = sys.exc_info()
-        tb = traceback.extract_tb(exc_traceback)
-        last_call = tb[-1]
-        logger.error("Safe Write Error - at line %s", last_call.lineno)
-        raise
-    finally:
-        temp_file = Path(temp_file)
-        if temp_file.exists():
-            temp_file.unlink()
-
-
-@disable_in_serverless
 def dump_to_json(
     data: Any,
     filename: Optional[str] = None,
     filepath: Optional[str] = None,
     retry: bool = True,
+    ttl_seconds: Optional[int] = None,
 ) -> None:
-    """Serialize data to a JSON (or pickle) file if saved_data is enabled."""
+    """Serialize data to a JSON (or pickle) file."""
     logger = Config.get_logger()
     try:
         logger.verbose("Attempting to dump_to_json")
@@ -121,114 +92,97 @@ def dump_to_json(
 
             logger = logging_init(Config, DEFAULT_WIZ_DIR, parse_filepath)
     if data:
-        allow_saved_data = Config.saved_data_enabled()
-        allow_pickle = Config.get("saved_data", "pickle", default=False)
+        allow_pickle = Config.cache_pickle_enabled()
 
-        if allow_saved_data:
-            configs_save, _ = parse_filepath(Config.saved_data_directory())
-            save_directory, extracted_filename = (
-                parse_filepath(filepath) if filepath else (configs_save, None)
-            )
-            if not save_directory.exists():
-                save_directory.mkdir(parents=True, exist_ok=True)
+        configs_save, _ = parse_filepath(Config.cache_directory())
+        save_directory, extracted_filename = (
+            parse_filepath(filepath) if filepath else (configs_save, None)
+        )
+        if not save_directory.exists():
+            save_directory.mkdir(parents=True, exist_ok=True)
 
-            configs_temp, _ = parse_filepath(
-                Config.get("saved_data", "temp", default=DEFAULT_TEMP_FOLDER)
-            )
-            temp_directory = (
-                Path(configs_temp)
-                if all([configs_temp, configs_temp.is_dir()])
-                else DEFAULT_TEMP_FOLDER
-            )
-            if not Path(temp_directory).exists():
-                Path(temp_directory).mkdir(parents=True, exist_ok=True)
+        temp_directory = Path(DEFAULT_TEMP_FOLDER)
+        if not temp_directory.exists():
+            temp_directory.mkdir(parents=True, exist_ok=True)
 
-            if save_directory.is_file() and filename:
-                save_directory = save_directory.parent
-                temp_directory = (
-                    temp_directory if temp_directory else save_directory / "temp"
-                )
+        if save_directory.is_file() and filename:
+            save_directory = save_directory.parent
 
-            if filename and not filepath:
-                save_directory = configs_save
-                temp_directory = (
-                    temp_directory if temp_directory else save_directory / "temp"
-                )
+        if filename and not filepath:
+            save_directory = configs_save
 
-            file_name = filename if filename else extracted_filename
-            if not file_name:
-                file_name = "dumpFile.json"
+        file_name = filename if filename else extracted_filename
+        if not file_name:
+            file_name = "dumpFile.json"
 
-            basename = Path(file_name).stem
+        basename = Path(file_name).stem
 
-            start = time.perf_counter()
-            while True:
-                try:
-                    if (
-                        Path(file_name).suffix == ".json"
-                        or sys.getsizeof(data) <= 100000
-                        or not allow_pickle
-                    ):
-                        result: Any = None
-                        if isinstance(data, (list, tuple)):
-                            if all([isinstance(row, list) for row in data]) and (
-                                len(data[0]) < len(set(data[0]))
-                            ):
-                                header_count: Dict[Any, int] = {}
-                                unique_headers = [
-                                    (
-                                        header
-                                        if header_count.setdefault(header, 0) == 0
-                                        else f"{header}_{header_count[header]}"
-                                    )
-                                    for header in data[0]
-                                    for header_count[header] in [
-                                        header_count.get(header, 0) + 1
-                                    ]
+        start = time.perf_counter()
+        while True:
+            try:
+                if (
+                    Path(file_name).suffix == ".json"
+                    or sys.getsizeof(data) <= 100000
+                    or not allow_pickle
+                ):
+                    result: Any = None
+                    if isinstance(data, (list, tuple)):
+                        if all([isinstance(row, list) for row in data]) and (
+                            len(data[0]) < len(set(data[0]))
+                        ):
+                            header_count: Dict[Any, int] = {}
+                            unique_headers = [
+                                (
+                                    header
+                                    if header_count.setdefault(header, 0) == 0
+                                    else f"{header}_{header_count[header]}"
+                                )
+                                for header in data[0]
+                                for header_count[header] in [
+                                    header_count.get(header, 0) + 1
                                 ]
-                                result = [
-                                    dict(
-                                        itertools.zip_longest(
-                                            unique_headers, row, fillvalue=None
-                                        )
+                            ]
+                            result = [
+                                dict(
+                                    itertools.zip_longest(
+                                        unique_headers, row, fillvalue=None
                                     )
-                                    for row in data[1:]
-                                ]
-                            data = {"data": result if result else data}
-                        safe_write_json(data, file_name, save_directory, temp_directory)
-                        logger.verbose("%s.json created", basename)
+                                )
+                                for row in data[1:]
+                            ]
+                        data = {"data": result if result else data}
+                    safe_write_json(data, file_name, save_directory, temp_directory)
+                    logger.verbose("%s.json created", basename)
+                else:
+                    if allow_pickle:
+                        logger.verbose("Object too large, saving as pickle instead")
+                        data = store_data(data, save_directory / f"{file_name}.pkl")
+                        logger.verbose("%s.pkl created", file_name)
                     else:
-                        if allow_pickle:
-                            logger.verbose("Object too large, saving as pickle instead")
-                            data = store_data(data, save_directory / f"{file_name}.pkl")
-                            logger.verbose("%s.pkl created", file_name)
-                        else:
-                            logger.warning(
-                                "File is very large [%s KB]. \n Recommend enabling pickle from the configuration file to save this file."
-                                % (sys.getsizeof(data) / 1024)
-                            )
-                    break
+                        logger.warning(
+                            "File is very large [%s KB]. \n Recommend enabling pickle from the configuration file to save this file."
+                            % (sys.getsizeof(data) / 1024)
+                        )
+                break
 
-                except PermissionError as pe:
-                    logger.error(
-                        f"Permission denied writing to {file_name}: {pe}", exc_info=True
-                    )
-                    raise WizFileError(f"Permission denied writing to {file_name}", pe)
+            except PermissionError as pe:
+                logger.error(
+                    f"Permission denied writing to {file_name}: {pe}", exc_info=True
+                )
+                raise WizFileError(f"Permission denied writing to {file_name}", pe)
 
-                except (IOError, OSError) as e:
-                    logger.error(f"I/O error writing {file_name}: {e}", exc_info=True)
-                    raise WizFileError(f"Failed to write {file_name}", e)
+            except (IOError, OSError) as e:
+                logger.error(f"I/O error writing {file_name}: {e}", exc_info=True)
+                raise WizFileError(f"Failed to write {file_name}", e)
 
-                except Exception as e:
-                    logger.error(
-                        f"Unexpected error writing {file_name}: {e}", exc_info=True
-                    )
-                    raise WizFileError(f"Unexpected error writing {file_name}", e)
+            except Exception as e:
+                logger.error(
+                    f"Unexpected error writing {file_name}: {e}", exc_info=True
+                )
+                raise WizFileError(f"Unexpected error writing {file_name}", e)
 
-            duration = return_formatted_duration(time.perf_counter() - start)
-            logger.debug(f"{file_name} export completed (Duration: {duration})")
-        else:
-            logger.info("saved_data not enabled")
+        duration = return_formatted_duration(time.perf_counter() - start)
+        logger.debug(f"{file_name} export completed (Duration: {duration})")
     else:
         logger.debug("No Data to save")
 
@@ -673,31 +627,48 @@ def determine_time_format(date_str: str) -> Optional[str]:
     return None
 
 
-def find_file_with_extension(filepath: str, extension_order: List[str]) -> str:
-    """Finds the first existing file with the specified extensions."""
-    path_dir, file_name = os.path.split(filepath)
-    filename, extension = os.path.splitext(file_name)
-
-    if extension:
-        full_path = os.path.join(path_dir, f"{filename}{extension}")
-        if os.path.exists(full_path):
-            return full_path
-    else:
-        for ext in extension_order:
-            full_path = os.path.join(path_dir, f"{filename}{ext}")
-            if os.path.exists(full_path):
-                return full_path
-    return ""
-
-
 def load_file_if_in_last_x_interval(
     filepath: str,
     interval_value: Optional[int] = None,
     interval_type: str = "days",
     extension_order: List[str] = [".pkl", ".json", ".csv"],
+    backend: Optional["CacheBackend"] = None,
 ) -> Any:
-    """Load a file only if it was modified within the given interval."""
+    """Load cached data only if it was stored within the given interval.
 
+    When a remote backend (S3, DynamoDB) is provided or configured, the
+    filepath is used as the cache key rather than a local path.  Pass
+    backend=False to force filesystem behaviour regardless of config.
+    """
+    resolved_backend: Optional["CacheBackend"] = None
+
+    if backend is False:
+        # Caller explicitly wants filesystem — fall through to legacy path
+        pass
+    elif backend is not None:
+        resolved_backend = backend
+    else:
+        if Config.get("cache", "allow_cache", default=False):
+            resolved_backend = get_configured_backend()
+
+    if resolved_backend is not None:
+        if interval_value is not None and interval_value < 0:
+            return {}
+
+        data, ts = resolved_backend.get(filepath)
+        if data is None:
+            return {}
+
+        if interval_value is None:
+            return data
+
+        if is_in_last_x_intervals(
+            ts, interval_value=interval_value, interval_type=interval_type
+        ):
+            return data
+        return {}
+
+    # --- Filesystem path (original behaviour) ---
     if interval_value:
         if interval_value < 0:
             return {}

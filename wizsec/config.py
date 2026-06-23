@@ -33,13 +33,22 @@ CURRENT_VERSION = wizsec_version
 
 # Increment this when the config file structure changes (fields added, renamed, removed).
 # Adding a migration function to _MIGRATIONS is required for each bump.
-CONFIG_SCHEMA_VERSION = 1
+CONFIG_SCHEMA_VERSION = 2
 
 # Keys are (from_schema, to_schema). Each function receives the in-memory config
 # dict, modifies it in place, and returns a list of human-readable change descriptions.
+
+
+def _migrate_v1_to_v2(config: Dict[str, Any]) -> List[str]:
+    """Rename top-level 'saved_data' config section to 'cache'."""
+    if "saved_data" in config:
+        config["cache"] = config.pop("saved_data")
+        return ["Renamed config section 'saved_data' to 'cache'"]
+    return []
+
+
 _MIGRATIONS: Dict[Tuple[int, int], Callable[[Dict[str, Any]], List[str]]] = {
-    # Example for a future schema bump:
-    # (1, 2): _migrate_v1_to_v2,
+    (1, 2): _migrate_v1_to_v2,
 }
 
 # _CONFIG = None
@@ -395,45 +404,26 @@ class Config:
         return filepath
 
     ############
-    # Save
+    # Cache
     ############
     @classmethod
     @ensure_loaded
-    def saved_data_enabled(cls) -> bool:
-        """Return whether saved data persistence is enabled."""
-        if cls.serverless():
-            return False
-        return cls.get("saved_data", "enabled", default=True)
-
-    @classmethod
-    @ensure_loaded
-    def saved_data_directory(cls) -> Path:
-        """Return the resolved directory path for saved data output."""
+    def cache_directory(cls) -> Path:
+        """Return the resolved directory path for filesystem cache output."""
         if cls.serverless():
             return Path("/tmp")
         filepath, _ = parse_filepath(
-            cls.get("saved_data", "directory", default=f"{CWD}/saved-data")
+            cls.get("cache", "directory", default=str(DEFAULT_WIZ_DIR / ".cache"))
         )
         return filepath
 
     @classmethod
     @ensure_loaded
-    def saved_data_temp_directory(cls) -> Path:
-        """Return the resolved temporary directory path for saved data."""
-        if cls.serverless():
-            return Path("/tmp")
-        filepath, _ = parse_filepath(
-            cls.get("saved_data", "temp", default=DEFAULT_TEMP_FOLDER)
-        )
-        return filepath
-
-    @classmethod
-    @ensure_loaded
-    def saved_data_pickle_enabled(cls) -> bool:
-        """Return whether pickle serialization is enabled for saved data."""
+    def cache_pickle_enabled(cls) -> bool:
+        """Return whether pickle serialization is enabled for filesystem cache."""
         if cls.serverless():
             return False
-        return cls.get("saved_data", "pickle", default=False)
+        return cls.get("cache", "pickle", default=False)
 
     ############
     # Auth

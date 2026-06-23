@@ -126,12 +126,18 @@ class SchemaValidator:
                 cls._schemas[environment] = schema
                 return schema
 
-            # Auto-fetch via introspection if a client is available
-            if client and environment not in cls._fetching:
-                schema = cls._fetch_and_cache(environment, client)
-                if schema:
-                    cls._schemas[environment] = schema
-                    return schema
+            # Avoid recursive validation while an introspection request is
+            # being constructed for this environment.
+            if not client or environment in cls._fetching:
+                return None
+
+        # Fetch outside _lock. Introspection performs network I/O and should not
+        # block other schema cache operations for the duration of the request.
+        schema = cls._fetch_and_cache(environment, client)
+        if schema:
+            with cls._lock:
+                cls._schemas[environment] = schema
+            return schema
 
         return None
 
@@ -200,24 +206,39 @@ class SchemaValidator:
     @classmethod
     def _fetch_and_cache(cls, environment: str, client: Any) -> Optional[GraphQLSchema]:
         """Fetch schema via introspection and cache to disk."""
-        cls._fetching.add(environment)
+        with cls._lock:
+            if environment in cls._fetching:
+                return None
+            cls._fetching.add(environment)
         try:
             logger.info("Fetching schema for '%s' via introspection...", environment)
-            response = client.create_request(
-                query=INTROSPECTION_QUERY,
-                paginate=False,
+            client._check_token()
+            response = client._post(
+                url=client._api_endpoint(),
+                headers=client._get_headers(),
+                json={"query": INTROSPECTION_QUERY, "variables": {}},
             )
-            result = response.submit()
 
-            if not result.success():
+            if response.status_code != 200:
                 logger.warning(
-                    "Introspection query failed for '%s': %s",
+                    "Introspection query failed for '%s' with status %s: %s",
                     environment,
-                    result.errors,
+                    response.status_code,
+                    response.text,
                 )
                 return None
 
-            schema_data = result.data.get("__schema")
+            response_data = response.json()
+            errors = response_data.get("errors", [])
+            if errors:
+                logger.warning(
+                    "Introspection query failed for '%s': %s",
+                    environment,
+                    errors,
+                )
+                return None
+
+            schema_data = (response_data.get("data") or {}).get("__schema")
             if not schema_data:
                 logger.warning(
                     "Introspection response missing __schema for '%s'", environment
@@ -237,4 +258,5 @@ class SchemaValidator:
             logger.warning("Failed to fetch schema for '%s': %s", environment, e)
             return None
         finally:
-            cls._fetching.discard(environment)
+            with cls._lock:
+                cls._fetching.discard(environment)

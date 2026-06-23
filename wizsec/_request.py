@@ -381,19 +381,83 @@ class WizRequest(_RequestBase):
         )
         self._done_event = threading.Event()
 
-    def submit(self) -> "WizRequest":
-        """Enqueue this request and wait for completion."""
+    def submit(
+        self,
+        allow_cache: bool = False,
+        cache_backend: Optional[Any] = None,
+        cache_interval: Optional[int] = None,
+        cache_interval_type: str = "days",
+        cache_ttl_seconds: Optional[int] = None,
+    ) -> "WizRequest":
+        """Enqueue this request and wait for completion.
+
+        Args:
+            allow_cache: Enable read-through/write-through caching for this request.
+                Falls back to cache.allow_cache in config when not set.
+            cache_backend: A pre-configured CacheBackend instance (S3Backend,
+                DynamoDBBackend, FilesystemBackend). When provided, overrides the
+                backend selected by config. Use this to supply specific credentials
+                or cross-account role assumptions at call time.
+            cache_interval: Max age (in cache_interval_type units) before the cached
+                result is considered stale and re-fetched. Falls back to
+                cache.default_interval in config.
+            cache_interval_type: Unit for cache_interval ('days', 'minutes', 'seconds').
+            cache_ttl_seconds: How long the backend should store this entry.
+                Meaningful for DynamoDB (sets item TTL); ignored by S3/filesystem.
+        """
+        use_cache = allow_cache or bool(
+            Config.get("cache", "allow_cache", default=False)
+        )
+        resolved_backend = None
+        cache_key = None
+
+        if (
+            use_cache
+            and self._current_query_info.get("request_type", "").lower() != "mutation"
+        ):
+            from ._cache import _build_cache_key, get_configured_backend
+            from .utils import load_file_if_in_last_x_interval
+
+            cache_key = _build_cache_key(self._query, self.vars)
+            resolved_backend = (
+                cache_backend if cache_backend is not None else get_configured_backend()
+            )
+            interval = (
+                cache_interval
+                if cache_interval is not None
+                else int(Config.get("cache", "default_interval", default=1))
+            )
+            interval_type = cache_interval_type or Config.get(
+                "cache", "default_interval_type", default="days"
+            )
+            cached = load_file_if_in_last_x_interval(
+                cache_key,
+                interval_value=interval,
+                interval_type=interval_type,
+                backend=resolved_backend,
+            )
+            if cached:
+                self.data = cached
+                return self
+
         if self._maybe_split():
             return self
 
         if Config.serverless():
-            # Skip threading in serverless mode
             self._client._enqueue_request(self)
-            return self
+        else:
+            self._done_event.clear()
+            self._client._enqueue_request(self)
+            self._done_event.wait()
 
-        self._done_event.clear()
-        self._client._enqueue_request(self)
-        self._done_event.wait()
+        if use_cache and resolved_backend and cache_key and self.data:
+            ttl = (
+                cache_ttl_seconds
+                if cache_ttl_seconds is not None
+                else int(Config.get("cache", "ttl_seconds", default=2592000))
+            )
+            resolved_backend.set(cache_key, self.data, ttl_seconds=ttl)
+
         return self
 
     def _maybe_split(self) -> bool:
@@ -454,7 +518,7 @@ class WizRequest(_RequestBase):
 
         total = _extract_totalcount(probe.data, source)
         threshold = Config.query_splitting_threshold()
-        self._logger.info(
+        self._logger.debug(
             "query_splitting: probe totalCount=%d (threshold=%d)", total, threshold
         )
 
@@ -479,7 +543,7 @@ class WizRequest(_RequestBase):
             )
             return False
 
-        self._logger.info(
+        self._logger.debug(
             "query_splitting: splitting query across %d entities (max_concurrent=%d)",
             len(entities),
             Config.query_splitting_max_concurrent(),
@@ -722,7 +786,7 @@ class WizRequest(_RequestBase):
                     return self
                 assert self.data is not None
                 if self.stream_report:
-                    self._logger.info("Streaming report")
+                    self._logger.debug("Streaming report")
                     self.data["report_data"] = list(
                         self._stream_report(
                             download_url,
@@ -732,7 +796,7 @@ class WizRequest(_RequestBase):
                         )
                     )
                 else:
-                    self._logger.info("Downloading full report")
+                    self._logger.debug("Downloading full report")
                     self.data["report_data"] = self._download_report(download_url)
                 return self
             time.sleep(self._client._query_retry_time)
@@ -765,7 +829,7 @@ class WizRequest(_RequestBase):
         chunk_size: int = 8192,
     ) -> Iterator[Any]:
         """Yield report rows/records line-by-line from a streaming download."""
-        self._logger.info(f"Streaming report: {report_name}")
+        self._logger.debug(f"Streaming report: {report_name}")
         with stream_get(download_url) as response:
             if response.status_code == 200:
                 content_type = response.headers.get("Content-Type", "")
@@ -1147,12 +1211,73 @@ class AsyncWizRequest(_RequestBase):
             on_page_event,
         )
 
-    async def submit(self) -> "AsyncWizRequest":
-        """Submit request asynchronously and return self on completion."""
+    async def submit(
+        self,
+        allow_cache: bool = False,
+        cache_backend: Optional[Any] = None,
+        cache_interval: Optional[int] = None,
+        cache_interval_type: str = "days",
+        cache_ttl_seconds: Optional[int] = None,
+    ) -> "AsyncWizRequest":
+        """Submit request asynchronously and return self on completion.
+
+        Args:
+            allow_cache: Enable read-through/write-through caching for this request.
+            cache_backend: A pre-configured CacheBackend instance. When provided,
+                overrides the backend selected by config — use this to supply
+                specific credentials or cross-account role assumptions at call time.
+            cache_interval: Max age before cached result is considered stale.
+            cache_interval_type: Unit for cache_interval ('days', 'minutes', 'seconds').
+            cache_ttl_seconds: Storage TTL for DynamoDB; ignored by S3/filesystem.
+        """
+        use_cache = allow_cache or bool(
+            Config.get("cache", "allow_cache", default=False)
+        )
+        resolved_backend = None
+        cache_key = None
+
+        if (
+            use_cache
+            and self._current_query_info.get("request_type", "").lower() != "mutation"
+        ):
+            from ._cache import _build_cache_key, get_configured_backend
+            from .utils import load_file_if_in_last_x_interval
+
+            cache_key = _build_cache_key(self._query, self.vars)
+            resolved_backend = (
+                cache_backend if cache_backend is not None else get_configured_backend()
+            )
+            interval = (
+                cache_interval
+                if cache_interval is not None
+                else int(Config.get("cache", "default_interval", default=1))
+            )
+            interval_type = cache_interval_type or Config.get(
+                "cache", "default_interval_type", default="days"
+            )
+            cached = load_file_if_in_last_x_interval(
+                cache_key,
+                interval_value=interval,
+                interval_type=interval_type,
+                backend=resolved_backend,
+            )
+            if cached:
+                self.data = cached
+                return self
+
         self._client._check_token()
         if await self._maybe_split_async():
             return self
         await self._execute_page()
+
+        if use_cache and resolved_backend and cache_key and self.data:
+            ttl = (
+                cache_ttl_seconds
+                if cache_ttl_seconds is not None
+                else int(Config.get("cache", "ttl_seconds", default=2592000))
+            )
+            resolved_backend.set(cache_key, self.data, ttl_seconds=ttl)
+
         return self
 
     async def _maybe_split_async(self) -> bool:
@@ -1205,7 +1330,7 @@ class AsyncWizRequest(_RequestBase):
 
         total = _extract_totalcount(probe.data, source)
         threshold = Config.query_splitting_threshold()
-        self._logger.info(
+        self._logger.debug(
             "query_splitting: async probe totalCount=%d (threshold=%d)",
             total,
             threshold,
@@ -1236,7 +1361,7 @@ class AsyncWizRequest(_RequestBase):
             )
             return False
 
-        self._logger.info(
+        self._logger.debug(
             "query_splitting: async splitting across %d entities", len(entities)
         )
 
