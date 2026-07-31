@@ -799,7 +799,9 @@ class WizRequest(_RequestBase):
         self._set_done_event()
 
     def _set_done_event(self) -> None:
-        """Set the done event if it exists."""
+        """Set the done event if it exists and signaling is not suppressed."""
+        if getattr(self, "_suppress_done_event", False):
+            return
         if hasattr(self, "_done_event"):
             self._done_event.set()
 
@@ -828,17 +830,15 @@ class WizRequest(_RequestBase):
         # This method runs on the environment queue worker thread. Polls
         # must call _execute_page() directly: submit() would enqueue onto
         # the same single-worker queue this thread is servicing and wait
-        # on it — a deadlock. The caller's done event is parked on a dummy
-        # until the report is fully attached, so per-poll completions
-        # don't wake the submitting thread early.
-        original_done_event = getattr(self, "_done_event", None)
-        if original_done_event is not None:
-            self._done_event = threading.Event()
+        # on it — a deadlock. Done-event signaling is suppressed (not
+        # swapped — the submitting thread reads the event attribute when
+        # it starts waiting) until the report is fully attached, so
+        # per-poll completions don't wake the submitting thread early.
+        self._suppress_done_event = True
         try:
             return self._poll_report_status()
         finally:
-            if original_done_event is not None:
-                self._done_event = original_done_event
+            self._suppress_done_event = False
             self._set_done_event()
 
     def _poll_report_status(self) -> Optional["WizRequest"]:
