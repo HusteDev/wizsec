@@ -7,7 +7,8 @@ The SDK uses a YAML config file at `~/.wiz/wiz.config`. If it doesn't exist, one
 ```yaml
 app:
   name: wizsec
-  release: 1.0.0
+  release: 1.1.0
+  config_schema: 2
   # serverless: false           # Lambda/serverless mode
   # wiz_dir: ""                 # Override ~/.wiz directory
   # env_path: ""                # Custom .env file directory
@@ -17,7 +18,7 @@ app:
 #   credentials:
 #     storage_method: file          # file | env | prompt
 #     file_path: ""                 # default: ~/.wiz/
-#   proxy:
+#   proxy:                          # blank URLs use environment proxies
 #     http:
 #       url: ""
 #       port: 80
@@ -32,6 +33,8 @@ app:
 #     enabled: false
 #   gov:
 #     enabled: true
+#   fedramp:
+#     enabled: false
 
 # api:
 #   max_retries: 5                  # retry attempts before failure
@@ -42,11 +45,16 @@ app:
 
 # reports:
 #   stream_by_default: true
-#   export_directory: ""            # default: working directory
-#   export_type: json               # json | csv
-#   retry_time: 30
-#   max_retries: 3
-#   polling_time: 15
+#   retry_time: 30                  # wait between retries after a failed status poll
+#   max_retries: 3                  # consecutive failed status polls before giving up
+#   polling_time: 15                # wait between status checks while a run is in progress
+
+# rate_limit:
+#   headroom: 0.8                   # fraction of Wiz's published limits to use locally
+#   overrides:                      # absolute requests/second per limiter key (wins over headroom)
+#     query_service: 8
+#   max_backoff_waits: 10           # consecutive server rate-limit waits before giving up
+#   default_retry_after: 10         # backoff seconds when no usable Retry-After is provided
 
 # logging:
 #   enabled: false
@@ -64,6 +72,8 @@ app:
 ```
 
 ## Runtime Configuration
+
+Existing v1 config files migrate to schema v2 automatically when `Config.load()` runs. Existing values are preserved.
 
 ### Changing Log Level
 
@@ -83,3 +93,5 @@ Config.set_log_level("DEBUG", handler_level="INFO")
 Config.get("api", "timeout", default=120)
 Config.get("domain", "default", default="gov")
 ```
+
+`Config.get()` preserves explicit falsy values such as `false`, `0`, and `""`; defaults are used only when a key is missing.

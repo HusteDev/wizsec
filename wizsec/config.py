@@ -22,6 +22,7 @@ from functools import wraps
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from .version import __version__ as wizsec_version
+from .exceptions import WizConfigurationError
 from ._logging import (
     logging_init as _logging_init,
     parse_level as _parse_level,
@@ -33,13 +34,51 @@ CURRENT_VERSION = wizsec_version
 
 # Increment this when the config file structure changes (fields added, renamed, removed).
 # Adding a migration function to _MIGRATIONS is required for each bump.
-CONFIG_SCHEMA_VERSION = 1
+CONFIG_SCHEMA_VERSION = 2
+
+
+def _migrate_v1_to_v2(config: Dict[str, Any]) -> List[str]:
+    """Populate v2 config defaults without overriding user-provided values."""
+    changes: List[str] = []
+
+    app = config.setdefault("app", {})
+    if "config_schema" not in app:
+        changes.append("Added app.config_schema")
+
+    api = config.setdefault("api", {})
+    if "auto_paginate" not in api:
+        api["auto_paginate"] = True
+        changes.append("Added api.auto_paginate (default: true)")
+
+    domain = config.setdefault("domain", {})
+    if "default" not in domain:
+        domain["default"] = "gov"
+        changes.append("Added domain.default (default: gov)")
+
+    for name, enabled in (("app", False), ("gov", True), ("fedramp", False)):
+        section = domain.setdefault(name, {})
+        if "enabled" not in section:
+            section["enabled"] = enabled
+            changes.append(f"Added domain.{name}.enabled (default: {enabled})")
+
+    auth = config.setdefault("auth", {})
+    proxy = auth.setdefault("proxy", {})
+    for scheme in ("http", "https"):
+        section = proxy.setdefault(scheme, {})
+        if "url" not in section:
+            section["url"] = ""
+            changes.append(f"Added auth.proxy.{scheme}.url")
+        if "port" not in section:
+            section["port"] = 80
+            changes.append(f"Added auth.proxy.{scheme}.port")
+
+    return changes
+
 
 # Keys are (from_schema, to_schema). Each function receives the in-memory config
 # dict, modifies it in place, and returns a list of human-readable change descriptions.
 _MIGRATIONS: Dict[Tuple[int, int], Callable[[Dict[str, Any]], List[str]]] = {
-    # Example for a future schema bump:
-    # (1, 2): _migrate_v1_to_v2,
+    (1, 2): _migrate_v1_to_v2,
 }
 
 # _CONFIG = None
@@ -76,7 +115,50 @@ def _update_config_schema_in_file(config_file_path: Path, schema_version: int) -
         return False
 
 
-def _run_migrations(config: Dict[str, Any], config_file_path: Path) -> None:
+def _ensure_config_line_after(
+    content: str, anchor_pattern: str, line_template: str, presence_pattern: str
+) -> str:
+    """Insert a single config line after an anchor when it is not already present."""
+    if re.search(presence_pattern, content, re.MULTILINE):
+        return content
+    return re.sub(
+        anchor_pattern,
+        lambda m: m.group(0) + line_template.format(indent=m.group(1)),
+        content,
+        count=1,
+    )
+
+
+def _update_config_v2_in_file(config_file_path: Path) -> bool:
+    """Apply text-preserving v2 config-file updates for existing user configs."""
+    try:
+        content = config_file_path.read_text(encoding="utf-8")
+        content = _ensure_config_line_after(
+            content,
+            r"(?m)^([# ]*)  timeout:[^\n]*\n",
+            "{indent}  auto_paginate: true               "
+            "# Automatically paginate through results | default = true\n",
+            r"^\s*#?\s*auto_paginate:",
+        )
+        content = _ensure_config_line_after(
+            content,
+            r"(?m)^([# ]*)  gov:\s*\n(?:\1    enabled:[^\n]*\n)?",
+            "{indent}  fedramp:\n{indent}    enabled: false\n",
+            r"^\s*#?\s*fedramp:",
+        )
+        content = content.replace(
+            "Custom Proxy Settings if necessary | default = use system settings",
+            "Custom Proxy Settings if necessary; blank URLs use environment proxies",
+        )
+        config_file_path.write_text(content, encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def _run_migrations(
+    config: Dict[str, Any], config_file_path: Optional[Path] = None
+) -> None:
     """Apply any pending config schema migrations and persist the updated file."""
     file_schema = int(config.get("app", {}).get("config_schema", 0))
     if file_schema >= CONFIG_SCHEMA_VERSION:
@@ -92,7 +174,10 @@ def _run_migrations(config: Dict[str, Any], config_file_path: Path) -> None:
         current = next_ver
 
     config.setdefault("app", {})["config_schema"] = CONFIG_SCHEMA_VERSION
-    _update_config_schema_in_file(config_file_path, CONFIG_SCHEMA_VERSION)
+    if config_file_path is not None:
+        _update_config_schema_in_file(config_file_path, CONFIG_SCHEMA_VERSION)
+        if file_schema < 2 <= CONFIG_SCHEMA_VERSION:
+            _update_config_v2_in_file(config_file_path)
 
     if all_changes:
         msg = f"Info: Config migrated to schema v{CONFIG_SCHEMA_VERSION}.\n"
@@ -170,12 +255,14 @@ class Config:
             if client_secret:
                 os.environ["WIZ_CLIENT_SECRET"] = client_secret
 
-            if not cls.serverless():
-                assert cls._CONFIG is not None
-                _config_file = path / filename if filename else None
-                if _config_file and _config_file.exists():
-                    _run_migrations(cls._CONFIG, _config_file)
+            assert cls._CONFIG is not None
+            _config_file = path / filename if filename else None
+            _run_migrations(
+                cls._CONFIG,
+                _config_file if _config_file and _config_file.exists() else None,
+            )
 
+            if not cls.serverless():
                 # CA Certificate
                 ca_file_path, filename = parse_filepath(
                     cls._CONFIG.get("auth", {}).get("ca_cert", "")
@@ -267,10 +354,17 @@ class Config:
             *keys: Sequence of keys to traverse in the config dict.
             default: Value returned when the key path is not found.
         """
+        if not keys:
+            return cls._CONFIG if cls._CONFIG is not None else default
+
         d = cls._CONFIG
         for key in keys:
-            d = d.get(key, {}) if isinstance(d, dict) else {}
-        result = d if d else default
+            if not isinstance(d, dict) or key not in d:
+                result = default
+                break
+            d = d[key]
+        else:
+            result = d
         if cls._logger:
             cls.get_logger().debug(f"get() called with keys={keys} -> {result}")
         return result
@@ -359,18 +453,6 @@ class Config:
     ############
     # App
     ############
-    @classmethod
-    @ensure_loaded
-    def app_name(cls) -> str:
-        """Return the configured application name."""
-        return cls.get("app", "name", default="wizsec")
-
-    @classmethod
-    @ensure_loaded
-    def release_version(cls) -> str:
-        """Return the configured release version string."""
-        return cls.get("app", "release", default="0.0.0")
-
     @classmethod
     def serverless(cls) -> bool:
         """Return whether the SDK is running in serverless mode."""
@@ -487,17 +569,18 @@ class Config:
         if cls.serverless():
             return {"https": os.environ.get("HTTPS_PROXY")}
         proxy_config = cls.get("auth", "proxy", default={})
+
+        def _proxy_url(scheme: str, env_var: str) -> Optional[str]:
+            section = proxy_config.get(scheme, {}) if proxy_config else {}
+            url = str(section.get("url", "") or "").strip()
+            port = section.get("port")
+            if not url:
+                return os.environ.get(env_var)
+            return f"{url}:{port}" if port else url
+
         return {
-            "http": (
-                f'{proxy_config.get("http", {}).get("url", "")}:{proxy_config.get("http", {}).get("port", "")}'
-                if proxy_config
-                else os.environ.get("HTTP_PROXY")
-            ),
-            "https": (
-                f'{proxy_config.get("https", {}).get("url", "")}:{proxy_config.get("https", {}).get("port", "")}'
-                if proxy_config
-                else os.environ.get("HTTPS_PROXY")
-            ),
+            "http": _proxy_url("http", "HTTP_PROXY"),
+            "https": _proxy_url("https", "HTTPS_PROXY"),
         }
 
     ############
@@ -517,6 +600,22 @@ class Config:
 
     @classmethod
     @ensure_loaded
+    def validate_domain(cls, env: str) -> str:
+        """Validate and return the root domain for a configured Wiz environment."""
+        root = cls.domain_root(env)
+        if root is None:
+            raise WizConfigurationError(
+                f"Unknown Wiz environment '{env}'. Valid options are: app, gov, fedramp."
+            )
+        if not cls.domain_enabled(env):
+            raise WizConfigurationError(
+                f"Wiz environment '{env}' is disabled in config. "
+                f"Enable domain.{env}.enabled to use it."
+            )
+        return root
+
+    @classmethod
+    @ensure_loaded
     def domain_root(cls, env: str) -> Optional[str]:
         """Return the root domain string for the given environment identifier."""
         root_domains = {
@@ -524,7 +623,7 @@ class Config:
             "gov": "gov.wiz.io",
             "fedramp": "app.wiz.us",
         }
-        return root_domains.get(env, root_domains.get(cls.default_domain()))
+        return root_domains.get(env)
 
     ############
     # API
@@ -549,6 +648,12 @@ class Config:
 
     @classmethod
     @ensure_loaded
+    def api_auto_paginate(cls) -> bool:
+        """Return whether requests should paginate by default."""
+        return cls.get("api", "auto_paginate", default=True)
+
+    @classmethod
+    @ensure_loaded
     def validate_queries(cls) -> bool:
         """Return whether GraphQL query validation is enabled."""
         return cls.get("api", "validate_queries", default=False)
@@ -561,22 +666,6 @@ class Config:
     def report_stream_by_default(cls) -> bool:
         """Return whether reports should stream results by default."""
         return cls.get("reports", "stream_by_default", default=True)
-
-    @classmethod
-    @ensure_loaded
-    def report_export_directory(cls) -> Path:
-        """Return the resolved directory path for report exports."""
-        filepath, _ = parse_filepath(
-            cls.get("reports", "export_directory", default=f"{CWD}")
-        )
-        cls.get_logger().debug(f"Resolved report export directory: {filepath}")
-        return filepath
-
-    @classmethod
-    @ensure_loaded
-    def report_export_type(cls) -> str:
-        """Return the default export format for reports."""
-        return cls.get("reports", "export_type", default="json")
 
     @classmethod
     @ensure_loaded
@@ -595,18 +684,6 @@ class Config:
     def report_polling_time(cls) -> int:
         """Return the polling interval in seconds for report status checks."""
         return cls.get("reports", "polling_time", default=15)
-
-    @classmethod
-    @ensure_loaded
-    def report_auto_cleanup(cls) -> bool:
-        """Return whether automatic report cleanup is enabled."""
-        return cls.get("reports", "auto_cleanup", default=False)
-
-    @classmethod
-    @ensure_loaded
-    def report_save_incomplete(cls) -> bool:
-        """Return whether incomplete reports should be saved to disk."""
-        return cls.get("reports", "save_incomplete_reports", default=True)
 
     ############
     # Logging
@@ -736,6 +813,75 @@ class Config:
     def query_splitting_cache_subscriptions(cls) -> bool:
         """Return whether the subscription/project list should be cached per session."""
         return cls.get("query_splitting", "cache_subscriptions", default=True)
+
+    ############
+    # Rate limiting
+    ############
+    @classmethod
+    @ensure_loaded
+    def rate_limit_headroom(cls) -> float:
+        """Return the fraction of Wiz's published rate limits to use locally.
+
+        Running below the published limits (default 0.8) leaves headroom for
+        network jitter and other consumers of the same tenant quota, keeping
+        normal operation clear of server-side 429s. Values above 1.0 are
+        honored but risk tripping the server limiter. Invalid or non-positive
+        values fall back to the default.
+        """
+        try:
+            headroom = float(cls.get("rate_limit", "headroom", default=0.8))
+        except (TypeError, ValueError):
+            return 0.8
+        if headroom <= 0:
+            return 0.8
+        return headroom
+
+    @classmethod
+    @ensure_loaded
+    def rate_limit_overrides(cls) -> Dict[str, float]:
+        """Return explicit requests-per-second overrides per limiter key.
+
+        Keys are limiter names (query_user, query_service, mutation_user,
+        mutation_service); values are requests per second. An override wins
+        over the headroom-scaled published limit for that key. Invalid or
+        non-positive values are ignored.
+        """
+        overrides = cls.get("rate_limit", "overrides", default={}) or {}
+        if not isinstance(overrides, dict):
+            return {}
+        result: Dict[str, float] = {}
+        for key, value in overrides.items():
+            try:
+                rps = float(value)
+            except (TypeError, ValueError):
+                continue
+            if rps > 0:
+                result[str(key)] = rps
+        return result
+
+    @classmethod
+    @ensure_loaded
+    def rate_limit_max_backoff_waits(cls) -> int:
+        """Return how many consecutive server rate-limit waits a request
+        tolerates before giving up. These waits do not consume API retry
+        attempts."""
+        try:
+            waits = int(cls.get("rate_limit", "max_backoff_waits", default=10))
+        except (TypeError, ValueError):
+            return 10
+        return waits if waits > 0 else 10
+
+    @classmethod
+    @ensure_loaded
+    def rate_limit_default_retry_after(cls) -> int:
+        """Return the backoff in seconds used when the server rate-limits
+        without a usable Retry-After value (missing, non-integer, or a
+        GraphQL-level rate-limit error inside a 200 response)."""
+        try:
+            seconds = int(cls.get("rate_limit", "default_retry_after", default=10))
+        except (TypeError, ValueError):
+            return 10
+        return seconds if seconds > 0 else 10
 
 
 def generate_default_config(

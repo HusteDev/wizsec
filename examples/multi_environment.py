@@ -5,6 +5,7 @@ Demonstrates:
 - Connecting to different Wiz tenants (app, gov)
 - Using multiple credential profiles on the same tenant
 - How shared-environment rate limiting works automatically
+- How auth state is isolated by environment + profile
 """
 
 from wizsec import WizClient, Config
@@ -13,6 +14,7 @@ Config.load()
 
 # --- Different environments ---
 # Each environment gets its own request queue and rate limiter.
+# The environment must be enabled in ~/.wiz/wiz.config first.
 
 app_client = WizClient(environment="app")
 gov_client = WizClient(environment="gov")
@@ -30,9 +32,9 @@ gov_result = gov_client.create_request(
 
 
 # --- Multiple profiles on the same environment ---
-# Both clients share the same queue and rate limiter (since they
-# target the same environment), but authenticate with separate
-# credentials.
+# Both clients share the same queue, rate limiter, and server backoff window
+# because they target the same environment, but authenticate with separate
+# profile state.
 
 admin_client = WizClient(environment="app", profile="admin")
 reader_client = WizClient(environment="app", profile="readonly")

@@ -16,7 +16,9 @@ Config.load()
 # Uses default environment from ~/.wiz/wiz.config
 client = WizClient()
 
-# Build and submit a paginated query
+# Build and submit a paginated query.
+# Pagination defaults to api.auto_paginate in ~/.wiz/wiz.config.
+# Pass paginate=False to create_request() to fetch only the first page.
 response = client.create_request(
     query="""
         query ListUsers($first: Int, $after: String) {

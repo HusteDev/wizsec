@@ -44,6 +44,12 @@ class TestEnvironmentState:
         with pytest.raises(ValueError, match="No limiter for key"):
             state.get_limiter("nonexistent")
 
+    def test_rate_backoff_tracks_remaining_deadline(self):
+        state = EnvironmentState("gov")
+        assert state.rate_backoff_remaining() == 0
+        state.set_rate_backoff(1)
+        assert state.rate_backoff_remaining() > 0
+
 
 class TestEnvironmentRegistry:
     def test_get_or_create_returns_same_instance(self):
@@ -116,17 +122,73 @@ class TestProfileState:
 
 class TestProfileRegistry:
     def test_get_or_create_returns_same_instance(self):
-        p1 = ProfileRegistry.get_or_create("default")
-        p2 = ProfileRegistry.get_or_create("default")
+        p1 = ProfileRegistry.get_or_create("gov", "default")
+        p2 = ProfileRegistry.get_or_create("gov", "default")
         assert p1 is p2
 
     def test_different_profiles(self):
-        a = ProfileRegistry.get_or_create("alpha")
-        b = ProfileRegistry.get_or_create("beta")
+        a = ProfileRegistry.get_or_create("gov", "alpha")
+        b = ProfileRegistry.get_or_create("gov", "beta")
+        assert a is not b
+
+    def test_same_profile_different_environment(self):
+        a = ProfileRegistry.get_or_create("gov", "default")
+        b = ProfileRegistry.get_or_create("app", "default")
         assert a is not b
 
     def test_cleanup(self):
-        ProfileRegistry.get_or_create("tmp")
-        ProfileRegistry.cleanup("tmp")
-        new_p = ProfileRegistry.get_or_create("tmp")
+        ProfileRegistry.get_or_create("gov", "tmp")
+        ProfileRegistry.cleanup("gov", "tmp")
+        new_p = ProfileRegistry.get_or_create("gov", "tmp")
         assert new_p.access_token is None
+
+
+class TestRateLimitBudgets:
+    def test_build_rates_spacing_interval(self):
+        from wizsec._registry import _build_rates
+
+        rates = _build_rates(8.0)
+        assert len(rates) == 1
+        assert rates[0].limit == 1
+        assert rates[0].interval == 125
+
+    def test_build_rates_preserves_fractional_budgets(self):
+        from wizsec._registry import _build_rates
+
+        assert _build_rates(2.4)[0].interval == 417
+
+    def test_build_rates_interval_floor(self):
+        from wizsec._registry import _build_rates
+
+        assert _build_rates(100000.0)[0].interval == 1
+
+    def test_limiters_apply_headroom_and_overrides(self):
+        from unittest.mock import patch
+
+        from wizsec._registry import PUBLISHED_RATE_LIMITS
+        from wizsec.config import Config
+
+        captured = []
+
+        def fake_build(rps):
+            from pyrate_limiter import Rate
+
+            captured.append(rps)
+            return [Rate(1, 10)]
+
+        with (
+            patch.object(Config, "rate_limit_headroom", return_value=0.5),
+            patch.object(
+                Config, "rate_limit_overrides", return_value={"query_service": 4.0}
+            ),
+            patch("wizsec._registry._build_rates", side_effect=fake_build),
+        ):
+            state = EnvironmentState("headroom-test")
+            limiters = state.limiters
+
+        expected = [
+            4.0 if key == "query_service" else published * 0.5
+            for key, published in PUBLISHED_RATE_LIMITS.items()
+        ]
+        assert captured == expected
+        assert set(limiters) == set(PUBLISHED_RATE_LIMITS)

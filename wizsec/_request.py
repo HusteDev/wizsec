@@ -20,10 +20,6 @@ import json
 import threading
 from typing import Optional, Dict, Any, List, Tuple, Union, Callable, Iterator
 
-try:
-    from pyrate_limiter import BucketFullException
-except ImportError:  # older 3.x releases don't re-export via __init__
-    from pyrate_limiter.exceptions import BucketFullException  # type: ignore[no-redef]
 from graphql import parse, GraphQLError
 import asyncio
 from .utils import (
@@ -36,7 +32,14 @@ from .utils import (
 from ._schema import SchemaValidator
 from .config import Config
 from .client import WizClient
-from .exceptions import WizQueryError, WizAPIError, WizReportError, WizTimeoutError
+from .exceptions import (
+    WizAPIError,
+    WizError,
+    WizQueryError,
+    WizRateLimitError,
+    WizReportError,
+    WizTimeoutError,
+)
 from ._transport import stream_get, get as transport_get, TransportError
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -60,6 +63,42 @@ query WizsecInternalProjects($first: Int, $after: String) {
   }
 }
 """
+
+
+# How long to sleep between attempts when the local limiter is full. Kept
+# short because the achieved request rate is roughly the limiter interval
+# plus one spin sleep (plus OS timer coarseness, ~16ms on Windows) — a long
+# spin silently undershoots the configured budget.
+_LIMITER_SPIN_SECONDS = 0.01
+
+# GraphQL APIs (including Wiz) may report rate limiting inside a 200 response's
+# errors list rather than via HTTP 429.
+_RATE_LIMIT_ERROR_CODES = {"RATE_LIMITED", "RATE_LIMIT_EXCEEDED", "TOO_MANY_REQUESTS"}
+
+# Report runs that ended without a downloadable result.
+_REPORT_TERMINAL_FAILURE_STATUSES = {"FAILED", "EXPIRED"}
+
+
+def _parse_retry_after(value: Any) -> int:
+    """Parse a Retry-After header value, falling back to the configured
+    default on missing or non-integer (e.g. HTTP-date) values."""
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return Config.rate_limit_default_retry_after()
+
+
+def _is_rate_limit_graphql_error(errors: List[Any]) -> bool:
+    """Return True if any GraphQL error in the list indicates rate limiting."""
+    for err in errors or []:
+        if not isinstance(err, dict):
+            continue
+        extensions = err.get("extensions") or {}
+        if str(extensions.get("code", "")).upper() in _RATE_LIMIT_ERROR_CODES:
+            return True
+        if "rate limit" in str(err.get("message", "")).lower():
+            return True
+    return False
 
 
 def _extract_totalcount(data: Optional[Dict[str, Any]], source: str) -> int:
@@ -118,10 +157,13 @@ def _get_cached_or_fetch_entities(client: Any) -> List[Dict[str, Any]]:
         fetch_req.submit()
 
         if not fetch_req.success() or fetch_req.data is None:
-            entities: List[Dict[str, Any]] = []
-        else:
-            entities = (fetch_req.data.get(node_key) or {}).get("nodes", [])
+            # Never cache a failed fetch — a transient error must not
+            # silently disable splitting for the rest of the session.
+            return []
 
+        entities: List[Dict[str, Any]] = (fetch_req.data.get(node_key) or {}).get(
+            "nodes", []
+        )
         if cache_enabled:
             env_state._cached_split_entities = entities
 
@@ -183,7 +225,7 @@ class _RequestBase:
         queryCollection: Optional[Union[str, Any]] = None,
         query: Optional[str] = None,
         vars: Optional[Dict[str, Any]] = None,
-        paginate: bool = True,
+        paginate: Optional[bool] = None,
         report_request: Optional[Dict[str, Any]] = None,
         on_page_event: Optional[Callable] = None,
     ) -> None:
@@ -193,9 +235,11 @@ class _RequestBase:
         self.vars = vars or {}
         self._response: Optional[Dict[str, Any]] = None
         self.errors: List[Dict[str, Any]] = []
+        self.error: Optional[WizError] = None
         self.data: Optional[Dict[str, Any]] = None
         self._status_code = None
-        self._paginate = paginate and not Config.serverless()
+        use_pagination = Config.api_auto_paginate() if paginate is None else paginate
+        self._paginate = use_pagination and not Config.serverless()
         self._report_request = report_request or {}
         self._page_event = on_page_event
         self._page = 0
@@ -365,7 +409,7 @@ class WizRequest(_RequestBase):
         queryCollection: Optional[Union[str, Any]] = None,
         query: Optional[str] = None,
         vars: Optional[Dict[str, Any]] = None,
-        paginate: bool = True,
+        paginate: Optional[bool] = None,
         report_request: Optional[Dict[str, Any]] = None,
         on_page_event: Optional[Callable] = None,
     ) -> None:
@@ -528,15 +572,46 @@ class WizRequest(_RequestBase):
         payload = {"query": self.query, "variables": self.vars}
         limiter = self._client._get_limiter(self._limiter_key)
 
+        rate_limit_waits = 0
         while retries <= self._client._max_retries:
             try:
-                limiter.try_acquire(self._limiter_key)
+                # Wait for any environment-wide server 429 backoff to clear,
+                # then acquire a local rate-limit slot. pyrate-limiter v4's
+                # try_acquire blocks until a slot is free and returns a bool.
+                # Neither wait consumes API retry attempts.
+                while True:
+                    remaining = self._client._env_state.rate_backoff_remaining()
+                    if remaining > 0:
+                        time.sleep(remaining)
+                        continue
+                    if not limiter.try_acquire(self._limiter_key):
+                        time.sleep(_LIMITER_SPIN_SECONDS)
+                        continue
+                    # A server backoff may have started while we were waiting
+                    # on the local limiter — never fire into that window.
+                    if self._client._env_state.rate_backoff_remaining() > 0:
+                        continue
+                    break
                 response = self._client._post(url=url, headers=headers, json=payload)
                 self._status_code = response.status_code
 
                 if response.status_code == 200:
+                    if self._graphql_rate_limited(response):
+                        wait_s = Config.rate_limit_default_retry_after()
+                        self._client._env_state.set_rate_backoff(wait_s)
+                        rate_limit_waits += 1
+                        if not self._wait_for_rate_limit(rate_limit_waits, wait_s):
+                            return
+                        continue
                     if self._process_successful_response(response, url, headers):
                         return
+                elif response.status_code == 429:
+                    wait_s = _parse_retry_after(response.headers.get("Retry-After"))
+                    self._client._env_state.set_rate_backoff(wait_s)
+                    rate_limit_waits += 1
+                    if not self._wait_for_rate_limit(rate_limit_waits, wait_s):
+                        return
+                    continue
                 else:
                     non_retryable = self._handle_failed_response(response)
                     self._logger.debug(f"Payload: {payload}")
@@ -562,7 +637,16 @@ class WizRequest(_RequestBase):
         """Process a successful HTTP response. Returns True if processing is complete."""
         self._response = response.json()
         assert self._response is not None
-        self.errors.extend(self._response.get("errors", []))
+        resp_errors = self._response.get("errors", [])
+        if not resp_errors and self.errors:
+            # Earlier attempts failed transiently but this one succeeded —
+            # those errors must not poison success() for the final result.
+            self._logger.debug(
+                "Clearing %d transient retry error(s) after successful attempt",
+                len(self.errors),
+            )
+            self.errors = []
+        self.errors.extend(resp_errors)
         page_data = self._response.get("data", {})
         self._merge_page(page_data)
 
@@ -641,12 +725,43 @@ class WizRequest(_RequestBase):
         self._clean_page_info()
         self._set_done_event()
 
+    def _graphql_rate_limited(self, response: Any) -> bool:
+        """Return True if a 200 response carries a GraphQL-level rate-limit error."""
+        try:
+            body = response.json()
+        except Exception:
+            return False
+        return _is_rate_limit_graphql_error((body or {}).get("errors", []))
+
+    def _wait_for_rate_limit(self, waits_so_far: int, wait_s: int) -> bool:
+        """Sleep out a server rate-limit window without consuming retries.
+
+        Returns False (and finalizes the request as failed) once the cap on
+        consecutive waits is exceeded, so a saturated tenant can't loop forever.
+        """
+        max_waits = Config.rate_limit_max_backoff_waits()
+        if waits_so_far > max_waits:
+            message = f"Rate limited by server; gave up after {max_waits} backoff waits"
+            self.errors.append({"message": message})
+            self.error = WizRateLimitError(message, retry_after=wait_s)
+            self._handle_final_failure()
+            return False
+        self._logger.warning(
+            "Rate limited by server — backing off %ds (wait %d/%d)",
+            wait_s,
+            waits_so_far,
+            max_waits,
+        )
+        time.sleep(wait_s)
+        return True
+
     def _handle_failed_response(self, response: Any) -> bool:
         """Handle failed HTTP response. Returns True for non-retryable errors (4xx)."""
         error_msg = f"Query failed with status {response.status_code}: {response.text}"
         self.errors.append({"message": response.text})
         self._logger.warning(error_msg)
-        # 4xx errors are client-side — retrying will never help
+        # 4xx errors are client-side — retrying will never help.
+        # 429 never reaches here; it is handled as a backoff in _execute_page.
         return 400 <= response.status_code < 500
 
     def _handle_network_error(
@@ -673,13 +788,20 @@ class WizRequest(_RequestBase):
     def _handle_final_failure(self) -> None:
         """Handle final failure after all retries exhausted."""
         last_error = self.errors[-1]["message"] if self.errors else "unknown error"
+        if self.error is None:
+            self.error = WizAPIError(
+                f"Query failed after {self._client._max_retries} retries: {last_error}",
+                status_code=self._status_code,
+            )
         self._logger.error(
             "Query failed after %d retries: %s", self._client._max_retries, last_error
         )
         self._set_done_event()
 
     def _set_done_event(self) -> None:
-        """Set the done event if it exists."""
+        """Set the done event if it exists and signaling is not suppressed."""
+        if getattr(self, "_suppress_done_event", False):
+            return
         if hasattr(self, "_done_event"):
             self._done_event.set()
 
@@ -693,18 +815,70 @@ class WizRequest(_RequestBase):
         return self._current_query_info.get("source", "") == "createReport"
 
     def _report_workflow(self, response: Any) -> Optional["WizRequest"]:
-        """Poll for report completion and download/stream the result."""
+        """Poll for report completion and download/stream the result.
+
+        Failed status polls are retried up to reports.max_retries with
+        reports.retry_time between attempts; healthy polls repeat every
+        reports.polling_time until the run reaches a terminal status.
+        """
         assert self._response is not None
         self._report_id = self._response["data"]["createReport"]["report"]["id"]
         self.query = """query ReportDownloadUrl($reportId: ID!) {report(id: $reportId) { name lastRun {url status progress runAt}}}"""
         self.vars = {"reportId": self._report_id}
+        self._paginate = False
 
+        # This method runs on the environment queue worker thread. Polls
+        # must call _execute_page() directly: submit() would enqueue onto
+        # the same single-worker queue this thread is servicing and wait
+        # on it — a deadlock. Done-event signaling is suppressed (not
+        # swapped — the submitting thread reads the event attribute when
+        # it starts waiting) until the report is fully attached, so
+        # per-poll completions don't wake the submitting thread early.
+        self._suppress_done_event = True
+        try:
+            return self._poll_report_status()
+        finally:
+            self._suppress_done_event = False
+            self._set_done_event()
+
+    def _poll_report_status(self) -> Optional["WizRequest"]:
+        """Poll the report status query until a terminal state is reached."""
+        max_failed_polls = Config.report_max_retries()
+        failed_polls = 0
         while True:
-            polling_response = self.submit()
+            # Each poll starts clean: a transient poll failure must not
+            # poison success() for later attempts, and stale page data from
+            # the creation mutation must not leak into the poll result.
+            self.errors = []
+            self.error = None
+            self.data = None
+            self._aggregated_data = None
+            self._execute_page()
+            polling_response = self
             if not polling_response.success():
-                self._logger.warning("Failed to get report download URL.")
-                time.sleep(self._client._query_retry_time)
+                failed_polls += 1
+                if failed_polls > max_failed_polls:
+                    self.errors.append(
+                        {
+                            "message": (
+                                "Report status polling failed after "
+                                f"{max_failed_polls} retries"
+                            )
+                        }
+                    )
+                    self._logger.error(
+                        "Report status polling failed after %d retries",
+                        max_failed_polls,
+                    )
+                    return self
+                self._logger.warning(
+                    "Failed to get report status (attempt %d/%d).",
+                    failed_polls,
+                    max_failed_polls,
+                )
+                time.sleep(Config.report_retry_time())
                 continue
+            failed_polls = 0
 
             assert polling_response.data is not None
             last_run = polling_response.data["report"]["lastRun"]
@@ -712,6 +886,13 @@ class WizRequest(_RequestBase):
             progress = last_run["progress"]
 
             self._logger.info(f"Report status: {status}, Progress: {progress}%")
+
+            if status in _REPORT_TERMINAL_FAILURE_STATUSES:
+                self.errors.append(
+                    {"message": f"Report run ended with status {status}"}
+                )
+                self._logger.error("Report run ended with status %s", status)
+                return self
 
             if status == "COMPLETED":
                 download_url = last_run["url"]
@@ -735,7 +916,7 @@ class WizRequest(_RequestBase):
                     self._logger.info("Downloading full report")
                     self.data["report_data"] = self._download_report(download_url)
                 return self
-            time.sleep(self._client._query_retry_time)
+            time.sleep(Config.report_polling_time())
 
     def _stream_report(
         self,
@@ -847,6 +1028,11 @@ class WizResponse:
         return self._request.errors
 
     @property
+    def error(self) -> Optional[WizError]:
+        """Return the typed exception recorded at final failure, if any."""
+        return self._request.error
+
+    @property
     def success(self) -> bool:
         """Return True if the underlying request succeeded."""
         return self._request.success()
@@ -855,6 +1041,18 @@ class WizResponse:
     def node_type(self) -> Optional[str]:
         """Return the GraphQL source/node type of the query."""
         return self._request._current_query_info.get("source", None)
+
+    def raise_on_error(self) -> "WizResponse":
+        """Raise the typed error if the request failed; return self otherwise."""
+        if self.success:
+            return self
+        if self._request.error is not None:
+            raise self._request.error
+        raise WizQueryError(
+            "Query failed",
+            query=getattr(self._request, "_query", None),
+            errors=self.errors,
+        )
 
     def submit(self) -> WizRequest:
         """Submit the underlying request and return it."""
@@ -889,7 +1087,7 @@ class WizBatchRequest:
         query: str,
         vars: Optional[Dict[str, Any]] = None,
         queryCollection: Optional[Union[str, Any]] = None,
-        paginate: bool = True,
+        paginate: Optional[bool] = None,
         **kwargs,
     ) -> int:
         """
@@ -1132,7 +1330,7 @@ class AsyncWizRequest(_RequestBase):
         queryCollection: Optional[Union[str, Any]] = None,
         query: Optional[str] = None,
         vars: Optional[Dict[str, Any]] = None,
-        paginate: bool = True,
+        paginate: Optional[bool] = None,
         report_request: Optional[Dict[str, Any]] = None,
         on_page_event: Optional[Callable] = None,
     ) -> None:
@@ -1149,7 +1347,9 @@ class AsyncWizRequest(_RequestBase):
 
     async def submit(self) -> "AsyncWizRequest":
         """Submit request asynchronously and return self on completion."""
-        self._client._check_token()
+        # Token checks do blocking network I/O on refresh — never run
+        # them directly on the event loop.
+        await asyncio.to_thread(self._client._check_token)
         if await self._maybe_split_async():
             return self
         await self._execute_page()
@@ -1274,64 +1474,71 @@ class AsyncWizRequest(_RequestBase):
         semaphore = getattr(self._client, "_async_semaphore", asyncio.Semaphore(10))
         limiter = self._client._get_limiter(self._limiter_key)
 
-        # Lazily attach a shared rate-ok event to the client so every
-        # coroutine in the same batch coordinates through one object.
-        # asyncio.Event must be created inside the running loop, so we
-        # can't do this at client construction time.
-        # Use isinstance rather than hasattr: MagicMock (used in tests)
-        # always returns True for hasattr, causing rate_ok.wait() to
-        # await a MagicMock instead of a real coroutine.
-        if not isinstance(getattr(self._client, "_rate_ok", None), asyncio.Event):
-            self._client._rate_ok = asyncio.Event()  # type: ignore[attr-defined]
-            self._client._rate_ok.set()  # type: ignore[attr-defined]
-        rate_ok: asyncio.Event = self._client._rate_ok  # type: ignore[attr-defined]
-
         while True:
             url = self._client._api_endpoint()
             headers = self._client._get_headers()
             payload = {"query": self.query, "variables": self.vars}
             retries = 0
+            rate_limit_waits = 0
             page_data = None
 
             while retries <= self._client._max_retries:
                 try:
-                    # Wait for any server-side 429 backoff to clear, then
-                    # acquire a local rate-limit slot — neither counts as a
-                    # retry so failures here never burn retry attempts.
+                    # Wait for any environment-wide server 429 backoff to
+                    # clear, then acquire a local rate-limit slot. The
+                    # non-blocking acquire keeps the event loop free (no
+                    # thread-pool workers parked inside the limiter) and
+                    # re-checks the shared backoff window on every spin.
+                    # Neither wait consumes API retry attempts.
                     while True:
-                        await rate_ok.wait()  # blocks while event is clear
-                        try:
-                            await asyncio.to_thread(
-                                limiter.try_acquire, self._limiter_key
-                            )
-                            break
-                        except BucketFullException:
-                            await asyncio.sleep(0.1)
+                        remaining = self._client._env_state.rate_backoff_remaining()
+                        if remaining > 0:
+                            await asyncio.sleep(remaining)
+                            continue
+                        if not limiter.try_acquire(self._limiter_key, blocking=False):
+                            await asyncio.sleep(_LIMITER_SPIN_SECONDS)
+                            continue
+                        if self._client._env_state.rate_backoff_remaining() > 0:
+                            continue
+                        break
 
                     async with semaphore:
                         response = await client.post(
                             url=url, json=payload, headers=headers
                         )
+                        self._status_code = response.status_code
                         if response.status_code == 200:
                             response_data = response.json()
-                            self.errors.extend(response_data.get("errors", []))
+                            resp_errors = response_data.get("errors", [])
+                            if resp_errors and _is_rate_limit_graphql_error(
+                                resp_errors
+                            ):
+                                wait_s = Config.rate_limit_default_retry_after()
+                                self._client._env_state.set_rate_backoff(wait_s)
+                                rate_limit_waits += 1
+                                if not await self._async_wait_for_rate_limit(
+                                    rate_limit_waits, wait_s
+                                ):
+                                    return
+                                continue
+                            if not resp_errors and self.errors:
+                                # Transient retry errors from earlier
+                                # attempts; this attempt succeeded.
+                                self.errors = []
+                            self.errors.extend(resp_errors)
                             page_data = response_data.get("data", {})
                             self._merge_page(page_data)
                             break
                         elif response.status_code == 429:
-                            # Pause every coroutine sharing this client by
-                            # clearing the event.  Only the first 429 winner
-                            # clears it; subsequent ones see it already clear
-                            # and just sleep for their own retry_after window.
-                            retry_after = int(response.headers.get("Retry-After", "10"))
-                            rate_ok.clear()
-                            self._logger.warning(
-                                f"Rate limited by server (429) — "
-                                f"backing off {retry_after}s"
+                            retry_after = _parse_retry_after(
+                                response.headers.get("Retry-After")
                             )
-                            retries += 1
-                            await asyncio.sleep(retry_after)
-                            rate_ok.set()  # unblocks all waiting coroutines
+                            self._client._env_state.set_rate_backoff(retry_after)
+                            rate_limit_waits += 1
+                            if not await self._async_wait_for_rate_limit(
+                                rate_limit_waits, retry_after
+                            ):
+                                return
                             continue
                         else:
                             error_msg = (
@@ -1353,6 +1560,15 @@ class AsyncWizRequest(_RequestBase):
                     await asyncio.sleep(self._client._query_retry_time * retries)
             else:
                 # All retries exhausted for this page
+                if self.error is None:
+                    last = (
+                        self.errors[-1]["message"] if self.errors else "unknown error"
+                    )
+                    self.error = WizAPIError(
+                        f"Query failed after {self._client._max_retries} "
+                        f"retries: {last}",
+                        status_code=self._status_code,
+                    )
                 return
 
             # If errors occurred, stop paginating
@@ -1385,6 +1601,32 @@ class AsyncWizRequest(_RequestBase):
                 self._clean_page_info()
                 return
 
+    async def _async_wait_for_rate_limit(self, waits_so_far: int, wait_s: int) -> bool:
+        """Async counterpart of WizRequest._wait_for_rate_limit.
+
+        Sleeps out a server rate-limit window without consuming retries;
+        returns False (recording an error) once the cap on consecutive waits
+        is exceeded.
+        """
+        max_waits = Config.rate_limit_max_backoff_waits()
+        if waits_so_far > max_waits:
+            message = f"Rate limited by server; gave up after {max_waits} backoff waits"
+            self.errors.append({"message": message})
+            self.error = WizRateLimitError(message, retry_after=wait_s)
+            self._logger.error(
+                "Rate limited by server; gave up after %d backoff waits",
+                max_waits,
+            )
+            return False
+        self._logger.warning(
+            "Rate limited by server — backing off %ds (wait %d/%d)",
+            wait_s,
+            waits_so_far,
+            max_waits,
+        )
+        await asyncio.sleep(wait_s)
+        return True
+
 
 class AsyncWizResponse:
     """Async wrapper for AsyncWizRequest with the same interface as WizResponse."""
@@ -1413,6 +1655,23 @@ class AsyncWizResponse:
         """Return the list of errors from the underlying request."""
         return self._request.errors
 
+    @property
+    def error(self) -> Optional[WizError]:
+        """Return the typed exception recorded at final failure, if any."""
+        return self._request.error
+
+    def raise_on_error(self) -> "AsyncWizResponse":
+        """Raise the typed error if the request failed; return self otherwise."""
+        if self.success:
+            return self
+        if self._request.error is not None:
+            raise self._request.error
+        raise WizQueryError(
+            "Query failed",
+            query=getattr(self._request, "_query", None),
+            errors=self.errors,
+        )
+
     def __repr__(self) -> str:
         """Return string representation with success status."""
         return f"<AsyncWizResponse success={self.success}>"
@@ -1438,7 +1697,7 @@ class AsyncWizBatchRequest:
         query: str,
         vars: Optional[Dict[str, Any]] = None,
         queryCollection: Optional[Union[str, Any]] = None,
-        paginate: bool = True,
+        paginate: Optional[bool] = None,
         **kwargs,
     ) -> int:
         """Add request to batch"""
@@ -1472,7 +1731,11 @@ class AsyncWizBatchRequest:
             index: int, request: AsyncWizRequest
         ) -> Tuple[int, AsyncWizResponse]:
             async with semaphore:
-                await request.submit()
+                try:
+                    await request.submit()
+                except Exception as e:
+                    self._logger.error(f"Async batch request {index} failed: {e}")
+                    request.errors.append({"message": f"Batch execution failed: {e}"})
                 response = AsyncWizResponse(request)
 
                 if self._progress_callback:
@@ -1484,13 +1747,10 @@ class AsyncWizBatchRequest:
         tasks = [execute_request(i, req) for i, req in enumerate(self._requests)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Process results
         response_map: Dict[int, "AsyncWizResponse"] = {}
         for result in results:
             if isinstance(result, BaseException):
                 self._logger.error(f"Batch request failed: {result}")
-                # Create failed response
-                # This would need error handling logic
             else:
                 index, response = result
                 response_map[index] = response

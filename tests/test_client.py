@@ -17,6 +17,7 @@ from wizsec._registry import EnvironmentRegistry, ProfileRegistry
 from wizsec.exceptions import (
     WizAuthenticationError,
     WizAPIError,
+    WizConfigurationError,
     WizCredentialsError,
     WizTimeoutError,
 )
@@ -259,6 +260,24 @@ class TestRequestCreation:
             result = mock_client.create_request(query="{ viewer { id } }")
         MockReq.assert_called_once()
         MockResp.assert_called_once()
+
+    def test_create_request_uses_config_auto_paginate_default(self, mock_client):
+        with (
+            patch.object(Config, "api_auto_paginate", return_value=False),
+            patch("wizsec._request.WizRequest") as MockReq,
+            patch("wizsec._request.WizResponse"),
+        ):
+            mock_client.create_request(query="{ viewer { id } }")
+        assert MockReq.call_args.kwargs["paginate"] is False
+
+    def test_create_request_explicit_paginate_overrides_config(self, mock_client):
+        with (
+            patch.object(Config, "api_auto_paginate", return_value=False),
+            patch("wizsec._request.WizRequest") as MockReq,
+            patch("wizsec._request.WizResponse"),
+        ):
+            mock_client.create_request(query="{ viewer { id } }", paginate=True)
+        assert MockReq.call_args.kwargs["paginate"] is True
 
     def test_create_batch_request_returns_batch(self, mock_client):
         with patch("wizsec._request.WizBatchRequest") as MockBatch:
@@ -676,7 +695,7 @@ class TestCleanupForLambda:
             patch.object(EnvironmentRegistry, "cleanup") as ec,
         ):
             mock_client.cleanup_for_lambda()
-        pc.assert_called_once_with("test")
+        pc.assert_called_once_with("gov", "test")
         ec.assert_called_once_with("gov")
 
     def test_cleanup_noop_when_not_serverless(self, mock_client):
@@ -688,6 +707,30 @@ class TestCleanupForLambda:
             mock_client.cleanup_for_lambda()
         pc.assert_not_called()
         ec.assert_not_called()
+
+    def test_disabled_domain_raises(self, mock_config):
+        from wizsec.client import WizClient
+
+        WizClient._clients.clear()
+        with (
+            patch("wizsec.client.WizClient._preload_credentials"),
+            patch("wizsec.client.WizClient._initialize_headers"),
+        ):
+            with pytest.raises(WizConfigurationError):
+                WizClient(environment="fedramp", profile="disabled_test")
+        WizClient._clients.clear()
+
+    def test_unknown_domain_raises(self, mock_config):
+        from wizsec.client import WizClient
+
+        WizClient._clients.clear()
+        with (
+            patch("wizsec.client.WizClient._preload_credentials"),
+            patch("wizsec.client.WizClient._initialize_headers"),
+        ):
+            with pytest.raises(WizConfigurationError):
+                WizClient(environment="unknown", profile="unknown_test")
+        WizClient._clients.clear()
 
 
 # ===================================================================

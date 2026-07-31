@@ -30,6 +30,7 @@ def mock_wiz_client(mock_config):
     client._max_retries = 2
     client._is_service_account = True
     client._limiter_key.return_value = "query_service"
+    client._env_state.rate_backoff_remaining.return_value = 0
 
     # Mock the limiter to be a no-op
     mock_limiter = MagicMock()
