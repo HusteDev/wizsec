@@ -1,6 +1,7 @@
 """Tests for _schema.py — SchemaValidator."""
 
 import json
+import threading
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -8,6 +9,7 @@ import pytest
 from graphql import build_client_schema, introspection_from_schema, build_schema
 
 from wizsec._schema import SchemaValidator, INTROSPECTION_QUERY
+from wizsec.config import Config
 from wizsec.exceptions import WizSchemaValidationError
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -15,8 +17,7 @@ from wizsec.exceptions import WizSchemaValidationError
 
 def _make_test_schema():
     """Build a minimal GraphQL schema for testing."""
-    schema = build_schema(
-        """
+    schema = build_schema("""
         type Query {
             projects(first: Int, after: String): ProjectConnection!
             user(id: ID!): User
@@ -38,8 +39,7 @@ def _make_test_schema():
             hasNextPage: Boolean!
             endCursor: String
         }
-    """
-    )
+    """)
     return schema
 
 
@@ -135,6 +135,10 @@ class TestGetSchema:
         ):
             schema = SchemaValidator.get_schema("bad")
         assert schema is None
+
+    def test_schema_cache_path_uses_configured_wiz_dir(self, mock_config, tmp_path):
+        Config.set("app", "wiz_dir", value=str(tmp_path))
+        assert SchemaValidator._schema_cache_path("gov") == tmp_path / "schema_gov.json"
 
 
 class TestClear:
@@ -242,3 +246,97 @@ class TestIntrospectionQuery:
 
         doc = parse(INTROSPECTION_QUERY)
         assert len(doc.definitions) > 0
+
+
+class TestGetSchemaReentrancyAndServerless:
+    def test_reentrant_validation_during_fetch_does_not_deadlock(self, tmp_path):
+        """The introspection request's own query validation re-enters
+        get_schema on the same thread; this must not deadlock."""
+        client = MagicMock()
+        client.environment = "reentrant-env"
+
+        def create_request(query=None, paginate=None, **kw):
+            # Mirrors the real query setter: validating the introspection
+            # query itself calls back into get_schema on this thread.
+            SchemaValidator.validate_query(query, "reentrant-env", client=client)
+            result = MagicMock()
+            result.success.return_value = False
+            result.errors = []
+            response = MagicMock()
+            response.submit.return_value = result
+            return response
+
+        client.create_request = create_request
+
+        outcome = {}
+
+        def run():
+            with patch.object(Config, "wiz_dir", return_value=tmp_path):
+                outcome["schema"] = SchemaValidator.get_schema("reentrant-env", client)
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        t.join(5)
+        assert not t.is_alive(), "get_schema deadlocked on re-entrant validation"
+        assert outcome["schema"] is None
+
+    def test_serverless_never_introspects(self, tmp_path):
+        client = MagicMock()
+        with (
+            patch.object(Config, "wiz_dir", return_value=tmp_path),
+            patch.object(Config, "serverless", return_value=True),
+        ):
+            assert SchemaValidator.get_schema("srvless-env", client) is None
+        client.create_request.assert_not_called()
+
+    def test_serverless_still_loads_bundled_cache(self, tmp_path):
+        """A pre-bundled schema_<env>.json must keep working in serverless."""
+        cache_file = tmp_path / "schema_bundled-env.json"
+        cache_file.write_text(json.dumps(_introspection_json()))
+        client = MagicMock()
+        with (
+            patch.object(Config, "wiz_dir", return_value=tmp_path),
+            patch.object(Config, "serverless", return_value=True),
+        ):
+            schema = SchemaValidator.get_schema("bundled-env", client)
+        assert schema is not None
+        client.create_request.assert_not_called()
+
+    def test_failed_fetch_is_not_retried_per_request(self, tmp_path):
+        """A failed introspection is remembered for the session instead of
+        being re-attempted on every request."""
+        response = MagicMock()
+        response.status_code = 403
+        response.text = "forbidden"
+        client = MagicMock()
+        client._post.return_value = response
+        client._api_endpoint.return_value = "https://example.test/graphql"
+        client._get_headers.return_value = {}
+
+        with patch.object(Config, "wiz_dir", return_value=tmp_path):
+            assert SchemaValidator.get_schema("negcache-env", client) is None
+            assert SchemaValidator.get_schema("negcache-env", client) is None
+
+        assert client._post.call_count == 1
+
+    def test_cache_write_failure_still_returns_schema(self, tmp_path):
+        """A read-only or full filesystem must not discard a fetched schema."""
+        schema_data = _introspection_json()
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {"data": {"__schema": schema_data}}
+        client = MagicMock()
+        client._post.return_value = response
+        client._api_endpoint.return_value = "https://example.test/graphql"
+        client._get_headers.return_value = {}
+
+        read_only = tmp_path / "missing" / "nested"
+        with patch.object(
+            SchemaValidator,
+            "_schema_cache_path",
+            return_value=read_only / "schema_x.json",
+        ):
+            with patch("wizsec._schema.open", side_effect=OSError("read-only")):
+                schema = SchemaValidator._fetch_and_cache("rofs-env", client)
+
+        assert schema is not None

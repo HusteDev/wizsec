@@ -11,8 +11,34 @@
 
 import queue
 import threading
-from typing import Any, Dict, List, Optional
-from pyrate_limiter import Duration, Limiter, Rate
+import time
+from typing import Any, Dict, List, Optional, Tuple
+from pyrate_limiter import Limiter, Rate
+
+# Wiz's published per-tenant rate limits (requests/second) by request type
+# and account type. Local limiters run at a configurable fraction of these
+# (rate_limit.headroom, default 0.8) so normal operation stays clear of
+# server-side 429s; explicit per-key rate_limit.overrides win over the
+# headroom scaling.
+PUBLISHED_RATE_LIMITS: Dict[str, float] = {
+    "query_user": 100.0,
+    "query_service": 10.0,
+    "mutation_user": 10.0,
+    "mutation_service": 3.0,
+}
+
+
+def _build_rates(rps: float) -> List[Rate]:
+    """Build the Rate list for a requests-per-second budget.
+
+    A single spacing rate (1 request per interval) both enforces the
+    sustained budget and prevents the token bucket from releasing all
+    tokens at once (burst), which is what triggers server-side 429s.
+    Fractional budgets are preserved via the interval (e.g. 2.4/s ->
+    1 request per 417 ms).
+    """
+    interval_ms = max(1, round(1000.0 / rps))
+    return [Rate(1, interval_ms)]
 
 
 class EnvironmentState:
@@ -36,30 +62,25 @@ class EnvironmentState:
         # None = not yet fetched; [] = fetch returned empty; list = cached results.
         self._cached_split_entities: Optional[List[Dict[str, Any]]] = None
         self._split_entities_lock: threading.Lock = threading.Lock()
+        self._rate_backoff_lock: threading.Lock = threading.Lock()
+        self._rate_backoff_until: float = 0.0
 
     @property
     def limiters(self) -> Dict[str, Limiter]:
-        """Lazily initialize and return the per-request-type rate limiters."""
+        """Lazily initialize and return the per-request-type rate limiters.
+
+        Effective budgets are the published Wiz limits scaled by the
+        configured headroom fraction, unless an explicit per-key override
+        is configured.
+        """
         if self._limiters is None:
-            # Limiter accepts List[Rate] as its first argument; multiple
-            # Rate objects in a list are AND-ed together so both constraints
-            # must have capacity before a slot is granted.  Using a fast
-            # per-interval rate alongside the sustained cap prevents the
-            # token bucket from releasing all tokens at once (burst), which
-            # is what triggers server-side 429s.
-            rate_configs: Dict[str, List[Rate]] = {
-                # query_user: 100/s sustained, no more than 1 per 10 ms
-                "query_user": [Rate(1, 10), Rate(100, Duration.SECOND)],
-                # query_service: 10/s sustained, no more than 1 per 100 ms
-                "query_service": [Rate(1, 100), Rate(10, Duration.SECOND)],
-                # mutation_user: 10/s sustained, no more than 1 per 100 ms
-                "mutation_user": [Rate(1, 100), Rate(10, Duration.SECOND)],
-                # mutation_service: 3/s sustained, no more than 1 per 333 ms
-                "mutation_service": [Rate(1, 333), Rate(3, Duration.SECOND)],
-            }
+            from .config import Config  # local import to avoid a cycle
+
+            headroom = Config.rate_limit_headroom()
+            overrides = Config.rate_limit_overrides()
             self._limiters = {
-                k: Limiter(rates, raise_when_fail=False)
-                for k, rates in rate_configs.items()
+                key: Limiter(_build_rates(overrides.get(key, published * headroom)))
+                for key, published in PUBLISHED_RATE_LIMITS.items()
             }
         return self._limiters
 
@@ -69,6 +90,18 @@ class EnvironmentState:
         if limiter is None:
             raise ValueError(f"No limiter for key: {key}")
         return limiter
+
+    def set_rate_backoff(self, retry_after: int) -> None:
+        """Set a shared environment-level server backoff deadline."""
+        with self._rate_backoff_lock:
+            self._rate_backoff_until = max(
+                self._rate_backoff_until, time.monotonic() + retry_after
+            )
+
+    def rate_backoff_remaining(self) -> float:
+        """Return remaining shared server backoff seconds for this environment."""
+        with self._rate_backoff_lock:
+            return max(0.0, self._rate_backoff_until - time.monotonic())
 
 
 class EnvironmentRegistry:
@@ -143,22 +176,24 @@ class ProfileRegistry:
     ProfileState for a given profile name.
     """
 
-    _profiles: Dict[str, ProfileState] = {}
+    _profiles: Dict[Tuple[str, str], ProfileState] = {}
     _lock = threading.Lock()
 
     @classmethod
-    def get_or_create(cls, profile: str) -> ProfileState:
+    def get_or_create(cls, environment: str, profile: str) -> ProfileState:
         """Return the auth state for the profile, creating it if needed."""
+        key = (environment, profile)
         with cls._lock:
-            if profile not in cls._profiles:
-                cls._profiles[profile] = ProfileState(profile)
-            return cls._profiles[profile]
+            if key not in cls._profiles:
+                cls._profiles[key] = ProfileState(profile)
+            return cls._profiles[key]
 
     @classmethod
-    def cleanup(cls, profile: str) -> None:
+    def cleanup(cls, environment: str, profile: str) -> None:
         """Clean up a specific profile's state."""
+        key = (environment, profile)
         with cls._lock:
-            state = cls._profiles.pop(profile, None)
+            state = cls._profiles.pop(key, None)
             if state:
                 state.clear()
 

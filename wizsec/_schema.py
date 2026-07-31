@@ -24,7 +24,7 @@ from graphql import (
     IntrospectionQuery,
 )
 
-from .config import Config, DEFAULT_WIZ_DIR
+from .config import Config
 from .exceptions import WizSchemaValidationError
 
 logger = logging.getLogger("wizsec._schema")
@@ -104,8 +104,12 @@ class SchemaValidator:
     """
 
     _schemas: dict[str, GraphQLSchema] = {}
-    _lock = threading.Lock()
+    # RLock: fetching the schema builds a WizRequest whose query setter
+    # re-enters get_schema on the same thread (validate_queries, or the
+    # splitting detector). A plain Lock deadlocks on that re-entry.
+    _lock = threading.RLock()
     _fetching: set[str] = set()  # prevents recursive introspection
+    _fetch_failed: set[str] = set()  # avoids re-introspecting every request
 
     @classmethod
     def get_schema(
@@ -126,18 +130,22 @@ class SchemaValidator:
                 cls._schemas[environment] = schema
                 return schema
 
-            # Avoid recursive validation while an introspection request is
-            # being constructed for this environment.
-            if not client or environment in cls._fetching:
-                return None
-
-        # Fetch outside _lock. Introspection performs network I/O and should not
-        # block other schema cache operations for the duration of the request.
-        schema = cls._fetch_and_cache(environment, client)
-        if schema:
-            with cls._lock:
-                cls._schemas[environment] = schema
-            return schema
+            # Auto-fetch via introspection if a client is available.
+            # Never in serverless (the bundle is read-only — ship a
+            # pre-generated schema_<env>.json instead), never re-entrantly
+            # (the introspection request itself lands back here), and not
+            # again this session after a failed fetch.
+            if (
+                client
+                and not Config.serverless()
+                and environment not in cls._fetching
+                and environment not in cls._fetch_failed
+            ):
+                schema = cls._fetch_and_cache(environment, client)
+                if schema:
+                    cls._schemas[environment] = schema
+                    return schema
+                cls._fetch_failed.add(environment)
 
         return None
 
@@ -174,13 +182,15 @@ class SchemaValidator:
         with cls._lock:
             if environment:
                 cls._schemas.pop(environment, None)
+                cls._fetch_failed.discard(environment)
             else:
                 cls._schemas.clear()
+                cls._fetch_failed.clear()
 
     @classmethod
     def _schema_cache_path(cls, environment: str) -> Path:
         """Return the filesystem path for the cached schema JSON."""
-        return DEFAULT_WIZ_DIR / f"schema_{environment}.json"
+        return Config.wiz_dir() / f"schema_{environment}.json"
 
     @classmethod
     def _load_from_cache(cls, environment: str) -> Optional[GraphQLSchema]:
@@ -205,11 +215,15 @@ class SchemaValidator:
 
     @classmethod
     def _fetch_and_cache(cls, environment: str, client: Any) -> Optional[GraphQLSchema]:
-        """Fetch schema via introspection and cache to disk."""
-        with cls._lock:
-            if environment in cls._fetching:
-                return None
-            cls._fetching.add(environment)
+        """Fetch schema via introspection and cache to disk.
+
+        Deliberately uses the client's raw transport instead of
+        create_request(): building a normal WizRequest here would re-enter
+        query validation and the splitting detector while the schema lock
+        is held. The one-off introspection call must never recurse into
+        the schema machinery it is bootstrapping.
+        """
+        cls._fetching.add(environment)
         try:
             logger.info("Fetching schema for '%s' via introspection...", environment)
             client._check_token()
@@ -221,42 +235,47 @@ class SchemaValidator:
 
             if response.status_code != 200:
                 logger.warning(
-                    "Introspection query failed for '%s' with status %s: %s",
+                    "Introspection query failed for '%s': HTTP %s",
                     environment,
                     response.status_code,
-                    response.text,
                 )
                 return None
 
-            response_data = response.json()
-            errors = response_data.get("errors", [])
-            if errors:
+            body = response.json() or {}
+            if body.get("errors"):
                 logger.warning(
                     "Introspection query failed for '%s': %s",
                     environment,
-                    errors,
+                    body["errors"],
                 )
                 return None
 
-            schema_data = (response_data.get("data") or {}).get("__schema")
+            schema_data = (body.get("data") or {}).get("__schema")
             if not schema_data:
                 logger.warning(
                     "Introspection response missing __schema for '%s'", environment
                 )
                 return None
 
-            # Cache to disk
-            cache_path = cls._schema_cache_path(environment)
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(cache_path, "w") as f:
-                json.dump(schema_data, f, indent=2)
-            logger.info("Cached schema for '%s' to %s", environment, cache_path)
+            schema = build_client_schema({"__schema": schema_data})
 
-            return build_client_schema({"__schema": schema_data})
+            # Cache to disk — best effort; a read-only or full filesystem
+            # must not discard the schema we just fetched.
+            try:
+                cache_path = cls._schema_cache_path(environment)
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(cache_path, "w") as f:
+                    json.dump(schema_data, f, indent=2)
+                logger.info("Cached schema for '%s' to %s", environment, cache_path)
+            except OSError as e:
+                logger.warning(
+                    "Could not write schema cache for '%s': %s", environment, e
+                )
+
+            return schema
 
         except Exception as e:
             logger.warning("Failed to fetch schema for '%s': %s", environment, e)
             return None
         finally:
-            with cls._lock:
-                cls._fetching.discard(environment)
+            cls._fetching.discard(environment)

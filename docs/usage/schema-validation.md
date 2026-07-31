@@ -14,7 +14,7 @@ api:
 ## How It Works
 
 1. On first use, the SDK runs an introspection query to fetch the full Wiz schema
-2. The schema is cached to `~/.wiz/schema_{environment}.json`
+2. The schema is cached to `{app.wiz_dir}/schema_{environment}.json`
 3. Every query is validated against the schema before being sent
 
 If validation fails, a `WizSchemaValidationError` is raised with details:
@@ -58,10 +58,10 @@ SchemaValidator.clear("gov")
 SchemaValidator.clear()
 ```
 
-Delete the cache file to force a fresh introspection on next use:
+Delete the cache file from the configured `app.wiz_dir` to force a fresh introspection on next use:
 
 ```bash
-rm ~/.wiz/schema_gov.json
+rm ~/.wiz/schema_gov.json  # or {app.wiz_dir}/schema_gov.json if wiz_dir is customized
 ```
 
 ## Programmatic Validation

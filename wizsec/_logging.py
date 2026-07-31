@@ -178,11 +178,14 @@ def logging_init(
     if config.serverless():
         return _init_lambda_logger(base_level)
 
-    logger = logging.getLogger(name)
-    if logger.hasHandlers():
-        return logger
-
     logger = logging.getLogger(BASE_LOGGER_NAME)
+
+    # Only short-circuit when *we* already configured this logger. Deciding
+    # based on hasHandlers() alone is nondeterministic: any handler attached
+    # by the host application or test machinery would make init silently
+    # ignore the config it was handed.
+    if getattr(logger, "_baselogger_initialized", False) and logger.hasHandlers():
+        return logger
 
     if not config.logging_enabled():
         logger.handlers.clear()

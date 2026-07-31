@@ -16,8 +16,7 @@ client = WizClient()
 
 # ─── 1. Enable validation via config ───────────────────────────────
 # You can also set this in ~/.wiz/wiz.config under api.validate_queries
-Config._CONFIG["api"] = Config._CONFIG.get("api", {})
-Config._CONFIG["api"]["validate_queries"] = True
+Config.set("api", "validate_queries", value=True)
 
 
 # ─── 2. Valid query — passes validation silently ────────────────────
@@ -84,9 +83,12 @@ except WizSchemaValidationError as e:
 # ─── 5. Programmatic validation (no request needed) ────────────────
 print("\n=== Programmatic Validation ===")
 queries_to_check = [
-    ("Valid",   "query { projects { nodes { id } pageInfo { hasNextPage endCursor } } }"),
+    ("Valid", "query { projects { nodes { id } pageInfo { hasNextPage endCursor } } }"),
     ("Invalid", "query { fakeEndpoint { data } }"),
-    ("Valid",   "query { users { nodes { id name email } pageInfo { hasNextPage endCursor } } }"),
+    (
+        "Valid",
+        "query { users { nodes { id name email } pageInfo { hasNextPage endCursor } } }",
+    ),
 ]
 
 for label, query in queries_to_check:
