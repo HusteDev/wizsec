@@ -411,13 +411,61 @@ The schema is cached under the configured `app.wiz_dir` as `schema_<env>.json` a
 
 See [`examples/schema_validation.py`](examples/schema_validation.py) for more examples.
 
+## Streaming Pagination
+
+Auto-pagination aggregates every page in memory before returning. For large result sets, iterate instead — `iterate_nodes` fetches pages lazily and never holds more than one page:
+
+```python
+for issue in client.iterate_nodes(query=ISSUES_QUERY, vars={"first": 500}):
+    process(issue)          # breaking out early stops further API calls
+
+async with client.async_session() as ac:
+    async for issue in ac.iterate_nodes_async(query=ISSUES_QUERY, page_size=500):
+        process(issue)
+```
+
+Each page goes through the normal rate-limiting and retry pipeline; a failed page raises the typed error (`WizAPIError`, `WizRateLimitError`, …).
+
 ## Rate Limiting
 
 The SDK automatically enforces Wiz's API rate limits so you don't have to think about throttling. Rate limiters are shared across all `WizClient` instances on the same environment, even across different profiles.
 
-Limits are applied per request type (query vs. mutation) and account type (user vs. service account), matching [Wiz's published rate limits](https://docs.wiz.io/wiz-docs/docs/rate-limiting).
+Limits are applied per request type (query vs. mutation) and account type (user vs. service account), based on [Wiz's published rate limits](https://docs.wiz.io/wiz-docs/docs/rate-limiting).
 
-Local limiter waits and server `429` backoffs are handled automatically. Async clients on the same environment share the same server backoff window.
+By default the SDK runs at **80% of the published limits**. The headroom keeps normal operation clear of server-side `429`s — the server's quota is per tenant, so network jitter and other consumers (other scripts, CI jobs, integrations) draw from the same budget. Both the headroom and the absolute rates are configurable:
+
+```yaml
+rate_limit:
+  headroom: 0.8            # fraction of published limits to use (default 0.8)
+  overrides:               # optional absolute requests-per-second per limiter key
+    query_service: 8       # wins over headroom for that key
+```
+
+Local limiter waits and server `429` backoffs are handled automatically and never consume retry attempts. Rate-limit responses reported inside a `200` response's GraphQL `errors` list are detected and backed off the same way. Async clients on the same environment share the same server backoff window.
+
+Note that the local limiter coordinates requests within a single Python process. Separate processes each apply their own budget, so if you run several wizsec processes in parallel against one tenant, lower the headroom (or set explicit overrides) accordingly.
+
+## CLI
+
+Installing the package registers a `wizsec` command for managing configuration and credentials:
+
+```bash
+wizsec config init            # create a default config file (~/.wiz/wiz.config)
+wizsec config show            # print the current config
+wizsec config get api.timeout
+wizsec config set rate_limit.headroom 0.7
+wizsec config unset query_splitting.enabled
+
+wizsec creds set --profile default --environment gov   # prompts for ID/secret
+wizsec creds list             # profiles with masked IDs (secrets never shown)
+wizsec creds remove staging
+wizsec creds test             # authenticate with stored credentials
+
+wizsec doctor                 # diagnose config, credentials, rate budgets, schema caches
+wizsec doctor --auth          # same, plus a live authentication check
+```
+
+All commands accept `--file` to operate on a non-default location. `config set` rewrites the YAML file, which drops comments — see the bundled template for documentation of every option.
 
 ## Configuration
 
@@ -520,16 +568,25 @@ The SDK provides a structured exception hierarchy:
 | `WizFileError`               | File I/O error                                               |
 | `WizServerlessError`         | Serverless-specific failure                                  |
 
-```python
-from wizsec import WizAuthenticationError, WizRateLimitError
+`submit()` never raises for API-level failures — inspect the response instead. Failed requests carry a typed exception on `response.error` (`WizRateLimitError` when the server rate limit won, `WizAPIError` with `status_code` otherwise), and `response.raise_on_error()` converts a failure into that exception:
 
-try:
-    result = response.submit()
-except WizRateLimitError as e:
-    print(f"Rate limited — retry after {e.retry_after}s")
-except WizAuthenticationError as e:
-    print(f"Auth failed: {e}")
+```python
+from wizsec import WizRateLimitError
+
+response = client.create_request(query=QUERY, vars={"first": 100})
+result = response.submit()
+
+if not response.success:
+    if isinstance(response.error, WizRateLimitError):
+        print(f"Rate limited — retry after {response.error.retry_after}s")
+    else:
+        print(f"Failed: {response.errors}")
+
+# or, exception-style:
+response.raise_on_error()
 ```
+
+`iterate_nodes` raises the typed error directly, since an iterator has no response object to inspect.
 
 ## Development
 
