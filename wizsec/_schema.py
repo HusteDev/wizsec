@@ -104,8 +104,12 @@ class SchemaValidator:
     """
 
     _schemas: dict[str, GraphQLSchema] = {}
-    _lock = threading.Lock()
+    # RLock: fetching the schema builds a WizRequest whose query setter
+    # re-enters get_schema on the same thread (validate_queries, or the
+    # splitting detector). A plain Lock deadlocks on that re-entry.
+    _lock = threading.RLock()
     _fetching: set[str] = set()  # prevents recursive introspection
+    _fetch_failed: set[str] = set()  # avoids re-introspecting every request
 
     @classmethod
     def get_schema(
@@ -126,12 +130,22 @@ class SchemaValidator:
                 cls._schemas[environment] = schema
                 return schema
 
-            # Auto-fetch via introspection if a client is available
-            if client and environment not in cls._fetching:
+            # Auto-fetch via introspection if a client is available.
+            # Never in serverless (the bundle is read-only — ship a
+            # pre-generated schema_<env>.json instead), never re-entrantly
+            # (the introspection request itself lands back here), and not
+            # again this session after a failed fetch.
+            if (
+                client
+                and not Config.serverless()
+                and environment not in cls._fetching
+                and environment not in cls._fetch_failed
+            ):
                 schema = cls._fetch_and_cache(environment, client)
                 if schema:
                     cls._schemas[environment] = schema
                     return schema
+                cls._fetch_failed.add(environment)
 
         return None
 
@@ -168,8 +182,10 @@ class SchemaValidator:
         with cls._lock:
             if environment:
                 cls._schemas.pop(environment, None)
+                cls._fetch_failed.discard(environment)
             else:
                 cls._schemas.clear()
+                cls._fetch_failed.clear()
 
     @classmethod
     def _schema_cache_path(cls, environment: str) -> Path:
@@ -207,6 +223,9 @@ class SchemaValidator:
                 query=INTROSPECTION_QUERY,
                 paginate=False,
             )
+            # Mark as a sub-request so query splitting never probes the
+            # introspection query itself.
+            response._request._is_sub_request = True
             result = response.submit()
 
             if not result.success():
@@ -224,14 +243,22 @@ class SchemaValidator:
                 )
                 return None
 
-            # Cache to disk
-            cache_path = cls._schema_cache_path(environment)
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(cache_path, "w") as f:
-                json.dump(schema_data, f, indent=2)
-            logger.info("Cached schema for '%s' to %s", environment, cache_path)
+            schema = build_client_schema({"__schema": schema_data})
 
-            return build_client_schema({"__schema": schema_data})
+            # Cache to disk — best effort; a read-only or full filesystem
+            # must not discard the schema we just fetched.
+            try:
+                cache_path = cls._schema_cache_path(environment)
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(cache_path, "w") as f:
+                    json.dump(schema_data, f, indent=2)
+                logger.info("Cached schema for '%s' to %s", environment, cache_path)
+            except OSError as e:
+                logger.warning(
+                    "Could not write schema cache for '%s': %s", environment, e
+                )
+
+            return schema
 
         except Exception as e:
             logger.warning("Failed to fetch schema for '%s': %s", environment, e)

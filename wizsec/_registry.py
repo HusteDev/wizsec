@@ -13,7 +13,32 @@ import queue
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
-from pyrate_limiter import Duration, Limiter, Rate
+from pyrate_limiter import Limiter, Rate
+
+# Wiz's published per-tenant rate limits (requests/second) by request type
+# and account type. Local limiters run at a configurable fraction of these
+# (rate_limit.headroom, default 0.8) so normal operation stays clear of
+# server-side 429s; explicit per-key rate_limit.overrides win over the
+# headroom scaling.
+PUBLISHED_RATE_LIMITS: Dict[str, float] = {
+    "query_user": 100.0,
+    "query_service": 10.0,
+    "mutation_user": 10.0,
+    "mutation_service": 3.0,
+}
+
+
+def _build_rates(rps: float) -> List[Rate]:
+    """Build the Rate list for a requests-per-second budget.
+
+    A single spacing rate (1 request per interval) both enforces the
+    sustained budget and prevents the token bucket from releasing all
+    tokens at once (burst), which is what triggers server-side 429s.
+    Fractional budgets are preserved via the interval (e.g. 2.4/s ->
+    1 request per 417 ms).
+    """
+    interval_ms = max(1, round(1000.0 / rps))
+    return [Rate(1, interval_ms)]
 
 
 class EnvironmentState:
@@ -42,25 +67,21 @@ class EnvironmentState:
 
     @property
     def limiters(self) -> Dict[str, Limiter]:
-        """Lazily initialize and return the per-request-type rate limiters."""
+        """Lazily initialize and return the per-request-type rate limiters.
+
+        Effective budgets are the published Wiz limits scaled by the
+        configured headroom fraction, unless an explicit per-key override
+        is configured.
+        """
         if self._limiters is None:
-            # Limiter accepts List[Rate] as its first argument; multiple
-            # Rate objects in a list are AND-ed together so both constraints
-            # must have capacity before a slot is granted.  Using a fast
-            # per-interval rate alongside the sustained cap prevents the
-            # token bucket from releasing all tokens at once (burst), which
-            # is what triggers server-side 429s.
-            rate_configs: Dict[str, List[Rate]] = {
-                # query_user: 100/s sustained, no more than 1 per 10 ms
-                "query_user": [Rate(1, 10), Rate(100, Duration.SECOND)],
-                # query_service: 10/s sustained, no more than 1 per 100 ms
-                "query_service": [Rate(1, 100), Rate(10, Duration.SECOND)],
-                # mutation_user: 10/s sustained, no more than 1 per 100 ms
-                "mutation_user": [Rate(1, 100), Rate(10, Duration.SECOND)],
-                # mutation_service: 3/s sustained, no more than 1 per 333 ms
-                "mutation_service": [Rate(1, 333), Rate(3, Duration.SECOND)],
+            from .config import Config  # local import to avoid a cycle
+
+            headroom = Config.rate_limit_headroom()
+            overrides = Config.rate_limit_overrides()
+            self._limiters = {
+                key: Limiter(_build_rates(overrides.get(key, published * headroom)))
+                for key, published in PUBLISHED_RATE_LIMITS.items()
             }
-            self._limiters = {k: Limiter(rates) for k, rates in rate_configs.items()}
         return self._limiters
 
     def get_limiter(self, key: str) -> Limiter:

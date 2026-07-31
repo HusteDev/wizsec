@@ -45,15 +45,25 @@ app:
 #   auto_paginate: true               # Automatically paginate through results | default = true
 #   validate_queries: false           # Validate queries against cached Wiz schema before sending | default = false
 
+# rate_limit:
+#   headroom: 0.8                     # Fraction of Wiz's published rate limits to use locally | default = 0.8
+#                                     # Running below the published limits leaves room for network jitter and
+#                                     # other consumers of the same tenant quota (other scripts, CI, integrations)
+#   overrides:                        # Explicit requests-per-second per limiter key (wins over headroom)
+#     query_user: 80                  # Published: 100/s
+#     query_service: 8                # Published: 10/s
+#     mutation_user: 8                # Published: 10/s
+#     mutation_service: 2.4           # Published: 3/s
+#   max_backoff_waits: 10             # Consecutive server rate-limit waits before a request gives up | default = 10
+#                                     # These waits never consume api.max_retries attempts
+#   default_retry_after: 10           # Backoff seconds when the server rate-limits without a usable
+#                                     # Retry-After value | default = 10
+
 # reports:
 #   stream_by_default: true           # Streaming reports download reports automatically | default = true
-#   export_directory: ""              # Path to save report export files | default = working_directory
-#   export_type: json                 # Valid Options [json, csv]
-#   retry_time: 30                    # Time between attempts to generate a new report | default = 30
-#   max_retries: 3                    # Max attempts to run report before reporting failure | default = 3
-#   polling_time: 15                  # Time between attempts to check report status | default = 15
-#   auto_cleanup: false               # Removes any reports sent to /temp. Deletes old Reports from Wiz
-#   save_incomplete_reports: true     # Save partial reports if at least 1 page is successfully retrieved before error
+#   retry_time: 30                    # Wait between retries after a failed report status poll | default = 30
+#   max_retries: 3                    # Max consecutive failed status polls before giving up | default = 3
+#   polling_time: 15                  # Time between report status checks while a run is in progress | default = 15
 
 # query_splitting:
 #   enabled: false                    # Enable pre-emptive totalCount probe + auto splitting | default = false

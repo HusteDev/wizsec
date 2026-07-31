@@ -3,7 +3,7 @@
 Targets the uncovered branches in:
   - AsyncWizRequest._execute_page()  (rate limiting, 429, timeout, pagination)
   - AsyncWizBatchRequest             (add_request, submit, progress, exceptions)
-  - WizRequest._execute_page()       (4xx non-retryable, BucketFullException path)
+  - WizRequest._execute_page()       (4xx non-retryable, local limiter full path)
   - _extract_totalcount / _schema_supports_totalcount / _merge_split_results
   - AsyncWizResponse                 (properties, repr)
   - WizBatchRequest._submit_concurrent / _wait_for_completion (timeout path)
@@ -54,7 +54,7 @@ def mock_client(mock_config):
     client._env_state.rate_backoff_remaining.return_value = 0
 
     mock_limiter = MagicMock()
-    mock_limiter.try_acquire = MagicMock(return_value=None)
+    mock_limiter.try_acquire = MagicMock(return_value=True)
     client._get_limiter.return_value = mock_limiter
 
     return client
@@ -292,27 +292,22 @@ class TestHandleFailedResponseRetryLogic:
 
 
 # ---------------------------------------------------------------------------
-# WizRequest._execute_page  (BucketFullException path)
+# WizRequest._execute_page  (local limiter full path)
 # ---------------------------------------------------------------------------
 
 
 class TestExecutePageBucketFull:
-    def test_bucket_full_exception_waits_without_recording_error(self, mock_client):
-        """BucketFullException from the local limiter waits without poisoning success."""
-
-        class BucketFullException(Exception):
-            pass
-
+    def test_limiter_full_waits_without_recording_error(self, mock_client):
+        """A full local limiter (try_acquire -> False) waits without poisoning success."""
         mock_client._check_token.return_value = None
         mock_client._api_endpoint.return_value = "https://api.wiz.io/graphql"
         mock_client._get_headers.return_value = {}
 
         call_count = [0]
 
-        def try_acquire_side_effect(key):
+        def try_acquire_side_effect(key, **kwargs):
             call_count[0] += 1
-            if call_count[0] < 3:
-                raise BucketFullException("bucket full")
+            return call_count[0] >= 3
 
         mock_limiter = MagicMock()
         mock_limiter.try_acquire.side_effect = try_acquire_side_effect
@@ -746,7 +741,10 @@ class TestAsyncExecutePage:
 
     @pytest.mark.asyncio
     async def test_async_429_sets_environment_backoff(self, mock_client):
-        """429 responses set shared environment backoff state."""
+        """429 responses set shared environment backoff without consuming retries."""
+        from wizsec.config import Config
+
+        max_waits = Config.rate_limit_max_backoff_waits()
         req = _make_async_req(mock_client, paginate=False)
         mock_client._max_retries = 0
 
@@ -756,24 +754,25 @@ class TestAsyncExecutePage:
         )
         with patch("wizsec._request.asyncio.sleep", new_callable=AsyncMock):
             await req._execute_page()
-        mock_client._env_state.set_rate_backoff.assert_called_once_with(10)
+        # Backoff is set on every 429; persistence is bounded by the wait cap
+        # (not by max_retries), and giving up records an explicit error.
+        mock_client._env_state.set_rate_backoff.assert_called_with(10)
+        assert (
+            mock_client._env_state.set_rate_backoff.call_count == max_waits + 1
+        )
+        assert any("gave up" in e["message"] for e in req.errors)
 
     @pytest.mark.asyncio
-    async def test_bucket_full_exception_spins(self, mock_client):
-        """BucketFullException from async limiter causes a spin-wait (sleep 0.1)."""
-
-        class BucketFullException(Exception):
-            pass
-
+    async def test_limiter_full_spins(self, mock_client):
+        """A full async limiter (try_acquire -> False) causes a short spin-wait."""
         req = _make_async_req(mock_client, paginate=False)
 
-        # Limiter raises BucketFullException twice then succeeds
+        # Limiter reports full twice then grants a slot
         acquire_calls = [0]
 
-        def try_acquire(key):
+        def try_acquire(key, **kwargs):
             acquire_calls[0] += 1
-            if acquire_calls[0] < 3:
-                raise BucketFullException("bucket full")
+            return acquire_calls[0] >= 3
 
         mock_limiter = MagicMock()
         mock_limiter.try_acquire = try_acquire
@@ -794,9 +793,11 @@ class TestAsyncExecutePage:
         with patch("wizsec._request.asyncio.sleep", side_effect=capture_sleep):
             await req._execute_page()
 
-        # The spin-wait loop should have fired sleep(0.1) for each BucketFullException
+        # The spin-wait loop should have fired a short sleep per full-limiter miss
+        from wizsec._request import _LIMITER_SPIN_SECONDS
+
         assert acquire_calls[0] >= 3
-        assert 0.1 in sleep_calls
+        assert _LIMITER_SPIN_SECONDS in sleep_calls
 
     @pytest.mark.asyncio
     async def test_pagination_loop_multiple_pages(self, mock_client):
@@ -1402,10 +1403,132 @@ class TestMaybeSplitAsync:
 
 
 # ---------------------------------------------------------------------------
-# Helper for to_thread simulation in tests
+# WizRequest._report_workflow  (bounded polling, terminal statuses)
 # ---------------------------------------------------------------------------
 
 
-async def _sync_to_coro(fn, *args, **kwargs):
-    """Run a sync function as if in a thread (synchronously in tests)."""
-    return fn(*args, **kwargs)
+class TestReportWorkflowPolling:
+    def _prime_report(self, mock_client):
+        req = _make_req(mock_client)
+        req._response = {"data": {"createReport": {"report": {"id": "rpt-1"}}}}
+        return req
+
+    def test_polling_gives_up_after_max_failed_polls(self, mock_client):
+        from wizsec.config import Config
+
+        req = self._prime_report(mock_client)
+        poll_count = [0]
+
+        def fake_execute():
+            poll_count[0] += 1
+            req.data = None  # unsuccessful poll
+
+        with (
+            patch.object(req, "_execute_page", side_effect=fake_execute),
+            patch("wizsec._request.time.sleep"),
+        ):
+            req._report_workflow(MagicMock())
+
+        assert poll_count[0] == Config.report_max_retries() + 1
+        assert any("polling failed" in e["message"] for e in req.errors)
+
+    def test_failed_report_status_terminates(self, mock_client):
+        req = self._prime_report(mock_client)
+
+        def fake_execute():
+            req.data = {
+                "report": {
+                    "lastRun": {"status": "FAILED", "progress": 0, "url": None}
+                }
+            }
+
+        with (
+            patch.object(req, "_execute_page", side_effect=fake_execute),
+            patch("wizsec._request.time.sleep"),
+        ):
+            req._report_workflow(MagicMock())
+
+        assert any("ended with status FAILED" in e["message"] for e in req.errors)
+
+    def test_transient_poll_failure_does_not_poison_success(self, mock_client):
+        req = self._prime_report(mock_client)
+        req.stream_report = False
+        req.report_name = "r"
+        calls = [0]
+
+        def fake_execute():
+            calls[0] += 1
+            if calls[0] == 1:
+                req.data = None  # one transient failure
+                return
+            req.data = {
+                "report": {
+                    "lastRun": {
+                        "status": "COMPLETED",
+                        "progress": 100,
+                        "url": "https://dl.example",
+                    }
+                }
+            }
+
+        with (
+            patch.object(req, "_execute_page", side_effect=fake_execute),
+            patch.object(req, "_download_report", return_value=b"bytes"),
+            patch("wizsec._request.time.sleep"),
+        ):
+            req._report_workflow(MagicMock())
+
+        assert req.errors == []
+        assert req.data["report_data"] == b"bytes"
+
+
+# ---------------------------------------------------------------------------
+# _get_cached_or_fetch_entities  (failure must not poison the session cache)
+# ---------------------------------------------------------------------------
+
+
+class TestGetCachedOrFetchEntities:
+    def _patches(self):
+        return (
+            patch.object(Config, "query_splitting_split_by", return_value="cloudAccounts"),
+            patch.object(Config, "query_splitting_cache_subscriptions", return_value=True),
+        )
+
+    def test_failed_fetch_is_not_cached(self, mock_client):
+        from wizsec._registry import EnvironmentState
+        from wizsec._request import _get_cached_or_fetch_entities
+
+        env_state = EnvironmentState("split-cache-fail")
+        mock_client._env_state = env_state
+
+        fetch_req = MagicMock()
+        fetch_req.success.return_value = False
+        fetch_req.data = None
+
+        p1, p2 = self._patches()
+        with p1, p2, patch("wizsec._request.WizRequest", return_value=fetch_req):
+            assert _get_cached_or_fetch_entities(mock_client) == []
+
+        # a transient failure must leave the cache unset so the next
+        # attempt fetches again
+        assert env_state._cached_split_entities is None
+
+        fetch_req.success.return_value = True
+        fetch_req.data = {"cloudAccounts": {"nodes": [{"id": "acc-1"}]}}
+        p1, p2 = self._patches()
+        with p1, p2, patch("wizsec._request.WizRequest", return_value=fetch_req):
+            assert _get_cached_or_fetch_entities(mock_client) == [{"id": "acc-1"}]
+        assert env_state._cached_split_entities == [{"id": "acc-1"}]
+
+    def test_cache_hit_skips_fetch(self, mock_client):
+        from wizsec._registry import EnvironmentState
+        from wizsec._request import _get_cached_or_fetch_entities
+
+        env_state = EnvironmentState("split-cache-hit")
+        env_state._cached_split_entities = [{"id": "cached"}]
+        mock_client._env_state = env_state
+
+        p1, p2 = self._patches()
+        with p1, p2, patch("wizsec._request.WizRequest") as mock_req_cls:
+            assert _get_cached_or_fetch_entities(mock_client) == [{"id": "cached"}]
+            mock_req_cls.assert_not_called()
