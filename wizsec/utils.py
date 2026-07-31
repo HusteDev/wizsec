@@ -122,7 +122,7 @@ def dump_to_json(
             logger = logging_init(Config, DEFAULT_WIZ_DIR, parse_filepath)
     if data:
         allow_saved_data = Config.saved_data_enabled()
-        allow_pickle = Config.get("saved_data", "pickle", default=False)
+        allow_pickle = Config.saved_data_pickle_enabled()
 
         if allow_saved_data:
             configs_save, _ = parse_filepath(Config.saved_data_directory())
@@ -132,12 +132,10 @@ def dump_to_json(
             if not save_directory.exists():
                 save_directory.mkdir(parents=True, exist_ok=True)
 
-            configs_temp, _ = parse_filepath(
-                Config.get("saved_data", "temp", default=DEFAULT_TEMP_FOLDER)
-            )
+            configs_temp = Config.saved_data_temp_directory()
             temp_directory = (
                 Path(configs_temp)
-                if all([configs_temp, configs_temp.is_dir()])
+                if all([configs_temp, Path(configs_temp).is_dir()])
                 else DEFAULT_TEMP_FOLDER
             )
             if not Path(temp_directory).exists():

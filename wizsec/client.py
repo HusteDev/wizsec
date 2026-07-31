@@ -251,6 +251,119 @@ class WizClient:
         )
         return WizResponse(request)
 
+    def iterate_nodes(
+        self,
+        queryCollection: Optional[str] = None,
+        query: Optional[str] = None,
+        vars: Optional[Dict[str, Any]] = None,
+        page_size: Optional[int] = None,
+    ) -> Iterator[Dict[str, Any]]:
+        """Yield result nodes one page at a time without aggregating in memory.
+
+        Unlike submit() with auto-pagination, this never holds more than one
+        page of results, making it suitable for very large result sets. Pages
+        are fetched lazily as the iterator is consumed, so breaking out early
+        stops further API calls. Raises the typed error (e.g. WizAPIError,
+        WizRateLimitError) if a page fails.
+
+        Example:
+            for issue in client.iterate_nodes(query=ISSUES_QUERY, vars={"first": 100}):
+                handle(issue)
+        """
+        from ._request import WizRequest
+        from .utils import ensure_pagination_variables
+        from .exceptions import WizQueryError
+
+        page_vars = dict(vars or {})
+        if page_size is not None:
+            page_vars["first"] = page_size
+
+        while True:
+            request = WizRequest(
+                client=self,
+                queryCollection=queryCollection,
+                query=query,
+                vars=dict(page_vars),
+                paginate=False,
+            )
+            # Pages are already scoped; never probe/split individual pages.
+            request._is_sub_request = True  # type: ignore[attr-defined]
+            request.query = ensure_pagination_variables(request.query)
+            request.submit()
+
+            if not request.success():
+                if request.error is not None:
+                    raise request.error
+                raise WizQueryError(
+                    "iterate_nodes page failed",
+                    query=request.query,
+                    errors=request.errors,
+                )
+
+            data = request.data or {}
+            source = request._current_query_info.get("source", "")
+            connection = data.get(source) or {}
+            yield from connection.get("nodes", [])
+
+            info = request._page_info(data)
+            if not info or not info.get("hasNextPage"):
+                return
+            page_vars["after"] = info.get("endCursor")
+
+    async def iterate_nodes_async(
+        self,
+        queryCollection: Optional[str] = None,
+        query: Optional[str] = None,
+        vars: Optional[Dict[str, Any]] = None,
+        page_size: Optional[int] = None,
+    ) -> Any:
+        """Async counterpart of iterate_nodes; use within async_session().
+
+        Example:
+            async with client.async_session() as ac:
+                async for issue in ac.iterate_nodes_async(query=ISSUES_QUERY):
+                    handle(issue)
+        """
+        from ._request import AsyncWizRequest
+        from .utils import ensure_pagination_variables
+        from .exceptions import WizQueryError
+
+        page_vars = dict(vars or {})
+        if page_size is not None:
+            page_vars["first"] = page_size
+
+        while True:
+            request = AsyncWizRequest(
+                client=self,
+                queryCollection=queryCollection,
+                query=query,
+                vars=dict(page_vars),
+                paginate=False,
+            )
+            request._is_sub_request = True  # type: ignore[attr-defined]
+            request.query = ensure_pagination_variables(request.query)
+            await request.submit()
+
+            if not request.success():
+                if request.error is not None:
+                    raise request.error
+                raise WizQueryError(
+                    "iterate_nodes_async page failed",
+                    query=request.query,
+                    errors=request.errors,
+                )
+
+            data = request.data or {}
+            source = request._current_query_info.get("source", "")
+            connection = data.get(source) or {}
+            for node in connection.get("nodes", []):
+                yield node
+
+            info = request._page_info(data)
+            if not info or not info.get("hasNextPage"):
+                return
+            page_vars["after"] = info.get("endCursor")
+
     def create_batch_request(self) -> "WizBatchRequest":
         """
         Create a new batch request for submitting multiple queries concurrently.
@@ -682,14 +795,26 @@ class WizClient:
                 return False
         return False
 
+    # Refresh this many seconds before actual expiry so an in-flight request
+    # never presents a token that lapses mid-call.
+    _TOKEN_REFRESH_MARGIN = 60
+
     def _token_expired(self) -> bool:
-        """Return True if the current access token has expired."""
+        """Return True if the current access token has (nearly) expired.
+
+        Uses the expiry reported by the auth server (expiry_time, or
+        time_received + expires_in), falling back to a one-hour lifetime
+        only when the token response carried no expiry at all.
+        """
         token_data = self._profile_state.token_data
         access_token = token_data.get("access_token")
-        received = token_data.get("time_received", 0)
         if not access_token:
             return True
-        expired = (time.time() - received) > 3600
+        received = token_data.get("time_received", 0)
+        expiry = token_data.get("expiry_time") or (
+            received + token_data.get("expires_in", 3600)
+        )
+        expired = time.time() > (expiry - self._TOKEN_REFRESH_MARGIN)
         self._logger.debug(f"Token expired: {expired}")
         return expired
 

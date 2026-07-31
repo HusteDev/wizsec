@@ -454,18 +454,6 @@ class Config:
     # App
     ############
     @classmethod
-    @ensure_loaded
-    def app_name(cls) -> str:
-        """Return the configured application name."""
-        return cls.get("app", "name", default="wizsec")
-
-    @classmethod
-    @ensure_loaded
-    def release_version(cls) -> str:
-        """Return the configured release version string."""
-        return cls.get("app", "release", default="0.0.0")
-
-    @classmethod
     def serverless(cls) -> bool:
         """Return whether the SDK is running in serverless mode."""
         return SERVERLESS
@@ -681,22 +669,6 @@ class Config:
 
     @classmethod
     @ensure_loaded
-    def report_export_directory(cls) -> Path:
-        """Return the resolved directory path for report exports."""
-        filepath, _ = parse_filepath(
-            cls.get("reports", "export_directory", default=f"{CWD}")
-        )
-        cls.get_logger().debug(f"Resolved report export directory: {filepath}")
-        return filepath
-
-    @classmethod
-    @ensure_loaded
-    def report_export_type(cls) -> str:
-        """Return the default export format for reports."""
-        return cls.get("reports", "export_type", default="json")
-
-    @classmethod
-    @ensure_loaded
     def report_retry_time(cls) -> int:
         """Return the retry delay in seconds for report operations."""
         return cls.get("reports", "retry_time", default=30)
@@ -712,18 +684,6 @@ class Config:
     def report_polling_time(cls) -> int:
         """Return the polling interval in seconds for report status checks."""
         return cls.get("reports", "polling_time", default=15)
-
-    @classmethod
-    @ensure_loaded
-    def report_auto_cleanup(cls) -> bool:
-        """Return whether automatic report cleanup is enabled."""
-        return cls.get("reports", "auto_cleanup", default=False)
-
-    @classmethod
-    @ensure_loaded
-    def report_save_incomplete(cls) -> bool:
-        """Return whether incomplete reports should be saved to disk."""
-        return cls.get("reports", "save_incomplete_reports", default=True)
 
     ############
     # Logging
@@ -853,6 +813,75 @@ class Config:
     def query_splitting_cache_subscriptions(cls) -> bool:
         """Return whether the subscription/project list should be cached per session."""
         return cls.get("query_splitting", "cache_subscriptions", default=True)
+
+    ############
+    # Rate limiting
+    ############
+    @classmethod
+    @ensure_loaded
+    def rate_limit_headroom(cls) -> float:
+        """Return the fraction of Wiz's published rate limits to use locally.
+
+        Running below the published limits (default 0.8) leaves headroom for
+        network jitter and other consumers of the same tenant quota, keeping
+        normal operation clear of server-side 429s. Values above 1.0 are
+        honored but risk tripping the server limiter. Invalid or non-positive
+        values fall back to the default.
+        """
+        try:
+            headroom = float(cls.get("rate_limit", "headroom", default=0.8))
+        except (TypeError, ValueError):
+            return 0.8
+        if headroom <= 0:
+            return 0.8
+        return headroom
+
+    @classmethod
+    @ensure_loaded
+    def rate_limit_overrides(cls) -> Dict[str, float]:
+        """Return explicit requests-per-second overrides per limiter key.
+
+        Keys are limiter names (query_user, query_service, mutation_user,
+        mutation_service); values are requests per second. An override wins
+        over the headroom-scaled published limit for that key. Invalid or
+        non-positive values are ignored.
+        """
+        overrides = cls.get("rate_limit", "overrides", default={}) or {}
+        if not isinstance(overrides, dict):
+            return {}
+        result: Dict[str, float] = {}
+        for key, value in overrides.items():
+            try:
+                rps = float(value)
+            except (TypeError, ValueError):
+                continue
+            if rps > 0:
+                result[str(key)] = rps
+        return result
+
+    @classmethod
+    @ensure_loaded
+    def rate_limit_max_backoff_waits(cls) -> int:
+        """Return how many consecutive server rate-limit waits a request
+        tolerates before giving up. These waits do not consume API retry
+        attempts."""
+        try:
+            waits = int(cls.get("rate_limit", "max_backoff_waits", default=10))
+        except (TypeError, ValueError):
+            return 10
+        return waits if waits > 0 else 10
+
+    @classmethod
+    @ensure_loaded
+    def rate_limit_default_retry_after(cls) -> int:
+        """Return the backoff in seconds used when the server rate-limits
+        without a usable Retry-After value (missing, non-integer, or a
+        GraphQL-level rate-limit error inside a 200 response)."""
+        try:
+            seconds = int(cls.get("rate_limit", "default_retry_after", default=10))
+        except (TypeError, ValueError):
+            return 10
+        return seconds if seconds > 0 else 10
 
 
 def generate_default_config(

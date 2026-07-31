@@ -45,11 +45,16 @@ app:
 
 # reports:
 #   stream_by_default: true
-#   export_directory: ""            # default: working directory
-#   export_type: json               # json | csv
-#   retry_time: 30
-#   max_retries: 3
-#   polling_time: 15
+#   retry_time: 30                  # wait between retries after a failed status poll
+#   max_retries: 3                  # consecutive failed status polls before giving up
+#   polling_time: 15                # wait between status checks while a run is in progress
+
+# rate_limit:
+#   headroom: 0.8                   # fraction of Wiz's published limits to use locally
+#   overrides:                      # absolute requests/second per limiter key (wins over headroom)
+#     query_service: 8
+#   max_backoff_waits: 10           # consecutive server rate-limit waits before giving up
+#   default_retry_after: 10         # backoff seconds when no usable Retry-After is provided
 
 # logging:
 #   enabled: false

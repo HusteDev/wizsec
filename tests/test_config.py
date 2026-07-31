@@ -106,9 +106,6 @@ class TestConfigAccessors:
     def test_report_stream_by_default(self, mock_config):
         assert Config.report_stream_by_default() is True
 
-    def test_report_export_type(self, mock_config):
-        assert Config.report_export_type() == "json"
-
 
 class TestSetLogLevel:
     def test_set_log_level_string(self, mock_config):
@@ -487,15 +484,15 @@ class TestEnsureLoaded:
             patch("wizsec.config.SERVERLESS", False),
         ):
             # Calling an accessor should auto-load
-            result = Config.app_name()
+            result = Config.default_domain()
 
         assert Config._loaded is True
-        assert result == "auto"
+        assert result == "gov"
 
     def test_ensure_loaded_skips_load_when_already_loaded(self, mock_config):
         """ensure_loaded should not call load() again when already loaded."""
         with patch.object(Config, "load") as mock_load:
-            Config.app_name()
+            Config.default_domain()
             mock_load.assert_not_called()
 
 
@@ -528,12 +525,6 @@ class TestLoadDotenv:
 
 
 class TestConfigAccessorsExtended:
-    def test_app_name(self, mock_config):
-        assert Config.app_name() == "wizsec"
-
-    def test_release_version(self, mock_config):
-        assert Config.release_version() == "1.0.0"
-
     def test_wiz_dir_returns_path(self, mock_config, tmp_path):
         mock_config._CONFIG["app"] = {"name": "wizsec", "wiz_dir": str(tmp_path)}
         result = Config.wiz_dir()
@@ -639,11 +630,6 @@ class TestConfigAccessorsExtended:
     def test_api_retry(self, mock_config):
         assert Config.api_retry() == 0.01
 
-    def test_report_export_directory(self, mock_config, tmp_path):
-        mock_config._CONFIG["reports"] = {"export_directory": str(tmp_path)}
-        result = Config.report_export_directory()
-        assert isinstance(result, Path)
-
     def test_report_retry_time_default(self, mock_config):
         assert Config.report_retry_time() == 30
 
@@ -652,12 +638,6 @@ class TestConfigAccessorsExtended:
 
     def test_report_polling_time_default(self, mock_config):
         assert Config.report_polling_time() == 15
-
-    def test_report_auto_cleanup_default(self, mock_config):
-        assert Config.report_auto_cleanup() is False
-
-    def test_report_save_incomplete_default(self, mock_config):
-        assert Config.report_save_incomplete() is True
 
     def test_logging_enabled_when_set_true(self, mock_config):
         mock_config._CONFIG["logging"]["enabled"] = True
@@ -773,3 +753,67 @@ class TestParseFilepath:
 
         directory, filename = parse_filepath("relative/dir")
         assert directory.is_absolute()
+
+
+class TestRateLimitConfig:
+    def test_headroom_default(self, mock_config):
+        assert Config.rate_limit_headroom() == 0.8
+
+    def test_headroom_from_config(self, mock_config):
+        Config._CONFIG["rate_limit"] = {"headroom": 0.5}
+        assert Config.rate_limit_headroom() == 0.5
+
+    def test_headroom_invalid_falls_back(self, mock_config):
+        Config._CONFIG["rate_limit"] = {"headroom": "not-a-number"}
+        assert Config.rate_limit_headroom() == 0.8
+
+    def test_headroom_nonpositive_falls_back(self, mock_config):
+        Config._CONFIG["rate_limit"] = {"headroom": 0}
+        assert Config.rate_limit_headroom() == 0.8
+
+    def test_headroom_above_one_honored(self, mock_config):
+        Config._CONFIG["rate_limit"] = {"headroom": 1.5}
+        assert Config.rate_limit_headroom() == 1.5
+
+    def test_overrides_default_empty(self, mock_config):
+        assert Config.rate_limit_overrides() == {}
+
+    def test_overrides_filters_invalid_entries(self, mock_config):
+        Config._CONFIG["rate_limit"] = {
+            "overrides": {
+                "query_service": 8,
+                "mutation_user": "bad",
+                "query_user": -1,
+                "mutation_service": 2.4,
+            }
+        }
+        assert Config.rate_limit_overrides() == {
+            "query_service": 8.0,
+            "mutation_service": 2.4,
+        }
+
+    def test_overrides_non_dict_ignored(self, mock_config):
+        Config._CONFIG["rate_limit"] = {"overrides": "nope"}
+        assert Config.rate_limit_overrides() == {}
+
+    def test_max_backoff_waits_default(self, mock_config):
+        assert Config.rate_limit_max_backoff_waits() == 10
+
+    def test_max_backoff_waits_from_config(self, mock_config):
+        Config._CONFIG["rate_limit"] = {"max_backoff_waits": 4}
+        assert Config.rate_limit_max_backoff_waits() == 4
+
+    def test_max_backoff_waits_invalid_falls_back(self, mock_config):
+        Config._CONFIG["rate_limit"] = {"max_backoff_waits": "nope"}
+        assert Config.rate_limit_max_backoff_waits() == 10
+
+    def test_default_retry_after_default(self, mock_config):
+        assert Config.rate_limit_default_retry_after() == 10
+
+    def test_default_retry_after_from_config(self, mock_config):
+        Config._CONFIG["rate_limit"] = {"default_retry_after": 30}
+        assert Config.rate_limit_default_retry_after() == 30
+
+    def test_default_retry_after_nonpositive_falls_back(self, mock_config):
+        Config._CONFIG["rate_limit"] = {"default_retry_after": 0}
+        assert Config.rate_limit_default_retry_after() == 10
