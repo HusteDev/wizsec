@@ -263,9 +263,7 @@ class TestIterateNodes:
     def test_yields_all_nodes_and_advances_cursor(self):
         client = MagicMock()
         created = []
-        with patch(
-            "wizsec._request.WizRequest", _stub_request_factory(PAGES, created)
-        ):
+        with patch("wizsec._request.WizRequest", _stub_request_factory(PAGES, created)):
             nodes = list(
                 WizClient.iterate_nodes(client, query=QUERY, vars={"first": 2})
             )
@@ -280,9 +278,7 @@ class TestIterateNodes:
     def test_early_break_stops_fetching(self):
         client = MagicMock()
         created = []
-        with patch(
-            "wizsec._request.WizRequest", _stub_request_factory(PAGES, created)
-        ):
+        with patch("wizsec._request.WizRequest", _stub_request_factory(PAGES, created)):
             iterator = WizClient.iterate_nodes(client, query=QUERY)
             first = next(iterator)
             iterator.close()
@@ -304,8 +300,7 @@ class TestIterateNodes:
 
         with patch("wizsec._request.AsyncWizRequest", AsyncStub):
             nodes = [
-                n
-                async for n in WizClient.iterate_nodes_async(client, query=QUERY)
+                n async for n in WizClient.iterate_nodes_async(client, query=QUERY)
             ]
 
         assert [n["id"] for n in nodes] == ["a", "b", "c"]
@@ -376,7 +371,15 @@ class TestDoctor:
                 }
             )
         )
-        code = main(["doctor", "--config-file", str(config), "--creds-file", str(tmp_path / "c")])
+        code = main(
+            [
+                "doctor",
+                "--config-file",
+                str(config),
+                "--creds-file",
+                str(tmp_path / "c"),
+            ]
+        )
         out = capsys.readouterr().out
         assert code == 0
         assert "query_service=4/s" in out

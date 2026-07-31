@@ -215,28 +215,42 @@ class SchemaValidator:
 
     @classmethod
     def _fetch_and_cache(cls, environment: str, client: Any) -> Optional[GraphQLSchema]:
-        """Fetch schema via introspection and cache to disk."""
+        """Fetch schema via introspection and cache to disk.
+
+        Deliberately uses the client's raw transport instead of
+        create_request(): building a normal WizRequest here would re-enter
+        query validation and the splitting detector while the schema lock
+        is held. The one-off introspection call must never recurse into
+        the schema machinery it is bootstrapping.
+        """
         cls._fetching.add(environment)
         try:
             logger.info("Fetching schema for '%s' via introspection...", environment)
-            response = client.create_request(
-                query=INTROSPECTION_QUERY,
-                paginate=False,
+            client._check_token()
+            response = client._post(
+                url=client._api_endpoint(),
+                headers=client._get_headers(),
+                json={"query": INTROSPECTION_QUERY, "variables": {}},
             )
-            # Mark as a sub-request so query splitting never probes the
-            # introspection query itself.
-            response._request._is_sub_request = True
-            result = response.submit()
 
-            if not result.success():
+            if response.status_code != 200:
                 logger.warning(
-                    "Introspection query failed for '%s': %s",
+                    "Introspection query failed for '%s': HTTP %s",
                     environment,
-                    result.errors,
+                    response.status_code,
                 )
                 return None
 
-            schema_data = result.data.get("__schema")
+            body = response.json() or {}
+            if body.get("errors"):
+                logger.warning(
+                    "Introspection query failed for '%s': %s",
+                    environment,
+                    body["errors"],
+                )
+                return None
+
+            schema_data = (body.get("data") or {}).get("__schema")
             if not schema_data:
                 logger.warning(
                     "Introspection response missing __schema for '%s'", environment

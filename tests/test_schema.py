@@ -1,6 +1,7 @@
 """Tests for _schema.py — SchemaValidator."""
 
 import json
+import threading
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -16,8 +17,7 @@ from wizsec.exceptions import WizSchemaValidationError
 
 def _make_test_schema():
     """Build a minimal GraphQL schema for testing."""
-    schema = build_schema(
-        """
+    schema = build_schema("""
         type Query {
             projects(first: Int, after: String): ProjectConnection!
             user(id: ID!): User
@@ -39,8 +39,7 @@ def _make_test_schema():
             hasNextPage: Boolean!
             endCursor: String
         }
-    """
-    )
+    """)
     return schema
 
 
@@ -273,9 +272,7 @@ class TestGetSchemaReentrancyAndServerless:
 
         def run():
             with patch.object(Config, "wiz_dir", return_value=tmp_path):
-                outcome["schema"] = SchemaValidator.get_schema(
-                    "reentrant-env", client
-                )
+                outcome["schema"] = SchemaValidator.get_schema("reentrant-env", client)
 
         t = threading.Thread(target=run, daemon=True)
         t.start()
@@ -308,30 +305,30 @@ class TestGetSchemaReentrancyAndServerless:
     def test_failed_fetch_is_not_retried_per_request(self, tmp_path):
         """A failed introspection is remembered for the session instead of
         being re-attempted on every request."""
-        result = MagicMock()
-        result.success.return_value = False
-        result.errors = [{"message": "forbidden"}]
         response = MagicMock()
-        response.submit.return_value = result
+        response.status_code = 403
+        response.text = "forbidden"
         client = MagicMock()
-        client.create_request.return_value = response
+        client._post.return_value = response
+        client._api_endpoint.return_value = "https://example.test/graphql"
+        client._get_headers.return_value = {}
 
         with patch.object(Config, "wiz_dir", return_value=tmp_path):
             assert SchemaValidator.get_schema("negcache-env", client) is None
             assert SchemaValidator.get_schema("negcache-env", client) is None
 
-        assert client.create_request.call_count == 1
+        assert client._post.call_count == 1
 
     def test_cache_write_failure_still_returns_schema(self, tmp_path):
         """A read-only or full filesystem must not discard a fetched schema."""
         schema_data = _introspection_json()
-        result = MagicMock()
-        result.success.return_value = True
-        result.data = {"__schema": schema_data}
         response = MagicMock()
-        response.submit.return_value = result
+        response.status_code = 200
+        response.json.return_value = {"data": {"__schema": schema_data}}
         client = MagicMock()
-        client.create_request.return_value = response
+        client._post.return_value = response
+        client._api_endpoint.return_value = "https://example.test/graphql"
+        client._get_headers.return_value = {}
 
         read_only = tmp_path / "missing" / "nested"
         with patch.object(

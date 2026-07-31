@@ -72,9 +72,7 @@ class TestConfigCommands:
         assert main(["config", "--file", str(config_file), "get", "api.nope"]) == 1
         assert "key not found" in capsys.readouterr().err
 
-    def test_config_set_creates_nested_keys_with_yaml_typing(
-        self, config_file, capsys
-    ):
+    def test_config_set_creates_nested_keys_with_yaml_typing(self, config_file, capsys):
         assert (
             main(
                 [
@@ -94,7 +92,9 @@ class TestConfigCommands:
         assert data["api"]["timeout"] == 120
 
     def test_config_set_bool_typing(self, config_file):
-        main(["config", "--file", str(config_file), "set", "api.auto_paginate", "false"])
+        main(
+            ["config", "--file", str(config_file), "set", "api.auto_paginate", "false"]
+        )
         data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
         assert data["api"]["auto_paginate"] is False
 
@@ -160,10 +160,7 @@ class TestCredsCommands:
         path = tmp_path / "new.credentials"
         monkeypatch.setattr("wizsec._cli.getpass.getpass", lambda prompt: "")
         assert (
-            main(
-                ["creds", "--file", str(path), "set", "--client-id", "cid-123"]
-            )
-            == 1
+            main(["creds", "--file", str(path), "set", "--client-id", "cid-123"]) == 1
         )
         assert not path.exists()
 

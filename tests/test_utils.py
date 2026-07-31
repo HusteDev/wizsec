@@ -87,16 +87,14 @@ class TestParseQueryMetadata:
         assert result["source"] == "users"
 
     def test_nested_fields_in_metadata(self):
-        result = parse_query_metadata(
-            """
+        result = parse_query_metadata("""
             query ListProjects {
                 projects {
                     nodes { id name }
                     pageInfo { hasNextPage endCursor }
                 }
             }
-        """
-        )
+        """)
         assert "projects" in result["fields"]
         assert "nodes" in result["fields"]["projects"]
         assert "pageInfo" in result["fields"]["projects"]
