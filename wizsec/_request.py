@@ -741,9 +741,7 @@ class WizRequest(_RequestBase):
         """
         max_waits = Config.rate_limit_max_backoff_waits()
         if waits_so_far > max_waits:
-            message = (
-                f"Rate limited by server; gave up after {max_waits} backoff waits"
-            )
+            message = f"Rate limited by server; gave up after {max_waits} backoff waits"
             self.errors.append({"message": message})
             self.error = WizRateLimitError(message, retry_after=wait_s)
             self._handle_final_failure()
@@ -1497,9 +1495,7 @@ class AsyncWizRequest(_RequestBase):
                         if remaining > 0:
                             await asyncio.sleep(remaining)
                             continue
-                        if not limiter.try_acquire(
-                            self._limiter_key, blocking=False
-                        ):
+                        if not limiter.try_acquire(self._limiter_key, blocking=False):
                             await asyncio.sleep(_LIMITER_SPIN_SECONDS)
                             continue
                         if self._client._env_state.rate_backoff_remaining() > 0:
@@ -1614,9 +1610,7 @@ class AsyncWizRequest(_RequestBase):
         """
         max_waits = Config.rate_limit_max_backoff_waits()
         if waits_so_far > max_waits:
-            message = (
-                f"Rate limited by server; gave up after {max_waits} backoff waits"
-            )
+            message = f"Rate limited by server; gave up after {max_waits} backoff waits"
             self.errors.append({"message": message})
             self.error = WizRateLimitError(message, retry_after=wait_s)
             self._logger.error(

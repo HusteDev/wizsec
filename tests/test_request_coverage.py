@@ -757,9 +757,7 @@ class TestAsyncExecutePage:
         # Backoff is set on every 429; persistence is bounded by the wait cap
         # (not by max_retries), and giving up records an explicit error.
         mock_client._env_state.set_rate_backoff.assert_called_with(10)
-        assert (
-            mock_client._env_state.set_rate_backoff.call_count == max_waits + 1
-        )
+        assert mock_client._env_state.set_rate_backoff.call_count == max_waits + 1
         assert any("gave up" in e["message"] for e in req.errors)
 
     @pytest.mark.asyncio
@@ -1437,9 +1435,7 @@ class TestReportWorkflowPolling:
 
         def fake_execute():
             req.data = {
-                "report": {
-                    "lastRun": {"status": "FAILED", "progress": 0, "url": None}
-                }
+                "report": {"lastRun": {"status": "FAILED", "progress": 0, "url": None}}
             }
 
         with (
@@ -1490,8 +1486,12 @@ class TestReportWorkflowPolling:
 class TestGetCachedOrFetchEntities:
     def _patches(self):
         return (
-            patch.object(Config, "query_splitting_split_by", return_value="cloudAccounts"),
-            patch.object(Config, "query_splitting_cache_subscriptions", return_value=True),
+            patch.object(
+                Config, "query_splitting_split_by", return_value="cloudAccounts"
+            ),
+            patch.object(
+                Config, "query_splitting_cache_subscriptions", return_value=True
+            ),
         )
 
     def test_failed_fetch_is_not_cached(self, mock_client):

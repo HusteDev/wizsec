@@ -263,11 +263,16 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     creds_path = Path(args.creds_file)
     profiles: List[str] = []
     if not creds_path.exists():
-        report("WARN", f"credentials file missing: {creds_path} (run 'wizsec creds set')")
+        report(
+            "WARN", f"credentials file missing: {creds_path} (run 'wizsec creds set')"
+        )
     else:
         profiles = _read_credentials(creds_path).sections()
         if profiles:
-            report("OK", f"credentials file has {len(profiles)} profile(s): {', '.join(profiles)}")
+            report(
+                "OK",
+                f"credentials file has {len(profiles)} profile(s): {', '.join(profiles)}",
+            )
         else:
             report("WARN", f"credentials file has no profiles: {creds_path}")
 
@@ -331,9 +336,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="wizsec",
         description="Manage wizsec SDK configuration and credentials.",
     )
-    parser.add_argument(
-        "--version", action="version", version=f"wizsec {__version__}"
-    )
+    parser.add_argument("--version", action="version", version=f"wizsec {__version__}")
     subparsers = parser.add_subparsers(dest="command")
 
     # -- config
