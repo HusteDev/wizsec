@@ -26,7 +26,9 @@ try:
     client = WizClient()
 except WizCredentialsError as e:
     print(f"Credentials not found: {e}")
-    print("Set WIZ_CLIENT_ID and WIZ_CLIENT_SECRET, or configure ~/.wiz/wiz.credentials")
+    print(
+        "Set WIZ_CLIENT_ID and WIZ_CLIENT_SECRET, or configure ~/.wiz/wiz.credentials"
+    )
     exit(1)
 except WizAuthenticationError as e:
     print(f"Authentication failed: {e}")

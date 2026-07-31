@@ -67,7 +67,9 @@ if result.success:
     issues = result.data["issues"]["nodes"]
     print(f"  Found {len(issues)} critical issues")
     for issue in issues[:5]:
-        print(f"  [{issue['severity']}] {issue['sourceRule']['name']} — {issue['status']}")
+        print(
+            f"  [{issue['severity']}] {issue['sourceRule']['name']} — {issue['status']}"
+        )
 
 
 # ─── You can also pass the query string directly ───────────────────
