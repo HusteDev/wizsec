@@ -23,8 +23,7 @@ from wizsec.exceptions import (
 
 def _make_test_schema():
     """Build a minimal GraphQL schema for testing."""
-    schema = build_schema(
-        """
+    schema = build_schema("""
         type Query {
             projects(first: Int, after: String): ProjectConnection!
             user(id: ID!): User
@@ -46,8 +45,7 @@ def _make_test_schema():
             hasNextPage: Boolean!
             endCursor: String
         }
-    """
-    )
+    """)
     return schema
 
 
