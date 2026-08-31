@@ -46,22 +46,50 @@ except WizSchemaValidationError as e:
 
 ## Refreshing the Schema
 
-The cached schema may become outdated when Wiz updates their API. To refresh:
+The cached schema goes stale when Wiz updates their API. Note that step 1 above applies **only when the cache file is absent** — nothing re-introspects as the file ages, so a stale cache stays stale until you refresh it.
+
+Use the CLI:
+
+```bash
+wizsec schema refresh                     # re-introspect and rewrite the cache
+wizsec schema refresh --environment gov   # a specific environment
+wizsec schema path                        # where the cache lives
+wizsec schema clear                       # delete cached schemas
+```
+
+`wizsec schema refresh` authenticates the same way `wizsec creds test` does, so it also accepts `--profile`.
+
+You do not have to track the age yourself. `wizsec doctor` reports it:
+
+```
+[WARN] schema cache schema_gov.json: 47 day(s) old (run 'wizsec schema refresh')
+```
+
+and the SDK logs a warning when it loads a cache older than 30 days:
+
+```
+Cached schema for 'gov' is 47 days old — run 'wizsec schema refresh' to update it
+```
+
+### Serverless deployments
+
+A serverless bundle is read-only and cannot introspect at runtime, so generate the schema ahead of time and ship it with your code:
+
+```bash
+wizsec schema refresh --environment app --output ./bundle/schema_app.json
+```
+
+With `--output` the schema is written only to that path, leaving your own `~/.wiz` cache untouched.
+
+### Clearing in-process state
+
+`SchemaValidator.clear()` drops the **in-memory** schema only — it does not delete the cache file, so the next lookup reloads the same file from disk. Use it to pick up a schema file that changed underneath a long-running process, not to force a re-introspection:
 
 ```python
 from wizsec import SchemaValidator
 
-# Clear cached schema for a specific environment
-SchemaValidator.clear("gov")
-
-# Clear all cached schemas
-SchemaValidator.clear()
-```
-
-Delete the cache file from the configured `app.wiz_dir` to force a fresh introspection on next use:
-
-```bash
-rm ~/.wiz/schema_gov.json  # or {app.wiz_dir}/schema_gov.json if wiz_dir is customized
+SchemaValidator.clear("gov")   # forget the in-memory schema for one environment
+SchemaValidator.clear()        # forget all of them
 ```
 
 ## Programmatic Validation

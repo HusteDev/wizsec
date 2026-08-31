@@ -34,10 +34,10 @@ from .config import Config
 from .client import WizClient
 from .exceptions import (
     WizAPIError,
+    WizConfigurationError,
     WizError,
     WizQueryError,
     WizRateLimitError,
-    WizReportError,
     WizTimeoutError,
 )
 from ._transport import stream_get, get as transport_get, TransportError
@@ -77,6 +77,12 @@ _RATE_LIMIT_ERROR_CODES = {"RATE_LIMITED", "RATE_LIMIT_EXCEEDED", "TOO_MANY_REQU
 
 # Report runs that ended without a downloadable result.
 _REPORT_TERMINAL_FAILURE_STATUSES = {"FAILED", "EXPIRED"}
+
+# Mutations that start the create -> poll -> download report workflow. Both
+# return { report { id } }, so _report_workflow() reads the id out of whichever
+# one was used. deleteReport is deliberately absent: different payload shape,
+# and nothing to poll for.
+_REPORT_MUTATIONS = ("createReport", "rerunReport")
 
 
 def _parse_retry_after(value: Any) -> int:
@@ -806,13 +812,16 @@ class WizRequest(_RequestBase):
             self._done_event.set()
 
     def _generate_report(self) -> bool:
-        """Check if the current query is a report creation and configure report settings."""
+        """Check if the current query starts a report workflow, and configure report settings."""
         if self._report_request:
             self.report_name = self._report_request.get("name")
             self.stream_report = self._report_request.get(
                 "stream", Config.report_stream_by_default()
             )
-        return self._current_query_info.get("source", "") == "createReport"
+        # Tested against every report-starting mutation, not just createReport:
+        # rerunReport used to fall through here and complete "successfully"
+        # with no report data attached and no warning.
+        return self._current_query_info.get("source", "") in _REPORT_MUTATIONS
 
     def _report_workflow(self, response: Any) -> Optional["WizRequest"]:
         """Poll for report completion and download/stream the result.
@@ -822,7 +831,11 @@ class WizRequest(_RequestBase):
         reports.polling_time until the run reaches a terminal status.
         """
         assert self._response is not None
-        self._report_id = self._response["data"]["createReport"]["report"]["id"]
+        # Read the id from whichever mutation ran. Must happen before the
+        # polling query is installed below: assigning self.query re-parses the
+        # metadata that _current_query_info holds.
+        source = self._current_query_info.get("source", "")
+        self._report_id = self._response["data"][source]["report"]["id"]
         self.query = """query ReportDownloadUrl($reportId: ID!) {report(id: $reportId) { name lastRun {url status progress runAt}}}"""
         self.vars = {"reportId": self._report_id}
         self._paginate = False
@@ -845,7 +858,24 @@ class WizRequest(_RequestBase):
         """Poll the report status query until a terminal state is reached."""
         max_failed_polls = Config.report_max_retries()
         failed_polls = 0
+        # max_failed_polls only bounds *failed* polls, and the status checks
+        # below only exit on COMPLETED or a terminal failure. A run that sits
+        # in a healthy non-terminal status (IN_PROGRESS, and anything Wiz adds
+        # later that we don't recognise) polls forever without this deadline.
+        report_timeout = Config.report_timeout()
+        deadline = time.monotonic() + report_timeout
+        status = "UNKNOWN"
         while True:
+            if time.monotonic() >= deadline:
+                message = (
+                    f"Report {self._report_id} did not complete within "
+                    f"{report_timeout:g}s (last status: {status})"
+                )
+                self.errors.append({"message": message})
+                self.error = WizTimeoutError(message)
+                self._logger.error(message)
+                return self
+
             # Each poll starts clean: a transient poll failure must not
             # poison success() for later attempts, and stale page data from
             # the creation mutation must not leak into the poll result.
@@ -1334,7 +1364,28 @@ class AsyncWizRequest(_RequestBase):
         report_request: Optional[Dict[str, Any]] = None,
         on_page_event: Optional[Callable] = None,
     ) -> None:
-        """Initialize an asynchronous Wiz GraphQL request."""
+        """Initialize an asynchronous Wiz GraphQL request.
+
+        Raises:
+            WizConfigurationError: If ``report_request`` is supplied. Reports
+                are sync-only by design; see the check below.
+        """
+        # Reports are deliberately not available on the async path. The async
+        # client exists to run many queries concurrently, and a report is not a
+        # query -- it makes the Wiz backend generate and materialise a dataset.
+        # Fanning ten or more of those out at once is exactly the load pattern
+        # the report API is least able to absorb, and the poll loops would sit
+        # on the event loop for minutes each. This used to be accepted and then
+        # silently ignored: the parameter was stored, no workflow existed to
+        # read it, and the request completed "successfully" with no report data.
+        if report_request:
+            raise WizConfigurationError(
+                "report_request is not supported on AsyncWizRequest. Reports "
+                "are sync-only: each one asks the Wiz backend to generate a "
+                "dataset, so running them concurrently is far heavier on the "
+                "API than concurrent queries. Use the synchronous WizRequest "
+                "(client.create_request(...)) for report workflows."
+            )
         self._init_common(
             client,
             queryCollection,

@@ -1406,9 +1406,14 @@ class TestMaybeSplitAsync:
 
 
 class TestReportWorkflowPolling:
-    def _prime_report(self, mock_client):
-        req = _make_req(mock_client)
-        req._response = {"data": {"createReport": {"report": {"id": "rpt-1"}}}}
+    def _prime_report(self, mock_client, source="createReport"):
+        # The query has to be the real mutation now: _report_workflow reads the
+        # report id out of data[<source>], so a stand-in "query Q { users { id } }"
+        # no longer lines up with a _response keyed by the mutation name.
+        req = _make_req(
+            mock_client, query=f"mutation M {{ {source} {{ report {{ id }} }} }}"
+        )
+        req._response = {"data": {source: {"report": {"id": "rpt-1"}}}}
         return req
 
     def test_polling_gives_up_after_max_failed_polls(self, mock_client):
@@ -1532,3 +1537,253 @@ class TestGetCachedOrFetchEntities:
         with p1, p2, patch("wizsec._request.WizRequest") as mock_req_cls:
             assert _get_cached_or_fetch_entities(mock_client) == [{"id": "cached"}]
             mock_req_cls.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Report workflow: rerunReport gate, poll deadline, async rejection
+# ---------------------------------------------------------------------------
+
+
+class TestReportMutationGate:
+    """rerunReport reached the workflow nowhere except the query setter, so it
+    completed "successfully" with no report data attached and no warning."""
+
+    @pytest.mark.parametrize("source", ["createReport", "rerunReport"])
+    def test_report_mutations_trigger_the_workflow(self, mock_client, source):
+        req = _make_req(
+            mock_client, query=f"mutation M {{ {source} {{ report {{ id }} }} }}"
+        )
+        assert req._generate_report() is True
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "query Q { users { id } }",
+            "mutation M { deleteReport { report { id } } }",
+            "query ReportDownloadUrl($reportId: ID!) { report(id: $reportId) { name } }",
+        ],
+    )
+    def test_non_report_queries_do_not(self, mock_client, query):
+        assert _make_req(mock_client, query=query)._generate_report() is False
+
+    def test_workflow_reads_the_id_from_whichever_mutation_ran(self, mock_client):
+        """The id path was hardcoded to data['createReport']."""
+        req = _make_req(
+            mock_client,
+            query="mutation M { rerunReport { report { id } } }",
+            report_request={"name": "R", "stream": False},
+        )
+        assert req._generate_report() is True  # populates stream_report/report_name
+        req._response = {"data": {"rerunReport": {"report": {"id": "rerun-99"}}}}
+
+        def fake_execute():
+            req.data = {
+                "report": {
+                    "lastRun": {
+                        "status": "COMPLETED",
+                        "progress": 100,
+                        "url": "https://example.com/r.csv",
+                    }
+                }
+            }
+
+        with (
+            patch.object(req, "_execute_page", side_effect=fake_execute),
+            patch.object(req, "_download_report", return_value=b"rows"),
+            patch("wizsec._request.time.sleep"),
+        ):
+            req._report_workflow(MagicMock())
+
+        assert req._report_id == "rerun-99"
+        assert req.data["report_data"] == b"rows"
+
+    def test_installing_the_polling_query_clears_the_gate(self, mock_client):
+        """Guards the recursion: _poll_report_status re-enters _execute_page,
+        which re-checks _generate_report against the polling query."""
+        req = _make_req(
+            mock_client, query="mutation M { rerunReport { report { id } } }"
+        )
+        assert req._generate_report() is True
+        req.query = (
+            "query ReportDownloadUrl($reportId: ID!) "
+            "{ report(id: $reportId) { name } }"
+        )
+        assert req._generate_report() is False
+
+
+class TestReportPollDeadline:
+    """reports.max_retries only caps failed polls, and the status checks only
+    exit on COMPLETED or a terminal failure, so a run stuck in a healthy
+    non-terminal status polled forever."""
+
+    def _prime(self, mock_client):
+        req = _make_req(
+            mock_client,
+            query="mutation M { createReport { report { id } } }",
+            report_request={"name": "R", "stream": False},
+        )
+        req._generate_report()  # populates stream_report/report_name
+        req._response = {"data": {"createReport": {"report": {"id": "rpt-1"}}}}
+        return req
+
+    class _Clock:
+        """A monotonic clock the test advances explicitly.
+
+        wizsec._request does `import time`, so patching
+        "wizsec._request.time.monotonic" replaces the attribute on the global
+        time module -- every caller in the process sees it for the duration.
+        A plain iter() of readings is therefore order-dependent on something
+        the test does not control: one incidental clock read anywhere shifts
+        the whole sequence, and the deadline check silently sees the wrong
+        value. Advancing on demand makes extra reads harmless.
+        """
+
+        def __init__(self, start=0.0):
+            self.now = start
+
+        def __call__(self):
+            return self.now
+
+        def advance(self, seconds):
+            self.now += seconds
+
+    def _in_progress(self, req, clock=None, step=0.0):
+        """Report a healthy in-progress poll, advancing the clock per poll."""
+
+        def fake_execute():
+            if clock is not None:
+                clock.advance(step)
+            req.data = {
+                "report": {
+                    "lastRun": {"status": "IN_PROGRESS", "progress": 10, "url": None}
+                }
+            }
+
+        return fake_execute
+
+    def test_endless_in_progress_run_hits_the_deadline(self, mock_client):
+        req = self._prime(mock_client)
+        # Each poll burns a quarter of the default 3600s deadline, so the run
+        # stays healthy for a few rounds and then runs out of time.
+        clock = self._Clock()
+        with (
+            patch.object(
+                req,
+                "_execute_page",
+                side_effect=self._in_progress(req, clock, step=900.0),
+            ),
+            patch("wizsec._request.time.sleep"),
+            patch("wizsec._request.time.monotonic", clock),
+        ):
+            result = req._report_workflow(MagicMock())
+
+        assert result is req
+        assert req.success() is False
+        assert any("did not complete within" in e["message"] for e in req.errors)
+        assert "IN_PROGRESS" in req.errors[-1]["message"]  # reports last status
+
+    def test_deadline_sets_a_typed_timeout_error(self, mock_client):
+        from wizsec.exceptions import WizTimeoutError
+
+        req = self._prime(mock_client)
+        clock = self._Clock()
+        with (
+            patch.object(
+                req,
+                "_execute_page",
+                side_effect=self._in_progress(req, clock, step=2000.0),
+            ),
+            patch("wizsec._request.time.sleep"),
+            patch("wizsec._request.time.monotonic", clock),
+        ):
+            req._report_workflow(MagicMock())
+
+        assert isinstance(req.error, WizTimeoutError)
+
+    def test_deadline_is_configurable(self, mock_client):
+        req = self._prime(mock_client)
+        clock = self._Clock()  # one poll pushes past a 30s deadline
+        with (
+            patch.object(Config, "report_timeout", return_value=30),
+            patch.object(
+                req,
+                "_execute_page",
+                side_effect=self._in_progress(req, clock, step=50.0),
+            ),
+            patch("wizsec._request.time.sleep"),
+            patch("wizsec._request.time.monotonic", clock),
+        ):
+            req._report_workflow(MagicMock())
+
+        assert any("within 30s" in e["message"] for e in req.errors)
+
+    def test_a_run_that_completes_in_time_is_unaffected(self, mock_client):
+        req = self._prime(mock_client)
+
+        def fake_execute():
+            req.data = {
+                "report": {
+                    "lastRun": {
+                        "status": "COMPLETED",
+                        "progress": 100,
+                        "url": "https://example.com/r.csv",
+                    }
+                }
+            }
+
+        with (
+            patch.object(req, "_execute_page", side_effect=fake_execute),
+            patch.object(req, "_download_report", return_value=b"rows"),
+            patch("wizsec._request.time.sleep"),
+        ):
+            req._report_workflow(MagicMock())
+
+        assert req.errors == []
+        assert req.data["report_data"] == b"rows"
+
+
+class TestAsyncReportsAreRejected:
+    """report_request was accepted, stored, and silently ignored: the async
+    class has no report workflow at all."""
+
+    def test_async_request_rejects_report_request(self, mock_client):
+        from wizsec.exceptions import WizConfigurationError
+
+        with patch.object(Config, "validate_queries", return_value=False):
+            with pytest.raises(WizConfigurationError, match="sync-only"):
+                AsyncWizRequest(
+                    client=mock_client,
+                    query="mutation M { createReport { report { id } } }",
+                    report_request={"name": "R", "stream": True},
+                )
+
+    def test_async_batch_passthrough_is_rejected_too(self, mock_client):
+        """add_request forwards **kwargs straight to AsyncWizRequest."""
+        from wizsec.exceptions import WizConfigurationError
+
+        batch = AsyncWizBatchRequest(mock_client)
+        with patch.object(Config, "validate_queries", return_value=False):
+            with pytest.raises(WizConfigurationError, match="sync-only"):
+                batch.add_request(
+                    query="mutation M { createReport { report { id } } }",
+                    report_request={"name": "R"},
+                )
+
+    @pytest.mark.parametrize("falsy", [None, {}])
+    def test_absent_or_empty_report_request_is_fine(self, mock_client, falsy):
+        with patch.object(Config, "validate_queries", return_value=False):
+            req = AsyncWizRequest(
+                client=mock_client,
+                query="query Q { users { id } }",
+                report_request=falsy,
+            )
+        assert req._report_request == {}
+
+    def test_sync_request_still_accepts_report_request(self, mock_client):
+        req = _make_req(
+            mock_client,
+            query="mutation M { createReport { report { id } } }",
+            report_request={"name": "R", "stream": False},
+        )
+        assert req._generate_report() is True
+        assert req.report_name == "R"

@@ -64,6 +64,8 @@ app:
 #   retry_time: 30                    # Wait between retries after a failed report status poll | default = 30
 #   max_retries: 3                    # Max consecutive failed status polls before giving up | default = 3
 #   polling_time: 15                  # Time between report status checks while a run is in progress | default = 15
+#   timeout: 3600                     # Overall deadline for a report run to complete | default = 3600
+#                                     # Bounds the whole poll loop; max_retries only caps failed polls
 
 # query_splitting:
 #   enabled: false                    # Enable pre-emptive totalCount probe + auto splitting | default = false

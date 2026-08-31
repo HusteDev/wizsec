@@ -1,23 +1,30 @@
 """Tests for _schema.py — SchemaValidator."""
 
 import json
+import os
 import threading
+import time
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
 from graphql import build_client_schema, introspection_from_schema, build_schema
 
-from wizsec._schema import SchemaValidator, INTROSPECTION_QUERY
+from wizsec._schema import SCHEMA_STALE_DAYS, SchemaValidator, INTROSPECTION_QUERY
 from wizsec.config import Config
-from wizsec.exceptions import WizSchemaValidationError
+from wizsec.exceptions import (
+    WizAPIError,
+    WizFileError,
+    WizSchemaValidationError,
+)
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
 
 def _make_test_schema():
     """Build a minimal GraphQL schema for testing."""
-    schema = build_schema("""
+    schema = build_schema(
+        """
         type Query {
             projects(first: Int, after: String): ProjectConnection!
             user(id: ID!): User
@@ -39,7 +46,8 @@ def _make_test_schema():
             hasNextPage: Boolean!
             endCursor: String
         }
-    """)
+    """
+    )
     return schema
 
 
@@ -119,9 +127,7 @@ class TestGetSchema:
         cache_file = tmp_path / "schema_disktest.json"
         cache_file.write_text(json.dumps(schema_data))
 
-        with patch.object(
-            SchemaValidator, "_schema_cache_path", return_value=cache_file
-        ):
+        with patch.object(SchemaValidator, "cache_path", return_value=cache_file):
             schema = SchemaValidator.get_schema("disktest")
         assert schema is not None
         assert "disktest" in SchemaValidator._schemas
@@ -130,15 +136,13 @@ class TestGetSchema:
         cache_file = tmp_path / "schema_bad.json"
         cache_file.write_text("not json")
 
-        with patch.object(
-            SchemaValidator, "_schema_cache_path", return_value=cache_file
-        ):
+        with patch.object(SchemaValidator, "cache_path", return_value=cache_file):
             schema = SchemaValidator.get_schema("bad")
         assert schema is None
 
     def test_schema_cache_path_uses_configured_wiz_dir(self, mock_config, tmp_path):
         Config.set("app", "wiz_dir", value=str(tmp_path))
-        assert SchemaValidator._schema_cache_path("gov") == tmp_path / "schema_gov.json"
+        assert SchemaValidator.cache_path("gov") == tmp_path / "schema_gov.json"
 
 
 class TestClear:
@@ -169,9 +173,7 @@ class TestFetchAndCache:
         mock_client._get_headers.return_value = {"Authorization": "Bearer token"}
 
         cache_file = tmp_path / "schema_fetch.json"
-        with patch.object(
-            SchemaValidator, "_schema_cache_path", return_value=cache_file
-        ):
+        with patch.object(SchemaValidator, "cache_path", return_value=cache_file):
             schema = SchemaValidator._fetch_and_cache("fetch", mock_client)
 
         assert schema is not None
@@ -196,9 +198,7 @@ class TestFetchAndCache:
         )
 
         cache_file = tmp_path / "schema_fetch.json"
-        with patch.object(
-            SchemaValidator, "_schema_cache_path", return_value=cache_file
-        ):
+        with patch.object(SchemaValidator, "cache_path", return_value=cache_file):
             schema = SchemaValidator.get_schema("fetch", client=mock_client)
 
         assert schema is not None
@@ -333,10 +333,149 @@ class TestGetSchemaReentrancyAndServerless:
         read_only = tmp_path / "missing" / "nested"
         with patch.object(
             SchemaValidator,
-            "_schema_cache_path",
+            "cache_path",
             return_value=read_only / "schema_x.json",
         ):
             with patch("wizsec._schema.open", side_effect=OSError("read-only")):
                 schema = SchemaValidator._fetch_and_cache("rofs-env", client)
 
         assert schema is not None
+
+
+class TestRefresh:
+    """refresh() is the raising counterpart to _fetch_and_cache()."""
+
+    def _client(self, status_code=200, body=None):
+        response = MagicMock()
+        response.status_code = status_code
+        response.json.return_value = body
+        client = MagicMock()
+        client._post.return_value = response
+        client._api_endpoint.return_value = "https://example.test/graphql"
+        client._get_headers.return_value = {}
+        return client
+
+    def test_writes_cache_and_populates_memory(self, tmp_path):
+        schema_data = _introspection_json()
+        client = self._client(body={"data": {"__schema": schema_data}})
+
+        with patch.object(Config, "wiz_dir", return_value=tmp_path):
+            destination = SchemaValidator.refresh("refresh-env", client)
+
+        assert destination == tmp_path / "schema_refresh-env.json"
+        assert json.loads(destination.read_text())["queryType"]["name"] == "Query"
+        assert "refresh-env" in SchemaValidator._schemas
+
+    def test_clears_negative_cache(self, tmp_path):
+        """A refresh must undo a prior failed fetch, or validation stays off
+        for the rest of the session."""
+        SchemaValidator._fetch_failed.add("refresh-env")
+        client = self._client(body={"data": {"__schema": _introspection_json()}})
+
+        with patch.object(Config, "wiz_dir", return_value=tmp_path):
+            SchemaValidator.refresh("refresh-env", client)
+
+        assert "refresh-env" not in SchemaValidator._fetch_failed
+
+    def test_http_error_raises_with_status(self, tmp_path):
+        client = self._client(status_code=403, body={})
+
+        with patch.object(Config, "wiz_dir", return_value=tmp_path):
+            with pytest.raises(WizAPIError) as exc_info:
+                SchemaValidator.refresh("refresh-env", client)
+
+        assert exc_info.value.status_code == 403
+        assert not (tmp_path / "schema_refresh-env.json").exists()
+
+    def test_graphql_errors_raise(self, tmp_path):
+        client = self._client(body={"errors": [{"message": "nope"}]})
+
+        with patch.object(Config, "wiz_dir", return_value=tmp_path):
+            with pytest.raises(WizAPIError, match="nope"):
+                SchemaValidator.refresh("refresh-env", client)
+
+    def test_missing_schema_key_raises(self, tmp_path):
+        client = self._client(body={"data": {}})
+
+        with patch.object(Config, "wiz_dir", return_value=tmp_path):
+            with pytest.raises(WizAPIError, match="no __schema"):
+                SchemaValidator.refresh("refresh-env", client)
+
+    def test_malformed_schema_never_lands_on_disk(self, tmp_path):
+        """Build before write, so a bad response cannot poison the cache."""
+        client = self._client(body={"data": {"__schema": {"bogus": True}}})
+
+        with patch.object(Config, "wiz_dir", return_value=tmp_path):
+            with pytest.raises(Exception):
+                SchemaValidator.refresh("refresh-env", client)
+
+        assert not (tmp_path / "schema_refresh-env.json").exists()
+
+    def test_write_failure_raises_file_error(self, tmp_path):
+        client = self._client(body={"data": {"__schema": _introspection_json()}})
+
+        with patch.object(Config, "wiz_dir", return_value=tmp_path):
+            with patch("wizsec._schema.open", side_effect=OSError("read-only")):
+                with pytest.raises(WizFileError, match="read-only"):
+                    SchemaValidator.refresh("refresh-env", client)
+
+    def test_output_path_leaves_runtime_state_untouched(self, tmp_path):
+        """Generating a bundle schema must not mutate ~/.wiz or the in-memory
+        cache."""
+        schema_data = _introspection_json()
+        client = self._client(body={"data": {"__schema": schema_data}})
+        bundle = tmp_path / "bundle" / "schema_app.json"
+
+        with patch.object(Config, "wiz_dir", return_value=tmp_path):
+            destination = SchemaValidator.refresh(
+                "bundle-env", client, output_path=bundle
+            )
+
+        assert destination == bundle
+        assert bundle.exists()
+        assert not (tmp_path / "schema_bundle-env.json").exists()
+        assert "bundle-env" not in SchemaValidator._schemas
+
+
+class TestStalenessWarning:
+    # The wizsec logger sets propagate = False, so caplog never sees these —
+    # capture the call on the module logger itself.
+    def _warnings(self):
+        return patch("wizsec._schema.logger.warning")
+
+    def test_old_cache_warns_with_remedy(self, tmp_path):
+        cache_file = tmp_path / "schema_stale.json"
+        cache_file.write_text(json.dumps(_introspection_json()))
+        old = time.time() - (SCHEMA_STALE_DAYS + 17) * 86400
+        os.utime(cache_file, (old, old))
+
+        with patch.object(SchemaValidator, "cache_path", return_value=cache_file):
+            with self._warnings() as warn:
+                assert SchemaValidator._load_from_cache("stale-env") is not None
+
+        message = warn.call_args[0][0] % warn.call_args[0][1:]
+        assert "wizsec schema refresh" in message
+        assert "47 days old" in message
+
+    def test_fresh_cache_does_not_warn(self, tmp_path):
+        cache_file = tmp_path / "schema_fresh.json"
+        cache_file.write_text(json.dumps(_introspection_json()))
+
+        with patch.object(SchemaValidator, "cache_path", return_value=cache_file):
+            with self._warnings() as warn:
+                assert SchemaValidator._load_from_cache("fresh-env") is not None
+
+        warn.assert_not_called()
+
+    def test_staleness_never_triggers_a_refetch(self, tmp_path):
+        """Age must not make an arbitrary request block on introspection."""
+        cache_file = tmp_path / "schema_ancient.json"
+        cache_file.write_text(json.dumps(_introspection_json()))
+        old = time.time() - 400 * 86400
+        os.utime(cache_file, (old, old))
+        client = MagicMock()
+
+        with patch.object(SchemaValidator, "cache_path", return_value=cache_file):
+            assert SchemaValidator.get_schema("ancient-env", client) is not None
+
+        client._post.assert_not_called()

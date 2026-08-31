@@ -187,6 +187,83 @@ def _run_migrations(
         sys.stdout.flush()
 
 
+# YAML 1.1 already resolves bare true/false/yes/no/on/off to booleans. These
+# cover the quoted forms, which arrive as plain strings.
+_TRUE_TOKENS = frozenset({"true", "yes", "on", "y", "t", "1"})
+_FALSE_TOKENS = frozenset({"false", "no", "off", "n", "f", "0"})
+
+
+def _bool_setting(value: Any, default: bool) -> bool:
+    """Coerce a config value to a bool, falling back to default.
+
+    A quoted ``enabled: "false"`` reaches us as a non-empty string, and every
+    non-empty string is truthy -- so the plain value read as True and silently
+    enabled what the user wrote the line to disable. That is merely annoying
+    for auto_paginate and actively unsafe for saved_data.pickle, which gates
+    pickle deserialization.
+
+    Nobody writes "false" meaning true, so the quoted forms are honoured
+    rather than treated as unparseable. Values that are neither a recognised
+    token nor a number fall back to the default instead of being judged on
+    Python truthiness, so a typo cannot flip a flag on.
+    """
+    if isinstance(value, bool):
+        return value
+    # bool is a subclass of int, so this is reached only by real numbers.
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token in _TRUE_TOKENS:
+            return True
+        if token in _FALSE_TOKENS:
+            return False
+    return default
+
+
+def _seconds_setting(value: Any, default: float, allow_zero: bool = True) -> float:
+    """Coerce a duration config value to a float, falling back to default.
+
+    YAML hands back whatever was written, so a quoted ``timeout: "3600"``
+    arrives as a string and would only fail much later — inside time.sleep()
+    or an arithmetic deadline — with a TypeError naming neither the setting
+    nor the file. Coerce at the getter instead, and treat out-of-range values
+    the same as unparseable ones, matching how the rate_limit settings behave.
+
+    Durations are floats, not ints: every one of these feeds time.sleep() or a
+    requests timeout, both of which take fractional seconds, and sub-second
+    values are what test suites use to keep retry paths fast.
+
+    ``allow_zero`` is True where zero is meaningful (retry immediately) and
+    False where it is not (a 0-second poll interval spins against the API; a
+    0-second timeout expires before the first attempt).
+    """
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return default
+    if result < 0 or (result == 0 and not allow_zero):
+        return default
+    return result
+
+
+def _count_setting(value: Any, default: int, allow_zero: bool = True) -> int:
+    """Coerce a count config value to an int, falling back to default.
+
+    The integer counterpart to _seconds_setting(); see there for why coercion
+    happens at the getter. ``allow_zero`` is True where zero is meaningful (no
+    retries, logging.NOTSET) and False where it is not (a 0 split threshold or
+    concurrency cap means no work happens at all).
+    """
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        return default
+    if result < 0 or (result == 0 and not allow_zero):
+        return default
+    return result
+
+
 class Config:
     _CONFIG = None
     _logger = None
@@ -485,7 +562,7 @@ class Config:
         """Return whether saved data persistence is enabled."""
         if cls.serverless():
             return False
-        return cls.get("saved_data", "enabled", default=True)
+        return _bool_setting(cls.get("saved_data", "enabled", default=True), True)
 
     @classmethod
     @ensure_loaded
@@ -515,7 +592,7 @@ class Config:
         """Return whether pickle serialization is enabled for saved data."""
         if cls.serverless():
             return False
-        return cls.get("saved_data", "pickle", default=False)
+        return _bool_setting(cls.get("saved_data", "pickle", default=False), False)
 
     ############
     # Auth
@@ -558,9 +635,11 @@ class Config:
 
     @classmethod
     @ensure_loaded
-    def auth_poll_time(cls) -> int:
+    def auth_poll_time(cls) -> float:
         """Return the polling interval in seconds for device-code auth."""
-        return int(cls.get("auth", "device", "poll_time", default=5))
+        return _seconds_setting(
+            cls.get("auth", "device", "poll_time", default=5), 5.0, allow_zero=False
+        )
 
     @classmethod
     @ensure_loaded
@@ -596,7 +675,7 @@ class Config:
     @ensure_loaded
     def domain_enabled(cls, domain: str) -> bool:
         """Return whether the specified domain is enabled in config."""
-        return cls.get("domain", domain, "enabled", default=False)
+        return _bool_setting(cls.get("domain", domain, "enabled", default=False), False)
 
     @classmethod
     @ensure_loaded
@@ -632,31 +711,35 @@ class Config:
     @ensure_loaded
     def api_max_retries(cls) -> int:
         """Return the maximum number of API request retries."""
-        return cls.get("api", "max_retries", default=5)
+        # 0 is meaningful here: do not retry.
+        return _count_setting(cls.get("api", "max_retries", default=5), 5)
 
     @classmethod
     @ensure_loaded
-    def api_retry(cls) -> int:
+    def api_retry(cls) -> float:
         """Return the retry delay in seconds between API attempts."""
-        return cls.get("api", "retry_time", default=2)
+        # 0 is meaningful here: retry immediately.
+        return _seconds_setting(cls.get("api", "retry_time", default=2), 2.0)
 
     @classmethod
     @ensure_loaded
-    def api_timeout(cls) -> int:
+    def api_timeout(cls) -> float:
         """Return the API request timeout in seconds."""
-        return cls.get("api", "timeout", default=180)
+        return _seconds_setting(
+            cls.get("api", "timeout", default=180), 180.0, allow_zero=False
+        )
 
     @classmethod
     @ensure_loaded
     def api_auto_paginate(cls) -> bool:
         """Return whether requests should paginate by default."""
-        return cls.get("api", "auto_paginate", default=True)
+        return _bool_setting(cls.get("api", "auto_paginate", default=True), True)
 
     @classmethod
     @ensure_loaded
     def validate_queries(cls) -> bool:
         """Return whether GraphQL query validation is enabled."""
-        return cls.get("api", "validate_queries", default=False)
+        return _bool_setting(cls.get("api", "validate_queries", default=False), False)
 
     ############
     # Reports
@@ -665,25 +748,43 @@ class Config:
     @ensure_loaded
     def report_stream_by_default(cls) -> bool:
         """Return whether reports should stream results by default."""
-        return cls.get("reports", "stream_by_default", default=True)
+        return _bool_setting(
+            cls.get("reports", "stream_by_default", default=True), True
+        )
 
     @classmethod
     @ensure_loaded
-    def report_retry_time(cls) -> int:
+    def report_retry_time(cls) -> float:
         """Return the retry delay in seconds for report operations."""
-        return cls.get("reports", "retry_time", default=30)
+        # 0 is meaningful here: retry immediately.
+        return _seconds_setting(cls.get("reports", "retry_time", default=30), 30.0)
 
     @classmethod
     @ensure_loaded
     def report_max_retries(cls) -> int:
         """Return the maximum number of retries for report operations."""
-        return cls.get("reports", "max_retries", default=3)
+        # 0 is meaningful here: give up after the first failed poll.
+        return _count_setting(cls.get("reports", "max_retries", default=3), 3)
 
     @classmethod
     @ensure_loaded
-    def report_polling_time(cls) -> int:
+    def report_polling_time(cls) -> float:
         """Return the polling interval in seconds for report status checks."""
-        return cls.get("reports", "polling_time", default=15)
+        return _seconds_setting(
+            cls.get("reports", "polling_time", default=15), 15.0, allow_zero=False
+        )
+
+    @classmethod
+    @ensure_loaded
+    def report_timeout(cls) -> float:
+        """Return the overall deadline in seconds for a report run to complete.
+
+        Bounds the whole poll loop. reports.max_retries only caps *failed*
+        polls, so without this a run that stays IN_PROGRESS is polled forever.
+        """
+        return _seconds_setting(
+            cls.get("reports", "timeout", default=3600), 3600.0, allow_zero=False
+        )
 
     ############
     # Logging
@@ -692,29 +793,26 @@ class Config:
     @ensure_loaded
     def logging_enabled(cls) -> bool:
         """Return whether logging is enabled."""
-        val = cls.get("logging", "enabled", default=True)
-        return val
+        return _bool_setting(cls.get("logging", "enabled", default=True), True)
 
     @classmethod
     @ensure_loaded
     def logger_min_level(cls) -> int:
         """Return the minimum logging level threshold."""
-        val = cls.get("logging", "lowest_level", default=10)
-        return val
+        # 0 is meaningful here: logging.NOTSET.
+        return _count_setting(cls.get("logging", "lowest_level", default=10), 10)
 
     @classmethod
     @ensure_loaded
     def verbose_mode(cls) -> bool:
         """Return whether verbose logging mode is enabled."""
-        val = cls.get("logging", "verbose", default=False)
-        return val
+        return _bool_setting(cls.get("logging", "verbose", default=False), False)
 
     @classmethod
     @ensure_loaded
     def debug_mode(cls) -> bool:
         """Return whether debug logging mode is enabled."""
-        val = cls.get("logging", "debug", default=False)
-        return val
+        return _bool_setting(cls.get("logging", "debug", default=False), False)
 
     @classmethod
     @ensure_loaded
@@ -722,8 +820,9 @@ class Config:
         """Return whether file-based log output is enabled."""
         if cls.serverless():
             return False
-        val = cls.get("logging", "file_handler", "enabled", default=False)
-        return val
+        return _bool_setting(
+            cls.get("logging", "file_handler", "enabled", default=False), False
+        )
 
     @classmethod
     @ensure_loaded
@@ -747,20 +846,25 @@ class Config:
     @ensure_loaded
     def file_handler_create_log_dir(cls) -> bool:
         """Return whether the log directory should be auto-created."""
-        return cls.get("logging", "file_handler", "create_log_dir", default=True)
+        return _bool_setting(
+            cls.get("logging", "file_handler", "create_log_dir", default=True), True
+        )
 
     @classmethod
     @ensure_loaded
     def file_handler_markdown_enabled(cls) -> bool:
         """Return whether markdown-formatted log output is enabled."""
-        return cls.get("logging", "file_handler", "markdown", default=False)
+        return _bool_setting(
+            cls.get("logging", "file_handler", "markdown", default=False), False
+        )
 
     @classmethod
     @ensure_loaded
     def console_handler_enabled(cls) -> bool:
         """Return whether console log output is enabled."""
-        return cls.get(
-            "logging", "console_handler", "enabled", default=cls.logging_enabled()
+        default = cls.logging_enabled()
+        return _bool_setting(
+            cls.get("logging", "console_handler", "enabled", default=default), default
         )
 
     @classmethod
@@ -776,19 +880,29 @@ class Config:
     @ensure_loaded
     def query_splitting_enabled(cls) -> bool:
         """Return whether pre-emptive totalCount probing and query splitting is enabled."""
-        return cls.get("query_splitting", "enabled", default=False)
+        return _bool_setting(
+            cls.get("query_splitting", "enabled", default=False), False
+        )
 
     @classmethod
     @ensure_loaded
     def query_splitting_threshold(cls) -> int:
         """Return the record count above which splitting is triggered."""
-        return int(cls.get("query_splitting", "threshold", default=10000))
+        return _count_setting(
+            cls.get("query_splitting", "threshold", default=10000),
+            10000,
+            allow_zero=False,
+        )
 
     @classmethod
     @ensure_loaded
     def query_splitting_max_concurrent(cls) -> int:
         """Return the maximum number of concurrent async sub-queries when splitting."""
-        return int(cls.get("query_splitting", "max_concurrent", default=10))
+        return _count_setting(
+            cls.get("query_splitting", "max_concurrent", default=10),
+            10,
+            allow_zero=False,
+        )
 
     @classmethod
     @ensure_loaded
@@ -812,7 +926,9 @@ class Config:
     @ensure_loaded
     def query_splitting_cache_subscriptions(cls) -> bool:
         """Return whether the subscription/project list should be cached per session."""
-        return cls.get("query_splitting", "cache_subscriptions", default=True)
+        return _bool_setting(
+            cls.get("query_splitting", "cache_subscriptions", default=True), True
+        )
 
     ############
     # Rate limiting
