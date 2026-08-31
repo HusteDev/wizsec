@@ -13,6 +13,7 @@
 import json
 import logging
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, cast
 
@@ -25,9 +26,15 @@ from graphql import (
 )
 
 from .config import Config
-from .exceptions import WizSchemaValidationError
+from .exceptions import WizAPIError, WizFileError, WizSchemaValidationError
 
 logger = logging.getLogger("wizsec._schema")
+
+# Age at which a cached schema is considered stale. Nothing refetches on
+# this threshold — it only drives the warnings that point at
+# 'wizsec schema refresh'. Shared with the CLI so doctor and the runtime
+# agree on what 'old' means.
+SCHEMA_STALE_DAYS = 30
 
 # Standard introspection query used to fetch the schema from the API
 INTROSPECTION_QUERY = """
@@ -188,16 +195,31 @@ class SchemaValidator:
                 cls._fetch_failed.clear()
 
     @classmethod
-    def _schema_cache_path(cls, environment: str) -> Path:
+    def cache_path(cls, environment: str) -> Path:
         """Return the filesystem path for the cached schema JSON."""
         return Config.wiz_dir() / f"schema_{environment}.json"
 
     @classmethod
     def _load_from_cache(cls, environment: str) -> Optional[GraphQLSchema]:
         """Load and build a GraphQL schema from the disk cache, or return None."""
-        cache_path = cls._schema_cache_path(environment)
+        cache_path = cls.cache_path(environment)
         if not cache_path.exists():
             return None
+
+        # Nothing refetches on age — get_schema only auto-fetches when the
+        # cache is absent — so say so here, once per process per
+        # environment, for anyone who never runs 'wizsec doctor'.
+        try:
+            age_days = (time.time() - cache_path.stat().st_mtime) / 86400
+            if age_days > SCHEMA_STALE_DAYS:
+                logger.warning(
+                    "Cached schema for '%s' is %.0f days old — "
+                    "run 'wizsec schema refresh' to update it",
+                    environment,
+                    age_days,
+                )
+        except OSError:
+            pass
 
         try:
             with open(cache_path, "r") as f:
@@ -214,8 +236,49 @@ class SchemaValidator:
             return None
 
     @classmethod
-    def _fetch_and_cache(cls, environment: str, client: Any) -> Optional[GraphQLSchema]:
-        """Fetch schema via introspection and cache to disk.
+    def refresh(
+        cls, environment: str, client: Any, output_path: Optional[Path] = None
+    ) -> Path:
+        """Introspect the API and write the schema to disk. Returns the path.
+
+        The raising counterpart to _fetch_and_cache(): callers here want the
+        reason a refresh failed, not a silent fall back to unvalidated
+        queries.
+
+        With ``output_path`` the schema is written there and only there —
+        the runtime cache and the in-memory schema are left alone, so
+        generating a schema for a serverless bundle never mutates the
+        developer's own ~/.wiz state.
+        """
+        schema_data = cls._introspect(environment, client)
+
+        # Build before writing so a malformed introspection response fails
+        # here rather than landing on disk as a poisoned cache.
+        schema = build_client_schema(
+            cast(IntrospectionQuery, {"__schema": schema_data})
+        )
+
+        destination = Path(output_path) if output_path else cls.cache_path(environment)
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with open(destination, "w") as f:
+                json.dump(schema_data, f, indent=2)
+        except OSError as e:
+            raise WizFileError(
+                f"Could not write schema for '{environment}' to {destination}: {e}"
+            ) from e
+
+        if output_path is None:
+            with cls._lock:
+                cls._schemas[environment] = schema
+                cls._fetch_failed.discard(environment)
+
+        logger.info("Wrote schema for '%s' to %s", environment, destination)
+        return destination
+
+    @classmethod
+    def _introspect(cls, environment: str, client: Any) -> Dict[str, Any]:
+        """Run the introspection query. Raises WizAPIError on any failure.
 
         Deliberately uses the client's raw transport instead of
         create_request(): building a normal WizRequest here would re-enter
@@ -234,48 +297,55 @@ class SchemaValidator:
             )
 
             if response.status_code != 200:
-                logger.warning(
-                    "Introspection query failed for '%s': HTTP %s",
-                    environment,
-                    response.status_code,
+                raise WizAPIError(
+                    f"Introspection query for '{environment}' failed: "
+                    f"HTTP {response.status_code}",
+                    status_code=response.status_code,
                 )
-                return None
 
             body = response.json() or {}
             if body.get("errors"):
-                logger.warning(
-                    "Introspection query failed for '%s': %s",
-                    environment,
-                    body["errors"],
+                raise WizAPIError(
+                    f"Introspection query for '{environment}' returned errors: "
+                    f"{body['errors']}"
                 )
-                return None
 
             schema_data = (body.get("data") or {}).get("__schema")
             if not schema_data:
-                logger.warning(
-                    "Introspection response missing __schema for '%s'", environment
-                )
-                return None
-
-            schema = build_client_schema({"__schema": schema_data})
-
-            # Cache to disk — best effort; a read-only or full filesystem
-            # must not discard the schema we just fetched.
-            try:
-                cache_path = cls._schema_cache_path(environment)
-                cache_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(cache_path, "w") as f:
-                    json.dump(schema_data, f, indent=2)
-                logger.info("Cached schema for '%s' to %s", environment, cache_path)
-            except OSError as e:
-                logger.warning(
-                    "Could not write schema cache for '%s': %s", environment, e
+                raise WizAPIError(
+                    f"Introspection response for '{environment}' contained no __schema"
                 )
 
-            return schema
+            return cast(Dict[str, Any], schema_data)
+        finally:
+            cls._fetching.discard(environment)
 
+    @classmethod
+    def _fetch_and_cache(cls, environment: str, client: Any) -> Optional[GraphQLSchema]:
+        """Fetch schema via introspection and cache to disk, or return None.
+
+        The degrading counterpart to refresh(): this runs inside whatever
+        request happened to trigger the bootstrap, so every failure becomes
+        a warning and validation is simply skipped.
+        """
+        try:
+            schema_data = cls._introspect(environment, client)
+            schema = build_client_schema(
+                cast(IntrospectionQuery, {"__schema": schema_data})
+            )
         except Exception as e:
             logger.warning("Failed to fetch schema for '%s': %s", environment, e)
             return None
-        finally:
-            cls._fetching.discard(environment)
+
+        # Cache to disk — best effort; a read-only or full filesystem
+        # must not discard the schema we just fetched.
+        try:
+            cache_path = cls.cache_path(environment)
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(cache_path, "w") as f:
+                json.dump(schema_data, f, indent=2)
+            logger.info("Cached schema for '%s' to %s", environment, cache_path)
+        except OSError as e:
+            logger.warning("Could not write schema cache for '%s': %s", environment, e)
+
+        return schema

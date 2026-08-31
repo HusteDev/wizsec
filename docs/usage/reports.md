@@ -39,6 +39,14 @@ When the query is a `createReport` or `rerunReport` mutation, the SDK automatica
 2. Polls the report status until completion
 3. Downloads or streams the report data
 
+## Reports are synchronous only
+
+`report_request` is rejected by `create_async_request()` with a `WizConfigurationError`. Reports are not queries — each one asks the Wiz backend to generate and materialise a dataset, so fanning several out concurrently is far heavier on the API than concurrent queries, and each poll loop would occupy the event loop for minutes. Use the synchronous `client.create_request(...)` for report workflows.
+
+## Bounding a run
+
+`reports.max_retries` caps only *failed* status polls. The overall deadline is `reports.timeout` (default `3600` seconds); when a run exceeds it, polling stops and `response.error` is set to a `WizTimeoutError` naming the last status seen.
+
 ## Streaming vs Download
 
 **Streaming** (default) processes results as they arrive — useful for large reports:

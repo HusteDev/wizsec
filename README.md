@@ -461,11 +461,29 @@ wizsec creds list             # profiles with masked IDs (secrets never shown)
 wizsec creds remove staging
 wizsec creds test             # authenticate with stored credentials
 
+wizsec schema refresh         # re-introspect the API and rewrite the cached schema
+wizsec schema path            # print the schema cache path
+wizsec schema clear           # delete cached schemas (--environment for just one)
+
 wizsec doctor                 # diagnose config, credentials, rate budgets, schema caches
 wizsec doctor --auth          # same, plus a live authentication check
 ```
 
 All commands accept `--file` to operate on a non-default location. `config set` rewrites the YAML file, which drops comments — see the bundled template for documentation of every option.
+
+### Keeping the schema current
+
+Query validation uses a schema cached at `~/.wiz/schema_<env>.json`. It is fetched automatically the first time it is needed, but **only when the file is absent** — nothing refetches it as it ages. `wizsec doctor` warns once a cache passes 30 days, and `wizsec schema refresh` is how you act on that warning.
+
+`wizsec schema refresh` authenticates like `creds test`, so it accepts `--profile` and `--environment`.
+
+For serverless deployments the bundle is read-only and cannot introspect at runtime, so generate the schema ahead of time and ship it alongside your code:
+
+```bash
+wizsec schema refresh --environment app --output ./bundle/schema_app.json
+```
+
+With `--output` the schema is written only to that path — your own `~/.wiz` cache is left untouched.
 
 ## Configuration
 
@@ -563,10 +581,11 @@ The SDK provides a structured exception hierarchy:
 | `WizRateLimitError`          | Rate limit exceeded (includes `retry_after`)                 |
 | `WizQueryError`              | Invalid GraphQL query (includes `query`, `errors`)           |
 | `WizSchemaValidationError`   | Query fails schema validation (includes `validation_errors`) |
-| `WizReportError`             | Report generation/download fails                             |
 | `WizTimeoutError`            | Operation timed out                                          |
 | `WizFileError`               | File I/O error                                               |
 | `WizServerlessError`         | Serverless-specific failure                                  |
+
+`WizReportError` is deprecated and no longer exported from `wizsec`. Nothing raises it — report failures surface as entries in `response.errors` and, where a typed error is set, as `WizTimeoutError` or `WizAPIError` on `response.error`. It remains importable from `wizsec.exceptions` so existing `except` clauses keep working, and will be removed in a future major release.
 
 `submit()` never raises for API-level failures — inspect the response instead. Failed requests carry a typed exception on `response.error` (`WizRateLimitError` when the server rate limit won, `WizAPIError` with `status_code` otherwise), and `response.raise_on_error()` converts a failure into that exception:
 

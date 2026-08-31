@@ -26,7 +26,7 @@ from typing import Any, List, Optional
 
 import yaml
 
-from .config import DEFAULT_WIZ_DIR, generate_default_config
+from .config import Config, DEFAULT_WIZ_DIR, generate_default_config
 from .version import __version__
 
 _CONFIG_FILE = DEFAULT_WIZ_DIR / "wiz.config"
@@ -228,6 +228,65 @@ def _cmd_creds_test(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# schema subcommands
+# ---------------------------------------------------------------------------
+
+
+def _cmd_schema_refresh(args: argparse.Namespace) -> int:
+    from ._schema import SchemaValidator
+    from .client import WizClient
+    from .exceptions import WizError
+
+    try:
+        client = WizClient(
+            environment=args.environment or "",
+            profile=args.profile,
+        )
+        destination = SchemaValidator.refresh(
+            client.environment,
+            client,
+            output_path=Path(args.output) if args.output else None,
+        )
+    except WizError as exc:
+        return _fail(f"schema refresh failed: {exc}")
+    print(f"schema refreshed for environment={client.environment}: {destination}")
+    return 0
+
+
+def _cmd_schema_path(args: argparse.Namespace) -> int:
+    from ._schema import SchemaValidator
+
+    environment = args.environment or Config.default_domain()
+    print(SchemaValidator.cache_path(environment))
+    return 0
+
+
+def _cmd_schema_clear(args: argparse.Namespace) -> int:
+    from ._schema import SchemaValidator
+
+    if args.environment:
+        paths = [SchemaValidator.cache_path(args.environment)]
+    else:
+        paths = sorted(Config.wiz_dir().glob("schema_*.json"))
+
+    removed = 0
+    for path in paths:
+        if not path.exists():
+            continue
+        try:
+            path.unlink()
+        except OSError as exc:
+            return _fail(f"could not remove {path}: {exc}")
+        print(f"removed {path}")
+        removed += 1
+
+    SchemaValidator.clear(args.environment or None)
+    if not removed:
+        print("no schema caches to remove")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # doctor
 # ---------------------------------------------------------------------------
 
@@ -237,6 +296,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     import time as _time
 
     from ._registry import PUBLISHED_RATE_LIMITS
+    from ._schema import SCHEMA_STALE_DAYS
 
     failures = 0
 
@@ -305,8 +365,14 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     else:
         for f in schema_files:
             age_days = (_time.time() - f.stat().st_mtime) / 86400
-            level = "WARN" if age_days > 30 else "OK"
-            report(level, f"schema cache {f.name}: {age_days:.0f} day(s) old")
+            stale = age_days > SCHEMA_STALE_DAYS
+            # Nothing refetches on age, so a stale cache stays stale until
+            # someone runs the refresh — name it rather than just flagging it.
+            remedy = " (run 'wizsec schema refresh')" if stale else ""
+            report(
+                "WARN" if stale else "OK",
+                f"schema cache {f.name}: {age_days:.0f} day(s) old{remedy}",
+            )
 
     # -- optional live authentication check
     if args.auth:
@@ -399,6 +465,40 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--profile", default="default")
     p.add_argument("--environment", default="", help="app, gov, or fedramp")
     p.set_defaults(func=_cmd_creds_test)
+
+    # -- doctor
+    # -- schema
+    schema_parser = subparsers.add_parser(
+        "schema", help="manage the cached GraphQL schema used for query validation"
+    )
+    schema_sub = schema_parser.add_subparsers(dest="schema_command")
+
+    p = schema_sub.add_parser(
+        "refresh", help="introspect the API and rewrite the cached schema"
+    )
+    p.add_argument("--profile", default="default")
+    p.add_argument("--environment", default="", help="app, gov, or fedramp")
+    p.add_argument(
+        "--output",
+        default="",
+        help=(
+            "write the schema here instead of the cache "
+            "(for serverless bundles; leaves ~/.wiz untouched)"
+        ),
+    )
+    p.set_defaults(func=_cmd_schema_refresh)
+
+    p = schema_sub.add_parser("path", help="print the schema cache path")
+    p.add_argument("--environment", default="", help="app, gov, or fedramp")
+    p.set_defaults(func=_cmd_schema_path)
+
+    p = schema_sub.add_parser("clear", help="delete cached schema files")
+    p.add_argument(
+        "--environment",
+        default="",
+        help="only this environment (default: every cached schema)",
+    )
+    p.set_defaults(func=_cmd_schema_clear)
 
     # -- doctor
     p = subparsers.add_parser(

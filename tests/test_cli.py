@@ -1,11 +1,16 @@
 """Tests for the wizsec CLI (config and credential management)."""
 
 import configparser
+import json
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
 
 from wizsec._cli import main
+from wizsec._schema import SchemaValidator
+from wizsec.config import Config
+from wizsec.exceptions import WizAPIError
 
 
 @pytest.fixture
@@ -177,3 +182,109 @@ class TestCredsCommands:
         assert (
             main(["creds", "--file", str(creds_file), "remove", "ghost", "--yes"]) == 1
         )
+
+
+class TestSchemaCommands:
+    def test_schema_path(self, tmp_path, capsys):
+        with patch.object(Config, "wiz_dir", return_value=tmp_path):
+            assert main(["schema", "path", "--environment", "gov"]) == 0
+        assert str(tmp_path / "schema_gov.json") in capsys.readouterr().out
+
+    def test_schema_refresh_reports_destination(self, tmp_path, capsys):
+        client = MagicMock()
+        client.environment = "gov"
+        destination = tmp_path / "schema_gov.json"
+
+        with patch("wizsec.client.WizClient", return_value=client):
+            with patch.object(
+                SchemaValidator, "refresh", return_value=destination
+            ) as refresh:
+                assert main(["schema", "refresh"]) == 0
+
+        refresh.assert_called_once_with("gov", client, output_path=None)
+        out = capsys.readouterr().out
+        assert "environment=gov" in out
+        assert str(destination) in out
+
+    def test_schema_refresh_surfaces_the_reason_it_failed(self, capsys):
+        """A silent exit 1 would be worse than having no command at all."""
+        client = MagicMock()
+        client.environment = "gov"
+
+        with patch("wizsec.client.WizClient", return_value=client):
+            with patch.object(
+                SchemaValidator,
+                "refresh",
+                side_effect=WizAPIError("HTTP 403", status_code=403),
+            ):
+                assert main(["schema", "refresh"]) == 1
+
+        err = capsys.readouterr().err
+        assert "schema refresh failed" in err
+        assert "403" in err
+
+    def test_schema_refresh_output_passes_path_through(self, tmp_path):
+        client = MagicMock()
+        client.environment = "app"
+        bundle = tmp_path / "bundle" / "schema_app.json"
+
+        with patch("wizsec.client.WizClient", return_value=client):
+            with patch.object(
+                SchemaValidator, "refresh", return_value=bundle
+            ) as refresh:
+                assert main(["schema", "refresh", "--output", str(bundle)]) == 0
+
+        assert refresh.call_args.kwargs["output_path"] == bundle
+
+    def test_schema_clear_removes_every_cache(self, tmp_path, capsys):
+        (tmp_path / "schema_gov.json").write_text("{}")
+        (tmp_path / "schema_app.json").write_text("{}")
+
+        with patch.object(Config, "wiz_dir", return_value=tmp_path):
+            assert main(["schema", "clear"]) == 0
+
+        assert not list(tmp_path.glob("schema_*.json"))
+        assert "removed" in capsys.readouterr().out
+
+    def test_schema_clear_single_environment(self, tmp_path):
+        (tmp_path / "schema_gov.json").write_text("{}")
+        (tmp_path / "schema_app.json").write_text("{}")
+
+        with patch.object(Config, "wiz_dir", return_value=tmp_path):
+            assert main(["schema", "clear", "--environment", "gov"]) == 0
+
+        assert not (tmp_path / "schema_gov.json").exists()
+        assert (tmp_path / "schema_app.json").exists()
+
+    def test_schema_clear_with_nothing_cached(self, tmp_path, capsys):
+        with patch.object(Config, "wiz_dir", return_value=tmp_path):
+            assert main(["schema", "clear"]) == 0
+        assert "no schema caches" in capsys.readouterr().out
+
+    def test_schema_refresh_end_to_end(self, tmp_path, capsys):
+        """CLI through the real refresh path — only the transport is mocked."""
+        from graphql import build_schema, introspection_from_schema
+
+        schema_data = introspection_from_schema(
+            build_schema("type Query { ping: String }")
+        )["__schema"]
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {"data": {"__schema": schema_data}}
+        client = MagicMock()
+        client.environment = "gov"
+        client._post.return_value = response
+        client._api_endpoint.return_value = "https://example.test/graphql"
+        client._get_headers.return_value = {}
+
+        try:
+            with patch("wizsec.client.WizClient", return_value=client):
+                with patch.object(Config, "wiz_dir", return_value=tmp_path):
+                    assert main(["schema", "refresh"]) == 0
+        finally:
+            SchemaValidator.clear()
+
+        written = tmp_path / "schema_gov.json"
+        assert written.exists()
+        assert json.loads(written.read_text())["queryType"]["name"] == "Query"
+        assert str(written) in capsys.readouterr().out

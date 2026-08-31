@@ -395,6 +395,10 @@ class WizClient:
         """
         Async version of create_request. Returns an async-enabled response.
 
+        Reports are the one exception: passing ``report_request`` raises
+        ``WizConfigurationError``. Report workflows are sync-only — use
+        ``create_request()``.
+
         Example:
             async with client.async_session() as session_client:
                 response = await session_client.create_async_request(query="...", vars={})

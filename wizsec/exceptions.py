@@ -85,7 +85,14 @@ class WizQueryError(WizError):
 
 
 class WizReportError(WizError):
-    """Raised when report generation or download fails."""
+    """Deprecated; never raised by this package.
+
+    No longer exported from ``wizsec``. Nothing has ever raised it: report
+    failures surface as entries in ``request.errors`` and, where a typed error
+    is set, as ``WizTimeoutError`` or ``WizAPIError`` on ``request.error``.
+    Kept importable from this module so existing ``except`` clauses keep
+    working; it will be removed in a future major release.
+    """
 
     def __init__(
         self,

@@ -356,6 +356,63 @@ class TestDoctor:
         assert "config file missing" in out
         assert "problem(s)" in out
 
+    def test_doctor_stale_schema_names_the_remedy(self, tmp_path, capsys):
+        """Nothing refetches on age, so the warning has to say how to fix it."""
+        import os
+        import time
+
+        from wizsec._cli import main
+        from wizsec._schema import SCHEMA_STALE_DAYS
+
+        config = tmp_path / "wiz.config"
+        config.write_text(yaml.safe_dump({"app": {"config_schema": 2}}))
+        creds = tmp_path / "wiz.credentials"
+        creds.write_text("[default]\nclient_id = abc\nclient_secret = xyz\n")
+
+        cache = tmp_path / "schema_gov.json"
+        cache.write_text("{}")
+        old = time.time() - (SCHEMA_STALE_DAYS + 17) * 86400
+        os.utime(cache, (old, old))
+
+        code = main(
+            [
+                "doctor",
+                "--config-file",
+                str(config),
+                "--creds-file",
+                str(creds),
+            ]
+        )
+        out = capsys.readouterr().out
+        assert code == 0  # stale is a WARN, not a failure
+        assert "schema cache schema_gov.json: 47 day(s) old" in out
+        assert "run 'wizsec schema refresh'" in out
+
+    def test_doctor_fresh_schema_has_no_remedy(self, tmp_path, capsys):
+        from wizsec._cli import main
+
+        config = tmp_path / "wiz.config"
+        config.write_text(yaml.safe_dump({"app": {"config_schema": 2}}))
+        creds = tmp_path / "wiz.credentials"
+        creds.write_text("[default]\nclient_id = abc\nclient_secret = xyz\n")
+        (tmp_path / "schema_gov.json").write_text("{}")
+
+        assert (
+            main(
+                [
+                    "doctor",
+                    "--config-file",
+                    str(config),
+                    "--creds-file",
+                    str(creds),
+                ]
+            )
+            == 0
+        )
+        out = capsys.readouterr().out
+        assert "schema cache schema_gov.json: 0 day(s) old" in out
+        assert "schema refresh" not in out
+
     def test_doctor_respects_headroom_override(self, tmp_path, capsys):
         from wizsec._cli import main
 

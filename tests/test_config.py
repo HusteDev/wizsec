@@ -817,3 +817,137 @@ class TestRateLimitConfig:
     def test_default_retry_after_nonpositive_falls_back(self, mock_config):
         Config._CONFIG["rate_limit"] = {"default_retry_after": 0}
         assert Config.rate_limit_default_retry_after() == 10
+
+
+class TestNumericSettingCoercion:
+    """Numeric settings arrive from YAML as whatever the user typed. A quoted
+    value used to survive the getter as a str and only blow up later, inside
+    time.sleep() or an arithmetic deadline, with a TypeError naming neither
+    the setting nor the file."""
+
+    QUOTED = [
+        ("api", "timeout", "45", lambda: Config.api_timeout(), 45.0),
+        ("api", "retry_time", "3", lambda: Config.api_retry(), 3.0),
+        ("api", "max_retries", "7", lambda: Config.api_max_retries(), 7),
+        ("reports", "timeout", "1800", lambda: Config.report_timeout(), 1800.0),
+        ("reports", "retry_time", "20", lambda: Config.report_retry_time(), 20.0),
+        ("reports", "polling_time", "5", lambda: Config.report_polling_time(), 5.0),
+        ("reports", "max_retries", "9", lambda: Config.report_max_retries(), 9),
+    ]
+
+    @pytest.mark.parametrize("section,key,raw,getter,expected", QUOTED)
+    def test_quoted_numbers_coerce(
+        self, mock_config, section, key, raw, getter, expected
+    ):
+        Config._CONFIG[section] = {key: raw}
+        assert getter() == expected
+
+    @pytest.mark.parametrize("section,key,raw,getter,expected", QUOTED)
+    def test_garbage_falls_back_instead_of_raising(
+        self, mock_config, section, key, raw, getter, expected
+    ):
+        Config._CONFIG[section] = {key: "not-a-number"}
+        assert isinstance(getter(), (int, float))
+
+    @pytest.mark.parametrize("section,key,raw,getter,expected", QUOTED)
+    def test_negative_falls_back(
+        self, mock_config, section, key, raw, getter, expected
+    ):
+        Config._CONFIG[section] = {key: -1}
+        result = getter()
+        assert result > 0
+
+    def test_durations_keep_fractional_seconds(self, mock_config):
+        """time.sleep() and requests timeouts take floats, and sub-second
+        values are how the suite keeps retry paths fast. Truncating to int
+        would turn a 0.01s backoff into no backoff at all."""
+        Config._CONFIG["api"] = {"retry_time": 0.01, "timeout": 2.5}
+        assert Config.api_retry() == 0.01
+        assert Config.api_timeout() == 2.5
+
+    def test_zero_allowed_where_meaningful(self, mock_config):
+        """Zero retries and zero backoff are real choices, not misconfiguration."""
+        Config._CONFIG["api"] = {"max_retries": 0, "retry_time": 0}
+        assert Config.api_max_retries() == 0
+        assert Config.api_retry() == 0.0
+
+    def test_zero_rejected_where_it_would_break(self, mock_config):
+        """A 0s poll interval spins against the API; a 0s timeout expires
+        before the first attempt."""
+        Config._CONFIG["reports"] = {"polling_time": 0, "timeout": 0}
+        assert Config.report_polling_time() == 15.0
+        assert Config.report_timeout() == 3600.0
+
+    def test_counts_stay_ints(self, mock_config):
+        Config._CONFIG["api"] = {"max_retries": "4"}
+        assert isinstance(Config.api_max_retries(), int)
+
+    def test_query_splitting_invalid_falls_back(self, mock_config):
+        """These already coerced with a bare int(), which raised ValueError on
+        bad input rather than falling back like every other setting."""
+        Config._CONFIG["query_splitting"] = {"threshold": "lots", "max_concurrent": 0}
+        assert Config.query_splitting_threshold() == 10000
+        assert Config.query_splitting_max_concurrent() == 10
+
+
+class TestBooleanSettingCoercion:
+    """Every non-empty string is truthy, so a quoted `enabled: "false"` used to
+    read as True and silently enable what the user wrote the line to turn off."""
+
+    def test_quoted_false_disables_pickle(self, mock_config):
+        """The consequential one: this gates pickle deserialization, so reading
+        a quoted "false" as True enabled an RCE vector for someone who had
+        written the setting specifically to disable it."""
+        Config._CONFIG["saved_data"] = {"pickle": "false"}
+        assert Config.saved_data_pickle_enabled() is False
+
+    @pytest.mark.parametrize("raw", ["false", "False", "FALSE", "no", "off", "n", "0"])
+    def test_falsy_tokens(self, mock_config, raw):
+        Config._CONFIG["api"] = {"auto_paginate": raw}
+        assert Config.api_auto_paginate() is False
+
+    @pytest.mark.parametrize("raw", ["true", "True", "yes", "on", "y", "1"])
+    def test_truthy_tokens(self, mock_config, raw):
+        Config._CONFIG["api"] = {"validate_queries": raw}
+        assert Config.validate_queries() is True
+
+    def test_surrounding_whitespace_is_ignored(self, mock_config):
+        Config._CONFIG["api"] = {"auto_paginate": "  OFF  "}
+        assert Config.api_auto_paginate() is False
+
+    def test_real_booleans_pass_through(self, mock_config):
+        Config._CONFIG["api"] = {"auto_paginate": False, "validate_queries": True}
+        assert Config.api_auto_paginate() is False
+        assert Config.validate_queries() is True
+
+    def test_numbers_follow_zero_nonzero(self, mock_config):
+        Config._CONFIG["api"] = {"auto_paginate": 0, "validate_queries": 1}
+        assert Config.api_auto_paginate() is False
+        assert Config.validate_queries() is True
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "maybe",
+            "",
+            None,
+            [],
+            {},
+        ],
+    )
+    def test_unrecognised_values_fall_back_to_default(self, mock_config, raw):
+        """A typo must not flip a flag on via Python truthiness — it falls back
+        to the documented default, in both directions."""
+        Config._CONFIG["api"] = {"auto_paginate": raw, "validate_queries": raw}
+        assert Config.api_auto_paginate() is True  # default True
+        assert Config.validate_queries() is False  # default False
+
+    def test_domain_enabled_coerces(self, mock_config):
+        Config._CONFIG["domain"] = {"gov": {"enabled": "false"}}
+        assert Config.domain_enabled("gov") is False
+
+    def test_getters_return_real_bools(self, mock_config):
+        """Callers and `is True` comparisons should never see a str or int."""
+        Config._CONFIG["logging"] = {"enabled": "yes", "verbose": "0"}
+        assert Config.logging_enabled() is True
+        assert Config.verbose_mode() is False
