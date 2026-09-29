@@ -36,6 +36,7 @@ from wizsec._request import (
     _merge_split_results,
     _schema_supports_totalcount,
 )
+from wizsec.exceptions import WizQueryError
 
 # ---------------------------------------------------------------------------
 # Helpers / fixtures
@@ -1787,3 +1788,202 @@ class TestAsyncReportsAreRejected:
         )
         assert req._generate_report() is True
         assert req.report_name == "R"
+
+
+# ---------------------------------------------------------------------------
+# Async early stop: stop_when / stop_on_page
+# ---------------------------------------------------------------------------
+
+ASYNC_PAGED_QUERY = (
+    "query Q($first: Int, $after: String) { users(first: $first, after: $after) "
+    "{ nodes { id } pageInfo { hasNextPage endCursor } } }"
+)
+
+
+def _async_page_resp(ids, *, has_next, cursor):
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.headers = {}
+    resp.json.return_value = {
+        "data": {
+            "users": {
+                "nodes": [{"id": i} for i in ids],
+                "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
+            }
+        }
+    }
+    return resp
+
+
+def _wire_async_pages(mock_client, responses, call_count):
+    async def fake_post(**kwargs):
+        resp = responses[call_count[0]]
+        call_count[0] += 1
+        return resp
+
+    session = MagicMock()
+    session.post = fake_post
+    mock_client._async_session = session
+    mock_client._async_semaphore = asyncio.Semaphore(10)
+    mock_client._api_endpoint.return_value = "https://api.wiz.io/graphql"
+    mock_client._get_headers.return_value = {}
+
+
+class TestAsyncExecutePageEarlyStop:
+    @pytest.mark.asyncio
+    async def test_stop_when_mid_page_two_stops_after_two_fetches(self, mock_client):
+        req = _make_async_req(
+            mock_client,
+            query=ASYNC_PAGED_QUERY,
+            paginate=True,
+            stop_when=lambda n: n["id"] == "4",
+        )
+        responses = [
+            _async_page_resp(["1", "2"], has_next=True, cursor="c1"),
+            _async_page_resp(["3", "4", "5"], has_next=True, cursor="c2"),
+            _async_page_resp(["6"], has_next=False, cursor=None),
+        ]
+        call_count = [0]
+        _wire_async_pages(mock_client, responses, call_count)
+
+        await req._execute_page()
+
+        assert call_count[0] == 2
+        assert [n["id"] for n in req.data["users"]["nodes"]] == ["1", "2", "3", "4"]
+        assert req.success() is True
+        assert "pageInfo" not in req.data["users"]
+        assert req.stop_info == {
+            "reason": "node",
+            "page": 2,
+            "cursor": "c1",
+            "next_cursor": "c2",
+        }
+
+    @pytest.mark.asyncio
+    async def test_stop_on_page_keeps_first_page_whole(self, mock_client):
+        req = _make_async_req(
+            mock_client,
+            query=ASYNC_PAGED_QUERY,
+            paginate=True,
+            stop_on_page=lambda p: True,
+        )
+        responses = [
+            _async_page_resp(["1", "2"], has_next=True, cursor="c1"),
+            _async_page_resp(["3"], has_next=False, cursor=None),
+        ]
+        call_count = [0]
+        _wire_async_pages(mock_client, responses, call_count)
+
+        await req._execute_page()
+
+        assert call_count[0] == 1
+        assert [n["id"] for n in req.data["users"]["nodes"]] == ["1", "2"]
+        assert req.stop_info["reason"] == "page"
+
+    @pytest.mark.asyncio
+    async def test_page_event_reports_stopped(self, mock_client):
+        events = []
+        req = _make_async_req(
+            mock_client,
+            query=ASYNC_PAGED_QUERY,
+            paginate=True,
+            stop_when=lambda n: n["id"] == "1",
+            on_page_event=events.append,
+        )
+        call_count = [0]
+        _wire_async_pages(
+            mock_client,
+            [_async_page_resp(["1", "2"], has_next=True, cursor="c1")],
+            call_count,
+        )
+
+        await req._execute_page()
+
+        assert len(events) == 1
+        assert [n["id"] for n in events[0]["page_data"]["users"]["nodes"]] == ["1"]
+        assert events[0]["stopped"] is True
+
+    @pytest.mark.asyncio
+    async def test_raising_predicate_reports_query_error(self, mock_client):
+        def boom(node):
+            raise ValueError("bad predicate")
+
+        req = _make_async_req(
+            mock_client, query=ASYNC_PAGED_QUERY, paginate=True, stop_when=boom
+        )
+        call_count = [0]
+        _wire_async_pages(
+            mock_client,
+            [_async_page_resp(["1"], has_next=True, cursor="c1")],
+            call_count,
+        )
+
+        await req._execute_page()  # must not raise
+
+        assert call_count[0] == 1
+        assert isinstance(req.error, WizQueryError)
+        assert req.data is None
+        assert req.success() is False
+
+    @pytest.mark.asyncio
+    async def test_paginate_false_never_calls_predicates(self, mock_client):
+        stop_when = MagicMock(return_value=True)
+        req = _make_async_req(
+            mock_client,
+            query=ASYNC_PAGED_QUERY,
+            paginate=False,
+            stop_when=stop_when,
+        )
+        call_count = [0]
+        _wire_async_pages(
+            mock_client,
+            [_async_page_resp(["1"], has_next=True, cursor="c1")],
+            call_count,
+        )
+
+        await req._execute_page()
+
+        stop_when.assert_not_called()
+        assert req._stopped_early is False
+
+    @pytest.mark.asyncio
+    async def test_maybe_split_async_disabled_by_predicate(self, mock_client):
+        req = _make_async_req(
+            mock_client,
+            query=ASYNC_PAGED_QUERY,
+            paginate=True,
+            stop_when=lambda n: False,
+        )
+        with (
+            patch.object(Config, "serverless", return_value=False),
+            patch.object(Config, "query_splitting_enabled", return_value=True),
+        ):
+            assert await req._maybe_split_async() is False
+
+
+class TestAsyncBatchForwardsStopPredicates:
+    def test_add_request_forwards(self, mock_client):
+        def pred(node):
+            return False
+
+        batch = AsyncWizBatchRequest(client=mock_client)
+        with patch.object(Config, "validate_queries", return_value=False):
+            batch.add_request(query=ASYNC_PAGED_QUERY, stop_when=pred)
+
+        assert batch._requests[0]._stop_when is pred
+
+
+class TestAsyncWizResponseStopSurface:
+    def test_defaults_and_state(self, mock_client):
+        req = _make_async_req(mock_client, query=ASYNC_PAGED_QUERY, paginate=True)
+        resp = AsyncWizResponse(req)
+        assert resp.stopped_early is False
+        assert resp.stop_info is None
+
+        req._stopped_early = True
+        req._stop_reason = "page"
+        req._stop_page = 2
+        req._stop_cursor = "c1"
+        req._stop_next_cursor = "c2"
+        assert resp.stopped_early is True
+        assert resp.stop_info["reason"] == "page"

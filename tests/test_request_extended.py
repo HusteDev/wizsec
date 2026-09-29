@@ -1145,3 +1145,219 @@ class TestAsyncWizResponse:
         resp = AsyncWizResponse(req)
         r = repr(resp)
         assert "True" in r
+
+
+# ── Early stop: stop_when / stop_on_page ─────────────────────────────
+
+PAGED_QUERY = (
+    "query Q($first: Int, $after: String) { users(first: $first, after: $after) "
+    "{ nodes { id } pageInfo { hasNextPage endCursor } } }"
+)
+
+
+def _users_page(ids, *, has_next=True, cursor="cursor123"):
+    return {
+        "users": {
+            "nodes": [{"id": i} for i in ids],
+            "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
+        }
+    }
+
+
+class TestStandardPaginationEarlyStop:
+    def test_stop_prevents_reenqueue_and_finalizes(self, mock_wiz_client):
+        """A stopped request must finalize instead of asking for another page."""
+        req = _make_wiz_request(
+            mock_wiz_client, query=PAGED_QUERY, stop_when=lambda n: n["id"] == "2"
+        )
+        page_data = _users_page(["1", "2", "3"])
+        page_data = req._apply_stop_predicates(page_data)
+        req._merge_page(page_data)
+
+        req._handle_standard_pagination(page_data)
+
+        mock_wiz_client._enqueue_request.assert_not_called()
+        assert "after" not in req.vars
+        assert req._done_event.is_set()
+        assert req.success() is True
+        assert [n["id"] for n in req.data["users"]["nodes"]] == ["1", "2"]
+
+    def test_no_match_still_paginates(self, mock_wiz_client):
+        """Regression guard: a non-matching predicate must not stop anything."""
+        req = _make_wiz_request(
+            mock_wiz_client, query=PAGED_QUERY, stop_when=lambda n: False
+        )
+        page_data = req._apply_stop_predicates(_users_page(["1"]))
+        req._handle_standard_pagination(page_data)
+
+        assert req.vars["after"] == "cursor123"
+        mock_wiz_client._enqueue_request.assert_called_with(req)
+
+    def test_process_successful_response_does_not_mutate_response(
+        self, mock_wiz_client
+    ):
+        """Truncation must copy: self._response keeps every node the API sent."""
+        req = _make_wiz_request(
+            mock_wiz_client, query=PAGED_QUERY, stop_when=lambda n: n["id"] == "b"
+        )
+        response = MagicMock()
+        response.json.return_value = {"data": _users_page(["a", "b", "c", "d"])}
+
+        with patch.object(Config, "serverless", return_value=False):
+            req._process_successful_response(response, "url", {})
+
+        assert [n["id"] for n in req.data["users"]["nodes"]] == ["a", "b"]
+        assert len(req._response["data"]["users"]["nodes"]) == 4
+        assert req.stop_info["reason"] == "node"
+        assert req.stop_info["next_cursor"] == "cursor123"
+        mock_wiz_client._enqueue_request.assert_not_called()
+
+    def test_page_event_sees_truncated_page_and_stopped_flag(self, mock_wiz_client):
+        events = []
+        req = _make_wiz_request(
+            mock_wiz_client,
+            query=PAGED_QUERY,
+            stop_when=lambda n: n["id"] == "a",
+            on_page_event=events.append,
+        )
+        page_data = req._apply_stop_predicates(_users_page(["a", "b", "c"]))
+        req._merge_page(page_data)
+        req._handle_standard_pagination(page_data)
+
+        assert len(events) == 1
+        assert [n["id"] for n in events[0]["page_data"]["users"]["nodes"]] == ["a"]
+        assert events[0]["stopped"] is True
+
+    def test_predicate_exception_sets_done_event(self, mock_wiz_client):
+        """The anti-hang guarantee: submit must never wait forever."""
+
+        def boom(node):
+            raise ValueError("bad predicate")
+
+        req = _make_wiz_request(mock_wiz_client, query=PAGED_QUERY, stop_when=boom)
+        response = MagicMock()
+        response.json.return_value = {"data": _users_page(["a"])}
+
+        with patch.object(Config, "serverless", return_value=False):
+            req._process_successful_response(response, "url", {})
+
+        assert req.errors
+        assert isinstance(req.error, WizQueryError)
+        assert req.success() is False
+        assert req._done_event.is_set()
+
+    def test_paginate_false_never_calls_predicates(self, mock_wiz_client):
+        stop_when = MagicMock(return_value=True)
+        req = _make_wiz_request(
+            mock_wiz_client,
+            query="query Q { users { id } }",
+            paginate=False,
+            stop_when=stop_when,
+        )
+        response = MagicMock()
+        response.json.return_value = {"data": {"users": [{"id": "1"}]}}
+
+        with patch.object(Config, "serverless", return_value=False):
+            req._process_successful_response(response, "url", {})
+
+        stop_when.assert_not_called()
+        assert req._stopped_early is False
+
+
+class TestServerlessPaginationEarlyStop:
+    def _make(self, client, **kwargs):
+        req = _make_wiz_request(client, query=PAGED_QUERY, **kwargs)
+        # Serverless normally disables pagination; force it on the way the
+        # existing serverless tests do.
+        req._paginate = True
+        return req
+
+    def test_stop_on_first_page_never_posts(self, mock_wiz_client):
+        req = self._make(mock_wiz_client, stop_on_page=lambda p: True)
+        first = req._apply_stop_predicates(_users_page(["1"], cursor="c1"))
+        req._merge_page(first)
+        req._response = {"data": first}
+
+        req._handle_serverless_pagination("url", {}, first)
+
+        mock_wiz_client._post.assert_not_called()
+        assert [n["id"] for n in req.data["users"]["nodes"]] == ["1"]
+        assert req.stop_info["reason"] == "page"
+
+    def test_stop_on_second_page_posts_once(self, mock_wiz_client):
+        req = self._make(mock_wiz_client, stop_when=lambda n: n["id"] == "3")
+        first = req._apply_stop_predicates(_users_page(["1", "2"], cursor="c1"))
+        req._merge_page(first)
+        req._response = {"data": first}
+
+        page2 = MagicMock()
+        page2.status_code = 200
+        page2.json.return_value = {
+            "data": _users_page(["3", "4"], has_next=True, cursor="c2")
+        }
+        mock_wiz_client._post.return_value = page2
+
+        req._handle_serverless_pagination("url", {}, first)
+
+        assert mock_wiz_client._post.call_count == 1
+        assert [n["id"] for n in req.data["users"]["nodes"]] == ["1", "2", "3"]
+        assert req.stop_info["cursor"] == "c1"
+
+    def test_two_arg_call_still_supported(self, mock_wiz_client):
+        """Existing callers pass only url and headers."""
+        req = self._make(mock_wiz_client)
+        req._response = {"data": _users_page(["1"], has_next=False, cursor=None)}
+        req._aggregated_data = req._response["data"]
+
+        assert req._handle_serverless_pagination("url", {}) is True
+        assert req.data is not None
+
+
+class TestBatchForwardsStopPredicates:
+    def test_sync_batch_forwards(self, mock_wiz_client):
+        def pred(node):
+            return False
+
+        batch = WizBatchRequest(client=mock_wiz_client)
+        created = _make_wiz_request(mock_wiz_client, query=PAGED_QUERY, stop_when=pred)
+        mock_wiz_client.create_request.return_value = WizResponse(created)
+
+        batch.add_request(query=PAGED_QUERY, stop_when=pred)
+
+        assert mock_wiz_client.create_request.call_args.kwargs["stop_when"] is pred
+        assert batch._requests[0]._stop_when is pred
+
+
+class TestStopPredicatesDisableSplitting:
+    def test_maybe_split_returns_false_with_predicate(self, mock_wiz_client):
+        req = _make_wiz_request(
+            mock_wiz_client, query=PAGED_QUERY, stop_when=lambda n: False
+        )
+        with (
+            patch.object(Config, "serverless", return_value=False),
+            patch.object(Config, "query_splitting_enabled", return_value=True),
+        ):
+            assert req._maybe_split() is False
+
+
+class TestWizResponseStopSurface:
+    def test_defaults_are_readable_on_a_fresh_request(self, mock_wiz_client):
+        """Regression guard for the _EXPOSED_FIELDS falsy-skip trap."""
+        req = _make_wiz_request(mock_wiz_client, query=PAGED_QUERY)
+        resp = WizResponse(req)
+        assert resp.stopped_early is False
+        assert resp.stop_info is None
+
+    def test_reflects_stop_state(self, mock_wiz_client):
+        req = _make_wiz_request(
+            mock_wiz_client, query=PAGED_QUERY, stop_when=lambda n: n["id"] == "a"
+        )
+        req._apply_stop_predicates(_users_page(["a", "b"], cursor="c9"))
+        resp = WizResponse(req)
+        assert resp.stopped_early is True
+        assert resp.stop_info == {
+            "reason": "node",
+            "page": 1,
+            "cursor": None,
+            "next_cursor": "c9",
+        }
