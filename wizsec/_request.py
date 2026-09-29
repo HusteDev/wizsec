@@ -234,6 +234,8 @@ class _RequestBase:
         paginate: Optional[bool] = None,
         report_request: Optional[Dict[str, Any]] = None,
         on_page_event: Optional[Callable] = None,
+        stop_when: Optional[Callable[[Dict[str, Any]], bool]] = None,
+        stop_on_page: Optional[Callable[[Dict[str, Any]], bool]] = None,
     ) -> None:
         """Initialize common state shared by sync and async request classes."""
         self._logger = Config.get_logger()
@@ -250,6 +252,22 @@ class _RequestBase:
         self._page_event = on_page_event
         self._page = 0
         self._aggregated_data: Optional[Dict[str, Any]] = None
+
+        # Early-stop predicates. Both are optional; see _apply_stop_predicates.
+        self._stop_when = stop_when
+        self._stop_on_page = stop_on_page
+        self._stopped_early = False
+        self._stop_reason: Optional[str] = None  # "node" | "page"
+        self._stop_page = 0  # 1-based index of the page that triggered the stop
+        self._stop_cursor: Optional[str] = None  # `after` used to FETCH that page
+        self._stop_next_cursor: Optional[str] = None  # that page's endCursor
+        # Independent of self._page, which only advances when on_page_event is
+        # set and is numbered differently by the sync and async paths.
+        self._pages_scanned = 0
+        if (stop_when or stop_on_page) and paginate is False:
+            self._logger.warning(
+                "stop_when/stop_on_page have no effect with paginate=False"
+            )
 
         self._queryCollection: Optional[Any] = None
         if queryCollection:
@@ -401,6 +419,134 @@ class _RequestBase:
             ):
                 del self.data[first_key]["pageInfo"]
 
+    def _finalize_aggregate(self) -> None:
+        """Publish the merged pages as the final result."""
+        self.data = self._aggregated_data
+        self._clean_page_info()
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Early stop
+    #
+    # Every branch these helpers add to a pagination loop must terminate at
+    # either _finalize_pagination() or the caller's `if self.errors:` guard —
+    # both reach _set_done_event(). WizRequest.submit() waits on that event
+    # with no timeout, so a path that neither finalizes nor errors hangs the
+    # caller forever.
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _connection_key(self, data: Optional[Dict[str, Any]]) -> Optional[str]:
+        """Return the key of the Relay connection dict (the one holding "nodes")."""
+        if not data:
+            return None
+        source = (getattr(self, "_current_query_info", None) or {}).get("source")
+        if source and isinstance(data.get(source), dict) and "nodes" in data[source]:
+            return source
+        for key, value in data.items():
+            if isinstance(value, dict) and "nodes" in value:
+                return key
+        return None
+
+    def _call_stop_predicate(
+        self, predicate: Callable[[Dict[str, Any]], bool], arg: Any, label: str
+    ) -> bool:
+        """Call a user stop predicate, converting any exception into a query error.
+
+        A raising predicate would otherwise escape into the client's queue
+        worker thread, which swallows exceptions without setting the done
+        event — hanging submit() forever. Recorded as a WizQueryError so
+        success() is False rather than silently returning partial data.
+        """
+        try:
+            return bool(predicate(arg))
+        except Exception as exc:
+            message = f"{label} predicate raised {type(exc).__name__}: {exc}"
+            self._logger.error(message, exc_info=True)
+            self.errors.append({"message": message, "trace": traceback.format_exc()})
+            if self.error is None:
+                self.error = WizQueryError(
+                    message,
+                    query=getattr(self, "_query", None),
+                    errors=self.errors,
+                    original_error=exc,
+                )
+            return False
+
+    def _apply_stop_predicates(
+        self, page_data: Optional[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        """Evaluate the stop predicates against one freshly fetched page.
+
+        Returns the page data that should be merged: ``page_data`` itself when
+        nothing truncates it, or a NEW dict whose node list is cut off after
+        the first node matching ``stop_when``. Never mutates ``page_data``
+        (and therefore never mutates ``self._response``).
+
+        Call this immediately before ``_merge_page`` in every pagination path.
+        """
+        if not (self._stop_when or self._stop_on_page) or page_data is None:
+            return page_data
+
+        self._pages_scanned += 1
+        # Still the cursor that FETCHED this page — every caller advances
+        # vars["after"] only after the stop decision has been made.
+        cursor = self.vars.get("after")
+
+        key = self._connection_key(page_data)
+        connection = (page_data.get(key) or {}) if key else {}
+        nodes = connection.get("nodes") or []
+
+        match_index: Optional[int] = None
+        if self._stop_when and key:
+            for index, node in enumerate(nodes):
+                if self._call_stop_predicate(self._stop_when, node, "stop_when"):
+                    match_index = index
+                    break
+
+        # Called exactly once per fetched page, with the full untruncated page,
+        # even when stop_when already matched — so a callback keeping its own
+        # tally sees every page it was given.
+        page_match = False
+        if self._stop_on_page:
+            page_match = self._call_stop_predicate(
+                self._stop_on_page, page_data, "stop_on_page"
+            )
+
+        if match_index is not None:
+            self._stop_reason = "node"
+        elif page_match:
+            self._stop_reason = "page"
+        else:
+            return page_data
+
+        self._stopped_early = True
+        self._stop_page = self._pages_scanned
+        self._stop_cursor = cursor
+        self._stop_next_cursor = (self._page_info(page_data) or {}).get("endCursor")
+
+        if match_index is None:
+            # stop_on_page keeps the whole page.
+            return page_data
+
+        # Shallow copy at two levels; the node dicts themselves are shared.
+        # pageInfo survives so the caller's _page_info/_clean_page_info still
+        # work, and totalCount is deliberately left as the server-side total —
+        # stopped_early is the signal that the node list is partial.
+        assert key is not None
+        truncated = {**connection, "nodes": nodes[: match_index + 1]}
+        return {**page_data, key: truncated}
+
+    @property
+    def stop_info(self) -> Optional[Dict[str, Any]]:
+        """Where pagination stopped, or None if it ran to completion."""
+        if not self._stopped_early:
+            return None
+        return {
+            "reason": self._stop_reason,
+            "page": self._stop_page,
+            "cursor": self._stop_cursor,
+            "next_cursor": self._stop_next_cursor,
+        }
+
     def success(self) -> bool:
         """Return True if the request completed with data and no errors."""
         return self.data is not None and not self.errors
@@ -418,6 +564,8 @@ class WizRequest(_RequestBase):
         paginate: Optional[bool] = None,
         report_request: Optional[Dict[str, Any]] = None,
         on_page_event: Optional[Callable] = None,
+        stop_when: Optional[Callable[[Dict[str, Any]], bool]] = None,
+        stop_on_page: Optional[Callable[[Dict[str, Any]], bool]] = None,
     ) -> None:
         """Initialize a synchronous Wiz GraphQL request."""
         self._init_common(
@@ -428,6 +576,8 @@ class WizRequest(_RequestBase):
             paginate,
             report_request,
             on_page_event,
+            stop_when,
+            stop_on_page,
         )
         self._done_event = threading.Event()
 
@@ -463,6 +613,12 @@ class WizRequest(_RequestBase):
 
         # Prevent recursive probing on sub-requests fired by the splitter itself.
         if getattr(self, "_is_sub_request", False):
+            return False
+
+        if self._stop_when or self._stop_on_page:
+            self._logger.debug(
+                "query_splitting: disabled — stop predicates are set on this request"
+            )
             return False
 
         if self._current_query_info.get("request_type", "").lower() != "query":
@@ -654,6 +810,8 @@ class WizRequest(_RequestBase):
             self.errors = []
         self.errors.extend(resp_errors)
         page_data = self._response.get("data", {})
+        if self._paginate:
+            page_data = self._apply_stop_predicates(page_data)
         self._merge_page(page_data)
 
         if self.errors:
@@ -666,17 +824,28 @@ class WizRequest(_RequestBase):
             return True
 
         if Config.serverless():
-            return self._handle_serverless_pagination(url, headers)
+            return self._handle_serverless_pagination(url, headers, page_data)
         else:
             return self._handle_standard_pagination(page_data)
 
-    def _handle_serverless_pagination(self, url: str, headers: Dict[str, str]) -> bool:
+    def _handle_serverless_pagination(
+        self,
+        url: str,
+        headers: Dict[str, str],
+        page_data: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         """Handle pagination in serverless mode."""
         assert self._response is not None
         if self._paginate and not self.errors:
-            page_data = self._response.get("data", {})
+            if page_data is None:
+                page_data = self._response.get("data", {})
             info = self._page_info(page_data)
-            while info and info.get("hasNextPage") and not self.errors:
+            while (
+                info
+                and info.get("hasNextPage")
+                and not self.errors
+                and not self._stopped_early
+            ):
                 self.vars["after"] = info.get("endCursor")
                 # Execute next page immediately
                 response = self._client._post(
@@ -687,14 +856,15 @@ class WizRequest(_RequestBase):
                 if response.status_code == 200:
                     next_response = response.json()
                     self.errors.extend(next_response.get("errors", []))
-                    next_page_data = next_response.get("data", {})
+                    next_page_data = self._apply_stop_predicates(
+                        next_response.get("data", {})
+                    )
                     self._merge_page(next_page_data)
                     info = self._page_info(next_page_data)
                 else:
                     break
 
-            self.data = self._aggregated_data
-            self._clean_page_info()
+            self._finalize_aggregate()
         else:
             self.data = self._response.get("data", {})
         return True
@@ -708,7 +878,7 @@ class WizRequest(_RequestBase):
         else:
             self._trigger_page_event(page_data)
             info = self._page_info(page_data)
-            if info and info.get("hasNextPage"):
+            if info and info.get("hasNextPage") and not self._stopped_early:
                 self.vars["after"] = info.get("endCursor")
                 self._client._enqueue_request(self)
             else:
@@ -716,19 +886,27 @@ class WizRequest(_RequestBase):
             return True
 
     def _trigger_page_event(self, page_data: Dict[str, Any]) -> None:
-        """Trigger the page event callback if configured."""
+        """Trigger the page event callback if configured.
+
+        The callback sees the page as merged — truncated when a stop_when
+        predicate cut it short — so a running node tally stays accurate.
+        """
         if self._page_event:
             self._logger.debug(f"on_page_event [Page {self._page}]")
             self._page += 1
             page_info = {"per_page": self.vars.get("first", 0), "page": self._page}
             self._page_event(
-                {"page_data": page_data, "page_info": page_info, "errors": self.errors}
+                {
+                    "page_data": page_data,
+                    "page_info": page_info,
+                    "errors": self.errors,
+                    "stopped": self._stopped_early,
+                }
             )
 
     def _finalize_pagination(self) -> None:
         """Finalize pagination by setting final data and marking as done."""
-        self.data = self._aggregated_data
-        self._clean_page_info()
+        self._finalize_aggregate()
         self._set_done_event()
 
     def _graphql_rate_limited(self, response: Any) -> bool:
@@ -1072,6 +1250,25 @@ class WizResponse:
         """Return the GraphQL source/node type of the query."""
         return self._request._current_query_info.get("source", None)
 
+    @property
+    def stopped_early(self) -> bool:
+        """Return True if a stop predicate ended pagination before the last page.
+
+        This is not a failure — ``success`` stays True.
+        """
+        return self._request._stopped_early
+
+    @property
+    def stop_info(self) -> Optional[Dict[str, Any]]:
+        """Return where pagination stopped, or None if it ran to completion.
+
+        Keys: ``reason`` ("node" or "page"), ``page`` (1-based index of the
+        stopping page), ``cursor`` (the ``after`` value that fetched it) and
+        ``next_cursor`` (that page's ``endCursor``). See the docstrings on
+        ``WizClient.create_request`` for how to resume from them.
+        """
+        return self._request.stop_info
+
     def raise_on_error(self) -> "WizResponse":
         """Raise the typed error if the request failed; return self otherwise."""
         if self.success:
@@ -1122,6 +1319,11 @@ class WizBatchRequest:
     ) -> int:
         """
         Add a request to the batch. Returns the request ID for later reference.
+
+        Extra keyword arguments (``on_page_event``, ``stop_when``,
+        ``stop_on_page``) are forwarded to the request. Stop predicates are
+        per-request: each request stops its own pagination, and one stopping
+        does not stop the others.
         """
         # Create the response object that users will interact with
         response = self._client.create_request(
@@ -1363,6 +1565,8 @@ class AsyncWizRequest(_RequestBase):
         paginate: Optional[bool] = None,
         report_request: Optional[Dict[str, Any]] = None,
         on_page_event: Optional[Callable] = None,
+        stop_when: Optional[Callable[[Dict[str, Any]], bool]] = None,
+        stop_on_page: Optional[Callable[[Dict[str, Any]], bool]] = None,
     ) -> None:
         """Initialize an asynchronous Wiz GraphQL request.
 
@@ -1394,6 +1598,8 @@ class AsyncWizRequest(_RequestBase):
             paginate,
             report_request,
             on_page_event,
+            stop_when,
+            stop_on_page,
         )
 
     async def submit(self) -> "AsyncWizRequest":
@@ -1420,6 +1626,12 @@ class AsyncWizRequest(_RequestBase):
             return False
 
         if getattr(self, "_is_sub_request", False):
+            return False
+
+        if self._stop_when or self._stop_on_page:
+            self._logger.debug(
+                "query_splitting: disabled — stop predicates are set on this request"
+            )
             return False
 
         if self._current_query_info.get("request_type", "").lower() != "query":
@@ -1578,6 +1790,8 @@ class AsyncWizRequest(_RequestBase):
                                 self.errors = []
                             self.errors.extend(resp_errors)
                             page_data = response_data.get("data", {})
+                            if self._paginate:
+                                page_data = self._apply_stop_predicates(page_data)
                             self._merge_page(page_data)
                             break
                         elif response.status_code == 429:
@@ -1640,16 +1854,16 @@ class AsyncWizRequest(_RequestBase):
                             "page": self._page,
                         },
                         "errors": self.errors,
+                        "stopped": self._stopped_early,
                     }
                 )
 
             page_info = self._page_info(page_data)
-            if page_info and page_info.get("hasNextPage"):
+            if page_info and page_info.get("hasNextPage") and not self._stopped_early:
                 self.vars["after"] = page_info.get("endCursor")
                 self._page += 1
             else:
-                self.data = self._aggregated_data
-                self._clean_page_info()
+                self._finalize_aggregate()
                 return
 
     async def _async_wait_for_rate_limit(self, waits_so_far: int, wait_s: int) -> bool:
@@ -1711,6 +1925,24 @@ class AsyncWizResponse:
         """Return the typed exception recorded at final failure, if any."""
         return self._request.error
 
+    @property
+    def stopped_early(self) -> bool:
+        """Return True if a stop predicate ended pagination before the last page.
+
+        This is not a failure — ``success`` stays True.
+        """
+        return self._request._stopped_early
+
+    @property
+    def stop_info(self) -> Optional[Dict[str, Any]]:
+        """Return where pagination stopped, or None if it ran to completion.
+
+        Keys: ``reason`` ("node" or "page"), ``page`` (1-based index of the
+        stopping page), ``cursor`` (the ``after`` value that fetched it) and
+        ``next_cursor`` (that page's ``endCursor``).
+        """
+        return self._request.stop_info
+
     def raise_on_error(self) -> "AsyncWizResponse":
         """Raise the typed error if the request failed; return self otherwise."""
         if self.success:
@@ -1751,7 +1983,13 @@ class AsyncWizBatchRequest:
         paginate: Optional[bool] = None,
         **kwargs,
     ) -> int:
-        """Add request to batch"""
+        """Add request to batch.
+
+        Extra keyword arguments (``on_page_event``, ``stop_when``,
+        ``stop_on_page``) are forwarded to the request. Stop predicates are
+        per-request: each request stops its own pagination, and one stopping
+        does not stop the others.
+        """
         request = AsyncWizRequest(
             client=self._client,
             queryCollection=queryCollection,

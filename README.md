@@ -320,6 +320,7 @@ Monitor pagination progress with a callback that fires after each page is fetche
 | `page_data` | `dict` | Raw GraphQL data from the current page |
 | `page_info` | `dict` | `{"page": int, "per_page": int}` — current page number and page size |
 | `errors` | `list` | Any errors accumulated so far |
+| `stopped` | `bool` | True if an early-stop predicate ended pagination on this page |
 
 **Simple progress logging:**
 
@@ -425,6 +426,59 @@ async with client.async_session() as ac:
 ```
 
 Each page goes through the normal rate-limiting and retry pipeline; a failed page raises the typed error (`WizAPIError`, `WizRateLimitError`, …).
+
+## Stopping Early
+
+Sometimes you want a paginated query to stop as soon as the results cross a boundary — the first issue whose name matches something, or the point where a date-sorted result set passes your cutoff. Two optional predicates end pagination without fetching the rest:
+
+| Parameter | Called with | Effect when it returns `True` |
+|-----------|-------------|-------------------------------|
+| `stop_when(node)` | each result node, in order | the matching node is **kept**, the rest of its page is dropped, and no further pages are fetched |
+| `stop_on_page(page_data)` | once per fetched page, the raw GraphQL data | the whole page is kept, and no further pages are fetched |
+
+```python
+from datetime import datetime, timezone
+
+cutoff = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+# Stop at the first issue older than the cutoff (results sorted newest first)
+response = client.create_request(
+    query=ISSUES_QUERY,
+    vars={"first": 500},
+    stop_when=lambda n: datetime.fromisoformat(n["createdAt"]) < cutoff,
+)
+result = response.submit()
+
+print(len(result.data["issues"]["nodes"]), "issues fetched")
+print(response.stopped_early, response.stop_info)
+```
+
+Given a page of `[a, b, MATCH, d, e]`, the aggregated node list ends at `MATCH` — `d` and `e` are dropped along with every later page.
+
+**Stopping early is not an error.** `response.success` stays `True`, and no exception is raised. Two properties tell you what happened:
+
+- `response.stopped_early` — `bool`.
+- `response.stop_info` — `None` if the query ran to completion, otherwise `{"reason": "node" | "page", "page": int, "cursor": str | None, "next_cursor": str | None}`.
+
+Both predicates work everywhere pagination does — `create_request`, `create_async_request`, batch requests (each request stops itself), and `iterate_nodes` / `iterate_nodes_async`:
+
+```python
+for issue in client.iterate_nodes(
+    query=ISSUES_QUERY,
+    vars={"first": 500},
+    stop_when=lambda n: n["entitySnapshot"]["name"].startswith("legacy-"),
+):
+    process(issue)   # the matching issue is the last one yielded
+```
+
+A few things worth knowing:
+
+- **Resuming.** `stop_info["next_cursor"]` is an exact resume point only when `reason == "page"`. After a `stop_when` truncation it would skip the nodes you deliberately dropped, so resume from `stop_info["cursor"]` instead — that refetches the whole stopping page, and you de-duplicate by id. Relay `nodes` selections carry no per-node cursor, so there is no exact mid-page resume point.
+- **`totalCount` is untouched.** It stays the server-side total, so it will exceed the number of nodes you got back. `stopped_early` is the signal that the list is partial.
+- **Predicates run inline** on the fetch loop (the queue worker thread for sync requests), so keep them cheap and thread-safe. A predicate that raises is reported as a `WizQueryError` — `success` becomes `False` — rather than silently returning results truncated at an arbitrary point.
+- **Query splitting is disabled** for any request with a predicate set. Split sub-queries run concurrently over disjoint scopes, so "the first matching node" would have no global ordering.
+
+See [`examples/early_stop.py`](examples/early_stop.py) for complete sync, async, iterator, and resume examples.
 
 ## Rate Limiting
 

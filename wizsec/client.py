@@ -16,7 +16,7 @@ import os
 import base64
 import json
 import queue
-from typing import TYPE_CHECKING, Optional, Dict, Any, Iterator, Union
+from typing import TYPE_CHECKING, Callable, Optional, Dict, Any, Iterator, Union
 import asyncio
 from contextlib import contextmanager
 from .config import Config
@@ -236,6 +236,30 @@ class WizClient:
         paginate: Optional[bool] = None,
         **kwargs,
     ) -> "WizResponse":
+        """Create a synchronous request.
+
+        Extra keyword arguments are forwarded to ``WizRequest``:
+
+        - ``on_page_event`` — progress callback, fired once per merged page.
+        - ``stop_when(node) -> bool`` — stop paginating at the first result
+          node this returns True for. The matching node is kept; the rest of
+          its page is dropped and no further pages are fetched.
+        - ``stop_on_page(page_data) -> bool`` — stop after a page, keeping it
+          whole. Called once per fetched page with the raw GraphQL data.
+
+        Stopping early is a normal outcome: ``response.success`` stays True.
+        ``response.stopped_early`` and ``response.stop_info`` say whether and
+        where it happened. ``stop_info["next_cursor"]`` is an exact resume
+        point only when ``reason == "page"`` — after a ``stop_when``
+        truncation, resuming from it skips the nodes that were dropped, while
+        resuming from ``stop_info["cursor"]`` refetches the whole stopping
+        page (de-duplicate by id). Relay ``nodes`` selections carry no
+        per-node cursor, so there is no exact mid-page resume point.
+
+        Setting either predicate disables query splitting for this request:
+        split sub-queries run concurrently over disjoint scopes, so "the first
+        matching node" has no global ordering.
+        """
         self._logger.debug(
             f"Creating request with query: {query[:50] if query else 'None'}..."
         )
@@ -257,6 +281,8 @@ class WizClient:
         query: Optional[str] = None,
         vars: Optional[Dict[str, Any]] = None,
         page_size: Optional[int] = None,
+        stop_when: Optional[Callable[[Dict[str, Any]], bool]] = None,
+        stop_on_page: Optional[Callable[[Dict[str, Any]], bool]] = None,
     ) -> Iterator[Dict[str, Any]]:
         """Yield result nodes one page at a time without aggregating in memory.
 
@@ -265,6 +291,12 @@ class WizClient:
         are fetched lazily as the iterator is consumed, so breaking out early
         stops further API calls. Raises the typed error (e.g. WizAPIError,
         WizRateLimitError) if a page fails.
+
+        ``stop_when(node)`` and ``stop_on_page(page_data)`` end the iteration
+        the same way they end an aggregating query: a ``stop_when`` match is
+        the last node yielded, and a ``stop_on_page`` match yields the whole
+        page and then stops. A predicate that raises is reported as a
+        WizQueryError, like any other page failure.
 
         Example:
             for issue in client.iterate_nodes(query=ISSUES_QUERY, vars={"first": 100}):
@@ -288,8 +320,15 @@ class WizClient:
             )
             # Pages are already scoped; never probe/split individual pages.
             request._is_sub_request = True  # type: ignore[attr-defined]
+            # Assigned after construction: these page requests are
+            # deliberately paginate=False, which the constructor would
+            # (correctly, for any other caller) warn about.
+            request._stop_when = stop_when
+            request._stop_on_page = stop_on_page
             request.query = ensure_pagination_variables(request.query)
             request.submit()
+
+            data = request._apply_stop_predicates(request.data or {}) or {}
 
             if not request.success():
                 if request.error is not None:
@@ -300,10 +339,12 @@ class WizClient:
                     errors=request.errors,
                 )
 
-            data = request.data or {}
             source = request._current_query_info.get("source", "")
             connection = data.get(source) or {}
             yield from connection.get("nodes", [])
+
+            if request._stopped_early:
+                return
 
             info = request._page_info(data)
             if not info or not info.get("hasNextPage"):
@@ -316,8 +357,13 @@ class WizClient:
         query: Optional[str] = None,
         vars: Optional[Dict[str, Any]] = None,
         page_size: Optional[int] = None,
+        stop_when: Optional[Callable[[Dict[str, Any]], bool]] = None,
+        stop_on_page: Optional[Callable[[Dict[str, Any]], bool]] = None,
     ) -> Any:
         """Async counterpart of iterate_nodes; use within async_session().
+
+        ``stop_when`` and ``stop_on_page`` behave exactly as they do in
+        ``iterate_nodes``.
 
         Example:
             async with client.async_session() as ac:
@@ -341,8 +387,14 @@ class WizClient:
                 paginate=False,
             )
             request._is_sub_request = True  # type: ignore[attr-defined]
+            # See iterate_nodes: assigned post-construction because these page
+            # requests are deliberately paginate=False.
+            request._stop_when = stop_when
+            request._stop_on_page = stop_on_page
             request.query = ensure_pagination_variables(request.query)
             await request.submit()
+
+            data = request._apply_stop_predicates(request.data or {}) or {}
 
             if not request.success():
                 if request.error is not None:
@@ -353,11 +405,13 @@ class WizClient:
                     errors=request.errors,
                 )
 
-            data = request.data or {}
             source = request._current_query_info.get("source", "")
             connection = data.get(source) or {}
             for node in connection.get("nodes", []):
                 yield node
+
+            if request._stopped_early:
+                return
 
             info = request._page_info(data)
             if not info or not info.get("hasNextPage"):
@@ -394,6 +448,9 @@ class WizClient:
     ) -> "AsyncWizResponse":
         """
         Async version of create_request. Returns an async-enabled response.
+
+        Accepts the same extra keyword arguments as ``create_request``,
+        including the ``stop_when`` / ``stop_on_page`` early-stop predicates.
 
         Reports are the one exception: passing ``report_request`` raises
         ``WizConfigurationError``. Report workflows are sync-only — use

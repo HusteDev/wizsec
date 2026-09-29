@@ -1,6 +1,7 @@
 """Tests for the 1.1.0 release features: report deadlock fix, typed errors,
 transient-error clearing, streaming pagination, and wizsec doctor."""
 
+import logging
 import threading
 import types
 from unittest.mock import MagicMock, patch
@@ -12,7 +13,12 @@ from wizsec.client import WizClient
 from wizsec.config import Config
 from wizsec.exceptions import WizAPIError, WizRateLimitError
 from wizsec._registry import EnvironmentState
-from wizsec._request import AsyncWizRequest, WizRequest, WizResponse
+from wizsec._request import (
+    AsyncWizRequest,
+    WizRequest,
+    WizResponse,
+    _RequestBase,
+)
 
 QUERY = (
     "query Issues($first: Int, $after: String) { issues(first: $first, after: $after)"
@@ -212,8 +218,19 @@ class TestTransientErrorClearing:
 # ---------------------------------------------------------------------------
 
 
+class _StopHelpers:
+    """Borrow the real pagination/stop helpers without _RequestBase's
+    ``query`` descriptor, which the stub deliberately keeps as a plain
+    attribute."""
+
+    _page_info = _RequestBase._page_info
+    _connection_key = _RequestBase._connection_key
+    _call_stop_predicate = _RequestBase._call_stop_predicate
+    _apply_stop_predicates = _RequestBase._apply_stop_predicates
+
+
 def _stub_request_factory(pages, created):
-    class StubRequest:
+    class StubRequest(_StopHelpers):
         def __init__(self, **kwargs):
             created.append(kwargs)
             self.query = kwargs.get("query")
@@ -222,23 +239,23 @@ def _stub_request_factory(pages, created):
             self.error = None
             self.data = None
             self._current_query_info = {"source": "issues"}
+            self._logger = logging.getLogger("wizsec.test")
+            # iterate_nodes assigns the predicates after construction.
+            self._stop_when = None
+            self._stop_on_page = None
+            self._stopped_early = False
+            self._stop_reason = None
+            self._stop_page = 0
+            self._stop_cursor = None
+            self._stop_next_cursor = None
+            self._pages_scanned = 0
 
         def submit(self):
             self.data = pages[len(created) - 1]
             return self
 
         def success(self):
-            return True
-
-        def _page_info(self, data):
-            for value in (data or {}).values():
-                if isinstance(value, dict) and "pageInfo" in value:
-                    info = value["pageInfo"]
-                    return {
-                        "hasNextPage": info.get("hasNextPage", False),
-                        "endCursor": info.get("endCursor"),
-                    }
-            return None
+            return not self.errors
 
     return StubRequest
 
@@ -304,6 +321,103 @@ class TestIterateNodes:
             ]
 
         assert [n["id"] for n in nodes] == ["a", "b", "c"]
+
+    def test_stop_when_on_first_page_yields_through_the_match(self):
+        client = MagicMock()
+        created = []
+        with patch("wizsec._request.WizRequest", _stub_request_factory(PAGES, created)):
+            nodes = list(
+                WizClient.iterate_nodes(
+                    client, query=QUERY, stop_when=lambda n: n["id"] == "b"
+                )
+            )
+
+        assert [n["id"] for n in nodes] == ["a", "b"]
+        assert len(created) == 1  # second page never requested
+
+    def test_stop_when_on_second_page(self):
+        client = MagicMock()
+        created = []
+        with patch("wizsec._request.WizRequest", _stub_request_factory(PAGES, created)):
+            nodes = list(
+                WizClient.iterate_nodes(
+                    client, query=QUERY, stop_when=lambda n: n["id"] == "c"
+                )
+            )
+
+        assert [n["id"] for n in nodes] == ["a", "b", "c"]
+        assert len(created) == 2
+
+    def test_stop_on_page_yields_whole_page(self):
+        client = MagicMock()
+        created = []
+        with patch("wizsec._request.WizRequest", _stub_request_factory(PAGES, created)):
+            nodes = list(
+                WizClient.iterate_nodes(
+                    client, query=QUERY, stop_on_page=lambda p: True
+                )
+            )
+
+        assert [n["id"] for n in nodes] == ["a", "b"]
+        assert len(created) == 1
+
+    def test_raising_predicate_raises_query_error(self):
+        from wizsec.exceptions import WizQueryError
+
+        def boom(node):
+            raise ValueError("bad predicate")
+
+        client = MagicMock()
+        created = []
+        with patch("wizsec._request.WizRequest", _stub_request_factory(PAGES, created)):
+            with pytest.raises(WizQueryError):
+                list(WizClient.iterate_nodes(client, query=QUERY, stop_when=boom))
+
+    @pytest.mark.asyncio
+    async def test_async_stop_when_on_second_page(self):
+        client = MagicMock()
+        created = []
+
+        sync_stub = _stub_request_factory(PAGES, created)
+
+        class AsyncStub(sync_stub):  # type: ignore[valid-type, misc]
+            async def submit(self):
+                self.data = PAGES[len(created) - 1]
+                return self
+
+        with patch("wizsec._request.AsyncWizRequest", AsyncStub):
+            nodes = [
+                n
+                async for n in WizClient.iterate_nodes_async(
+                    client, query=QUERY, stop_when=lambda n: n["id"] == "c"
+                )
+            ]
+
+        assert [n["id"] for n in nodes] == ["a", "b", "c"]
+        assert len(created) == 2
+
+    @pytest.mark.asyncio
+    async def test_async_stop_when_on_first_page(self):
+        client = MagicMock()
+        created = []
+
+        sync_stub = _stub_request_factory(PAGES, created)
+
+        class AsyncStub(sync_stub):  # type: ignore[valid-type, misc]
+            async def submit(self):
+                self.data = PAGES[len(created) - 1]
+                return self
+
+        with patch("wizsec._request.AsyncWizRequest", AsyncStub):
+            nodes = [
+                n
+                async for n in WizClient.iterate_nodes_async(
+                    client, query=QUERY, stop_when=lambda n: n["id"] == "a"
+                )
+            ]
+
+        assert [n["id"] for n in nodes] == ["a"]
+        assert len(created) == 1
 
 
 # ---------------------------------------------------------------------------

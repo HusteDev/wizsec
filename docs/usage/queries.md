@@ -58,6 +58,47 @@ response = client.create_request(
 result = response.submit()
 ```
 
+## Stopping Early
+
+Two optional predicates end pagination before the last page:
+
+- `stop_when(node)` — called for each result node in order. The matching node is kept; the rest of its page is dropped and no further pages are fetched.
+- `stop_on_page(page_data)` — called once per fetched page with the raw GraphQL data. The whole page is kept, then pagination stops.
+
+```python
+response = client.create_request(
+    query="...",
+    vars={"first": 500},
+    stop_when=lambda node: node["name"].startswith("legacy-"),
+)
+result = response.submit()
+
+result.success            # still True — stopping early is not an error
+response.stopped_early    # True
+response.stop_info        # {"reason": "node", "page": 3, "cursor": ..., "next_cursor": ...}
+```
+
+Given a page of `[a, b, MATCH, d, e]`, the aggregated node list ends at `MATCH`.
+
+The same predicates work on the streaming iterators:
+
+```python
+for issue in client.iterate_nodes(
+    query="...", vars={"first": 500}, stop_when=lambda n: n["id"] == target
+):
+    process(issue)   # the matching node is the last one yielded
+```
+
+and on batch requests, where each request stops its own pagination:
+
+```python
+batch = client.create_batch_request()
+batch.add_request(query="...", stop_on_page=lambda page: budget_exceeded())
+results = batch.submit()
+```
+
+`stop_info["next_cursor"]` is an exact resume point only when `reason == "page"`; after a `stop_when` truncation, resume from `stop_info["cursor"]` and de-duplicate by id. `totalCount` is left as the server-side total. A predicate that raises is reported as a `WizQueryError` rather than silently returning partial results, and setting either predicate disables query splitting for that request.
+
 ## Query Collections
 
 Organize reusable queries in a module:

@@ -612,9 +612,10 @@ def is_in_last_x_intervals(
         if given_time.tzinfo is None:
             given_time = given_time.replace(tzinfo=timezone.utc)
 
-    return given_time >= (current_time - time_difference).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
+    # return given_time >= (current_time - time_difference).replace(
+    #     hour=0, minute=0, second=0, microsecond=0
+    # )
+    return given_time >= (current_time - time_difference)
 
 
 def determine_time_format(date_str: str) -> Optional[str]:
