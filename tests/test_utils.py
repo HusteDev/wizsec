@@ -469,6 +469,37 @@ class TestIsInLastXIntervals:
             is True
         )
 
+    def test_minutes_window_is_rolling_not_since_midnight(self):
+        """A 3-hour-old cache is stale for a 60-minute window. The cutoff
+        used to be truncated to 00:00Z, so this passed as fresh all day."""
+        now = datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc)
+        three_hours_ago = now - timedelta(hours=3)
+        with patch("wizsec.utils.datetime") as mock_dt:
+            mock_dt.now.return_value = now
+            mock_dt.strptime = datetime.strptime
+            mock_dt.fromisoformat = datetime.fromisoformat
+            assert (
+                is_in_last_x_intervals(
+                    three_hours_ago, interval_value=60, interval_type="minutes"
+                )
+                is False
+            )
+
+    def test_one_day_window_is_rolling_24_hours(self):
+        """'1 day' means the last 24 hours, not 'since yesterday 00:00Z'."""
+        now = datetime(2026, 9, 24, 0, 30, tzinfo=timezone.utc)
+        yesterday_morning = datetime(2026, 9, 23, 0, 3, tzinfo=timezone.utc)
+        with patch("wizsec.utils.datetime") as mock_dt:
+            mock_dt.now.return_value = now
+            mock_dt.strptime = datetime.strptime
+            mock_dt.fromisoformat = datetime.fromisoformat
+            assert (
+                is_in_last_x_intervals(
+                    yesterday_morning, interval_value=1, interval_type="days"
+                )
+                is False
+            )
+
     def test_seconds_interval(self):
         old = datetime.now(timezone.utc) - timedelta(days=1)
         assert (

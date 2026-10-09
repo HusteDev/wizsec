@@ -11,7 +11,7 @@ WizError
 ├── WizRateLimitError
 ├── WizQueryError
 │   └── WizSchemaValidationError
-├── WizReportError        # deprecated; never raised, not exported from `wizsec`
+├── WizReportError        # report run failed, or produced no download
 ├── WizTimeoutError
 ├── WizFileError
 └── WizServerlessError

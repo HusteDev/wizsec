@@ -96,6 +96,8 @@ class WizClient:
         self._proxies = Config.get_proxies()
         self._verbose = Config.verbose_mode()
         self.credential_storage = "prompt" if interactive else Config.storage_method()
+        # Where the credentials actually came from: direct | file | env | prompt.
+        self._credential_source = ""
         self.serverless = serverless or Config.serverless()
 
         # Obtain shared per-environment and per-profile state
@@ -544,6 +546,15 @@ class WizClient:
 
     def _get_headers(self) -> Dict[str, str]:
         headers = dict(self._env_state.headers)
+        # Authorization is per profile: the environment's headers are shared
+        # by every profile on that environment, so a token stored there would
+        # sign one profile's requests with another profile's identity.
+        headers.pop("Authorization", None)
+        token_data = self._profile_state.token_data
+        access_token = token_data.get("access_token")
+        if access_token:
+            token_type = token_data.get("token_type", "Bearer")
+            headers["Authorization"] = f"{token_type} {access_token}"
         safe_keys = {
             k: ("***" if k == "Authorization" else v) for k, v in headers.items()
         }
@@ -588,13 +599,18 @@ class WizClient:
     def _check_token(self) -> None:
         """Ensure a valid access token exists, authenticating or refreshing as needed."""
         self._logger.debug("Checking token for profile: %s", self.profile)
+        # Serverless containers reuse the token across warm invocations like
+        # any other process; profile state outlives the per-invocation client.
         with self._profile_state.auth_lock:
-            if Config.serverless():
-                self._logger.verbose("Serverless mode: forcing fresh authentication")
-                self._authenticate()
-            if not self._profile_state.token_data:
+            token_data = self._profile_state.token_data
+            if not token_data:
                 self._logger.verbose(
                     "Existing token not found; attempting to authenticate."
+                )
+                self._authenticate()
+            elif token_data.get("client_id") != self._profile_state.client_id:
+                self._logger.verbose(
+                    "Credentials changed since the token was issued; re-authenticating."
                 )
                 self._authenticate()
             elif self._token_expired():
@@ -625,14 +641,17 @@ class WizClient:
 
         if self._client_id and self._client_secret:
             self._logger.verbose("Using direct credentials")
+            self._credential_source = "direct"
             return
 
         if self.credential_storage == "env":
             pass  # Will fallback to env vars below
         elif self.credential_storage == "file":
             self._load_credentials_from_file()
+            self._credential_source = "file"
         elif self.credential_storage == "prompt":
             self._load_credentials_from_prompt()
+            self._credential_source = "prompt"
         else:
             self._logger.warning(
                 f"Unknown storage method [{self.credential_storage}]. Falling back to environment variables."
@@ -640,6 +659,7 @@ class WizClient:
 
         if not self._client_id or not self._client_secret:
             self._load_credentials_from_env()
+            self._credential_source = "env"
 
     def _load_credentials_from_file(self) -> None:
         """Load credentials from the credentials file."""
@@ -681,16 +701,22 @@ class WizClient:
     def _load_credentials_from_env(self) -> None:
         """Load credentials from environment variables."""
         self._logger.debug("Checking environment variables for credentials")
-        self._client_id = (
-            os.environ.get("WIZ_CLIENT_ID")
-            or os.getenv(f"{self.profile}_WIZ_CLIENT_ID")
-            or ""
-        )
-        self._client_secret = (
-            os.environ.get("WIZ_CLIENT_SECRET")
-            or os.getenv(f"{self.profile}_WIZ_CLIENT_SECRET")
-            or ""
-        )
+        # Most specific first, and the id and secret always come from the
+        # same pair: a profile-prefixed pair used to lose to the generic
+        # WIZ_CLIENT_* pair, so it stayed hidden while that one was set.
+        prefixes = [f"{self.profile}_", f"{self.profile.upper()}_", ""]
+        for prefix in dict.fromkeys(prefixes):
+            client_id = os.getenv(f"{prefix}WIZ_CLIENT_ID")
+            client_secret = os.getenv(f"{prefix}WIZ_CLIENT_SECRET")
+            if client_id and client_secret:
+                self._logger.debug(
+                    "Using credentials from %sWIZ_CLIENT_ID/SECRET", prefix
+                )
+                self._client_id = client_id
+                self._client_secret = client_secret
+                return
+        self._client_id = ""
+        self._client_secret = ""
 
     def _validate_and_store_credentials(self) -> None:
         """Validate that credentials were loaded and store them in profile state."""
@@ -704,7 +730,16 @@ class WizClient:
         self._profile_state.client_secret = self._client_secret
         self._logger.verbose(f"Credentials set for profile: {self.profile}")
 
-        if not self.serverless:
+        # Only credentials handed to the constructor are persisted, and only
+        # when file storage is configured. Environment-variable secrets are
+        # never written out: with the default storage_method (file) that used
+        # to leave every CI runner's client secret in ~/.wiz/wiz.credentials.
+        # `wizsec creds set` is the deliberate way to store credentials.
+        if (
+            not self.serverless
+            and self.credential_storage == "file"
+            and self._credential_source == "direct"
+        ):
             self._try_save_credentials_to_file()
 
     def _try_save_credentials_to_file(self) -> None:
@@ -762,12 +797,9 @@ class WizClient:
                 if token_response.status_code == 200:
                     token_data = token_response.json()
                     token_data["time_received"] = time.time()
+                    token_data["client_id"] = self._profile_state.client_id
                     self._profile_state.token_data = token_data
-                    token_type = token_data.get("token_type", "Bearer")
                     access_token = token_data.get("access_token")
-                    self._env_state.headers["Authorization"] = (
-                        f"{token_type} {access_token}"
-                    )
                     if access_token:
                         if self._decode_access_token(access_token):
                             self._logger.verbose(
@@ -816,10 +848,10 @@ class WizClient:
             token_data["expiry_time"] = (
                 token_data["time_received"] + token_data["expires_in"]
             )
+            # Lets _check_token spot a token minted for rotated credentials.
+            token_data["client_id"] = self._profile_state.client_id
             self._profile_state.token_data = token_data
             access_token = token_data.get("access_token")
-            token_type = token_data.get("token_type", "Bearer")
-            self._env_state.headers["Authorization"] = f"{token_type} {access_token}"
             self._decode_access_token(access_token)
             self._logger.verbose("Client credentials authentication successful")
             return True

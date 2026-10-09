@@ -79,6 +79,11 @@ class TestWizReportError:
         err = WizReportError("report fail", report_id="r1", report_name="My Report")
         assert err.report_id == "r1"
         assert err.report_name == "My Report"
+        assert err.status is None
+
+    def test_status_field(self):
+        err = WizReportError("report fail", report_id="r1", status="EXPIRED")
+        assert err.status == "EXPIRED"
 
 
 class TestExceptionCatching:
