@@ -52,19 +52,13 @@ class TestLazyLoading:
 
         assert issubclass(WizSchemaValidationError, Exception)
 
-    def test_wiz_report_error_is_not_exported(self):
-        """Dropped from the public API: nothing has ever raised it."""
+    def test_wiz_report_error_is_exported(self):
+        """Back in the public API: report run failures now set it."""
         import wizsec
-
-        with pytest.raises(AttributeError):
-            wizsec.WizReportError
-        assert "WizReportError" not in wizsec.__all__
-
-    def test_wiz_report_error_still_importable_from_submodule(self):
-        """Kept in wizsec.exceptions so existing except-clauses don't break."""
         from wizsec.exceptions import WizReportError
 
-        assert issubclass(WizReportError, Exception)
+        assert wizsec.WizReportError is WizReportError
+        assert "WizReportError" in wizsec.__all__
 
     def test_import_wiz_timeout_error(self):
         from wizsec import WizTimeoutError

@@ -85,13 +85,13 @@ class WizQueryError(WizError):
 
 
 class WizReportError(WizError):
-    """Deprecated; never raised by this package.
+    """Set on ``request.error`` when a report run does not produce a report.
 
-    No longer exported from ``wizsec``. Nothing has ever raised it: report
-    failures surface as entries in ``request.errors`` and, where a typed error
-    is set, as ``WizTimeoutError`` or ``WizAPIError`` on ``request.error``.
-    Kept importable from this module so existing ``except`` clauses keep
-    working; it will be removed in a future major release.
+    Covers a run that ends in a failure status (``status`` holds it), a
+    COMPLETED run with no download URL, and status polling that keeps
+    failing past ``reports.max_retries`` (``original_error`` holds the last
+    poll's error, if it had one). A run that outlives ``reports.timeout`` is
+    a ``WizTimeoutError`` instead.
     """
 
     def __init__(
@@ -100,10 +100,12 @@ class WizReportError(WizError):
         report_id: Optional[str] = None,
         report_name: Optional[str] = None,
         original_error: Optional[Exception] = None,
+        status: Optional[str] = None,
     ) -> None:
         super().__init__(message, original_error)
         self.report_id = report_id
         self.report_name = report_name
+        self.status = status
 
 
 class WizTimeoutError(WizError):
