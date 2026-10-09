@@ -14,6 +14,7 @@ import sys
 import json
 import csv
 import copy
+import dataclasses
 import shutil
 import traceback
 import time
@@ -37,7 +38,7 @@ from datetime import datetime, timedelta, timezone
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from functools import wraps
-from typing import Callable, Optional, Dict, Any, List, Union, Tuple
+from typing import Callable, Optional, Dict, Any, List, Union, Tuple, TypeVar
 from .config import Config, parse_filepath, DEFAULT_TEMP_FOLDER
 from ._logging import logging_init
 
@@ -326,6 +327,39 @@ def parse_query_metadata(query: str) -> Dict[str, Any]:
     }
 
 
+_N = TypeVar("_N")
+
+
+def _replace_node(node: _N, **changes: Any) -> _N:
+    """Return a copy of a GraphQL AST node with some fields replaced.
+
+    graphql-core 3.3 made AST nodes frozen dataclasses, so they can't be
+    edited in place; 3.2 nodes are plain objects. Builds a new node on both.
+    """
+    if dataclasses.is_dataclass(node):
+        return dataclasses.replace(node, **changes)  # type: ignore[type-var]
+    new = copy.copy(node)
+    for key, value in changes.items():
+        setattr(new, key, value)
+    return new
+
+
+def _replace_selection(selection_set: Any, old: Any, new: Any) -> Any:
+    """Return selection_set with the selection ``old`` swapped for ``new``."""
+    return _replace_node(
+        selection_set,
+        selections=tuple(new if s is old else s for s in selection_set.selections),
+    )
+
+
+def _replace_definition(document: Any, old: Any, new: Any) -> Any:
+    """Return document with the definition ``old`` swapped for ``new``."""
+    return _replace_node(
+        document,
+        definitions=tuple(new if d is old else d for d in document.definitions),
+    )
+
+
 def ensure_pagination_variables(query: str) -> str:
     """Inject $after into a query if it uses the Relay connection pattern but is missing the variable.
 
@@ -391,19 +425,15 @@ def ensure_pagination_variables(query: str) -> str:
         )
         new_args = list(paginated_field.arguments or []) + [after_arg]
 
-        # Rebuild the AST with injected variable and argument
-        new_doc = copy.deepcopy(document)
-        new_defn_node = new_doc.definitions[document.definitions.index(definition)]
-        assert isinstance(new_defn_node, OperationDefinitionNode)
-        new_defn_node.variable_definitions = tuple(new_var_defs)
-        for sel in new_defn_node.selection_set.selections:
-            if (
-                isinstance(sel, FieldNode)
-                and sel.name.value == paginated_field.name.value
-            ):
-                sel.arguments = tuple(new_args)
-                break
-        return print_ast(new_doc)
+        new_field = _replace_node(paginated_field, arguments=tuple(new_args))
+        new_definition = _replace_node(
+            definition,
+            variable_definitions=tuple(new_var_defs),
+            selection_set=_replace_selection(
+                definition.selection_set, paginated_field, new_field
+            ),
+        )
+        return print_ast(_replace_definition(document, definition, new_definition))
 
     return query
 
@@ -466,31 +496,30 @@ def build_totalcount_probe_query(query: str) -> Optional[str]:
 
         minimal_selection = SelectionSetNode(selections=(totalcount_field,))
 
-        # Deep-copy and replace the connection field's selection set
-        new_doc = copy.deepcopy(document)
-        new_defn = new_doc.definitions[document.definitions.index(definition)]
-        assert isinstance(new_defn, OperationDefinitionNode)
-        for sel in new_defn.selection_set.selections:
-            if (
-                isinstance(sel, FieldNode)
-                and sel.name.value == connection_field.name.value
-            ):
-                sel.selection_set = minimal_selection
-                # Drop $first/$after variable definitions — they're irrelevant for a count query
-                new_defn.variable_definitions = tuple(
-                    v
-                    for v in (new_defn.variable_definitions or [])
-                    if v.variable.name.value not in ("first", "after")
-                )
-                # Drop first/after arguments from the connection field too
-                sel.arguments = tuple(
-                    a
-                    for a in (sel.arguments or [])
-                    if a.name.value not in ("first", "after")
-                )
-                break
-
-        return print_ast(new_doc)
+        # Replace the connection field's selection set, and drop first/after
+        # from its arguments and from the variable definitions: they're
+        # irrelevant for a count query.
+        new_field = _replace_node(
+            connection_field,
+            selection_set=minimal_selection,
+            arguments=tuple(
+                a
+                for a in (connection_field.arguments or [])
+                if a.name.value not in ("first", "after")
+            ),
+        )
+        new_definition = _replace_node(
+            definition,
+            variable_definitions=tuple(
+                v
+                for v in (definition.variable_definitions or [])
+                if v.variable.name.value not in ("first", "after")
+            ),
+            selection_set=_replace_selection(
+                definition.selection_set, connection_field, new_field
+            ),
+        )
+        return print_ast(_replace_definition(document, definition, new_definition))
 
     return None
 
