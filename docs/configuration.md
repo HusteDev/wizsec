@@ -61,6 +61,7 @@ app:
 
 # logging:
 #   enabled: false
+#   propagate: false                # true: send records to the host's root logger, no SDK console handler
 #   verbose: false                  # VERBOSE level (15) messages
 #   debug: false
 #   lowest_level: 10

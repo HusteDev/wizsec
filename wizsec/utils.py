@@ -612,9 +612,9 @@ def is_in_last_x_intervals(
         if given_time.tzinfo is None:
             given_time = given_time.replace(tzinfo=timezone.utc)
 
-    # return given_time >= (current_time - time_difference).replace(
-    #     hour=0, minute=0, second=0, microsecond=0
-    # )
+    # A rolling window for every unit. The cutoff used to be truncated to
+    # 00:00Z, which turned "the last 60 minutes" into "since midnight UTC
+    # of the cutoff day".
     return given_time >= (current_time - time_difference)
 
 

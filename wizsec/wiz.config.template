@@ -29,7 +29,7 @@ app:
 #       port: 80
 #   ca_cert: ""                       # Path to Custom CA (.pem) file | example: "/cacert.pem"
 
-# domain:                             # Domains not enabled will be blocked from Authentication
+# domain:                             # Domains not enabled will be blocked from Authentication; the default domain is enabled unless set to false
 #   default: gov                      # Valid Options [app, gov, fedramp] | default = gov
 #   app:
 #     enabled: false
@@ -84,6 +84,7 @@ app:
 
 # logging:
 #   enabled: false                    # Enables logging for library | default = false
+#   propagate: false                  # Send records to the host application's root logger instead of the SDK console handler | default = false
 #   verbose: false                    # Enable VERBOSE messages | default = false
 #   lowest_level: 10                  # If higher than 10, debug messages will not process for any handler | default = 10
 #   debug: false                      # Enable DEBUG messages | default = false

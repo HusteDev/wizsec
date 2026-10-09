@@ -36,7 +36,7 @@ from wizsec._request import (
     _merge_split_results,
     _schema_supports_totalcount,
 )
-from wizsec.exceptions import WizQueryError
+from wizsec.exceptions import WizQueryError, WizReportError
 
 # ---------------------------------------------------------------------------
 # Helpers / fixtures
@@ -1435,6 +1435,8 @@ class TestReportWorkflowPolling:
 
         assert poll_count[0] == Config.report_max_retries() + 1
         assert any("polling failed" in e["message"] for e in req.errors)
+        assert isinstance(req.error, WizReportError)
+        assert req.error.report_id == "rpt-1"
 
     def test_failed_report_status_terminates(self, mock_client):
         req = self._prime_report(mock_client)
@@ -1451,6 +1453,41 @@ class TestReportWorkflowPolling:
             req._report_workflow(MagicMock())
 
         assert any("ended with status FAILED" in e["message"] for e in req.errors)
+        assert isinstance(req.error, WizReportError)
+        assert req.error.report_id == "rpt-1"
+        assert req.error.status == "FAILED"
+
+    def test_completed_without_url_sets_report_error(self, mock_client):
+        req = self._prime_report(mock_client)
+
+        def fake_execute():
+            req.data = {
+                "report": {
+                    "lastRun": {"status": "COMPLETED", "progress": 100, "url": None}
+                }
+            }
+
+        with (
+            patch.object(req, "_execute_page", side_effect=fake_execute),
+            patch("wizsec._request.time.sleep"),
+        ):
+            req._report_workflow(MagicMock())
+
+        assert isinstance(req.error, WizReportError)
+        assert req.error.status == "COMPLETED"
+
+    def test_timeout_stays_a_timeout_error(self, mock_client):
+        from wizsec.config import Config
+        from wizsec.exceptions import WizTimeoutError
+
+        req = self._prime_report(mock_client)
+        with (
+            patch.object(Config, "report_timeout", return_value=0.0),
+            patch.object(req, "_execute_page"),
+        ):
+            req._report_workflow(MagicMock())
+
+        assert isinstance(req.error, WizTimeoutError)
 
     def test_transient_poll_failure_does_not_poison_success(self, mock_client):
         req = self._prime_report(mock_client)

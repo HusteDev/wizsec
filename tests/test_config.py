@@ -197,6 +197,53 @@ class TestConfigLoad:
         assert Config._loaded is True
         assert Config._CONFIG["app"]["name"] == "test-app"
 
+    def test_serverless_without_config_file_uses_builtin_defaults(
+        self, tmp_path, capsys
+    ):
+        """A Lambda that gets everything from env vars needs no wiz.config."""
+        from wizsec.config import CONFIG_SCHEMA_VERSION, LIBRARY_NAME
+
+        with (
+            patch("wizsec.config.DEFAULT_WIZ_DIR", tmp_path / "missing"),
+            patch("wizsec.config.SERVERLESS", True),
+        ):
+            Config.load(overrides=["logging.enabled=false"])
+            assert Config._CONFIG["app"]["name"] == LIBRARY_NAME
+            assert Config._CONFIG["app"]["config_schema"] == CONFIG_SCHEMA_VERSION
+            assert Config._CONFIG["logging"]["enabled"] is False
+            assert Config.domain_enabled("gov") is True
+
+        # Nothing written, and no per-cold-start migration notice.
+        assert not (tmp_path / "missing").exists()
+        assert "migrated" not in capsys.readouterr().out.lower()
+
+    def test_fresh_default_config_can_reach_default_domain(self, tmp_path):
+        """The template is already schema 2, so the v1->v2 migration that
+        adds gov.enabled never runs; a brand-new install used to reject its
+        own default domain."""
+        config_file = tmp_path / "wiz.config"
+        with (
+            patch("wizsec.config.DEFAULT_WIZ_DIR", tmp_path),
+            patch("wizsec.config.SERVERLESS", False),
+        ):
+            Config.load(config_path=str(config_file))
+            assert Config.validate_domain(Config.default_domain()) == "gov.wiz.io"
+            assert Config.domain_enabled("app") is False
+
+    def test_explicitly_disabled_default_domain_stays_disabled(self, mock_config):
+        mock_config._CONFIG["domain"] = {"default": "gov", "gov": {"enabled": False}}
+        assert Config.domain_enabled("gov") is False
+
+    def test_serverless_explicit_missing_config_path_raises(self, tmp_path):
+        """An explicit path that doesn't exist is a packaging mistake, not a
+        request for defaults."""
+        with (
+            patch("wizsec.config.DEFAULT_WIZ_DIR", tmp_path),
+            patch("wizsec.config.SERVERLESS", True),
+        ):
+            with pytest.raises(WizConfigurationError, match="not found"):
+                Config.load(config_path=str(tmp_path / "nope" / "wiz.config"))
+
     def test_load_applies_overrides(self, tmp_path):
         """load() should apply dot-notation overrides on top of YAML values."""
         config_data = {

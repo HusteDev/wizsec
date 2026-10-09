@@ -38,6 +38,7 @@ from .exceptions import (
     WizError,
     WizQueryError,
     WizRateLimitError,
+    WizReportError,
     WizTimeoutError,
 )
 from ._transport import stream_get, get as transport_get, TransportError
@@ -1032,6 +1033,20 @@ class WizRequest(_RequestBase):
             self._suppress_done_event = False
             self._set_done_event()
 
+    def _report_error(
+        self,
+        message: str,
+        status: Optional[str],
+        original_error: Optional[Exception] = None,
+    ) -> WizReportError:
+        return WizReportError(
+            message,
+            report_id=self._report_id,
+            report_name=getattr(self, "report_name", None),
+            original_error=original_error,
+            status=None if status == "UNKNOWN" else status,
+        )
+
     def _poll_report_status(self) -> Optional["WizRequest"]:
         """Poll the report status query until a terminal state is reached."""
         max_failed_polls = Config.report_max_retries()
@@ -1066,18 +1081,14 @@ class WizRequest(_RequestBase):
             if not polling_response.success():
                 failed_polls += 1
                 if failed_polls > max_failed_polls:
-                    self.errors.append(
-                        {
-                            "message": (
-                                "Report status polling failed after "
-                                f"{max_failed_polls} retries"
-                            )
-                        }
+                    message = (
+                        f"Report status polling failed after {max_failed_polls} retries"
                     )
-                    self._logger.error(
-                        "Report status polling failed after %d retries",
-                        max_failed_polls,
+                    self.errors.append({"message": message})
+                    self.error = self._report_error(
+                        message, status, original_error=self.error
                     )
+                    self._logger.error(message)
                     return self
                 self._logger.warning(
                     "Failed to get report status (attempt %d/%d).",
@@ -1096,18 +1107,18 @@ class WizRequest(_RequestBase):
             self._logger.info(f"Report status: {status}, Progress: {progress}%")
 
             if status in _REPORT_TERMINAL_FAILURE_STATUSES:
-                self.errors.append(
-                    {"message": f"Report run ended with status {status}"}
-                )
-                self._logger.error("Report run ended with status %s", status)
+                message = f"Report run ended with status {status}"
+                self.errors.append({"message": message})
+                self.error = self._report_error(message, status)
+                self._logger.error(message)
                 return self
 
             if status == "COMPLETED":
                 download_url = last_run["url"]
                 if not download_url:
-                    self.errors.append(
-                        {"message": "No download URL found in final report status."}
-                    )
+                    message = "No download URL found in final report status."
+                    self.errors.append({"message": message})
+                    self.error = self._report_error(message, status)
                     return self
                 assert self.data is not None
                 if self.stream_report:

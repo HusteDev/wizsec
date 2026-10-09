@@ -47,6 +47,8 @@ When the query is a `createReport` or `rerunReport` mutation, the SDK automatica
 
 `reports.max_retries` caps only *failed* status polls. The overall deadline is `reports.timeout` (default `3600` seconds); when a run exceeds it, polling stops and `response.error` is set to a `WizTimeoutError` naming the last status seen.
 
+Any other way a run can end without a report sets `response.error` to a `WizReportError` carrying `report_id`, `report_name` and `status`: a failure status such as `FAILED` or `EXPIRED`, a `COMPLETED` run with no download URL, or status polling that still fails after `reports.max_retries` attempts (`original_error` then holds the last poll's error).
+
 ## Streaming vs Download
 
 **Streaming** (default) processes results as they arrive — useful for large reports:
