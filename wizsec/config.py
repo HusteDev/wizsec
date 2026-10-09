@@ -286,6 +286,7 @@ class Config:
             client_secret: If provided, sets WIZ_CLIENT_SECRET environment variable.
         """
         if cls._CONFIG is None:
+            explicit_path = bool(config_path)
             config_path = config_path or str(DEFAULT_WIZ_DIR / "wiz.config")
             path, filename = parse_filepath(str(config_path))
             if all(
@@ -305,10 +306,14 @@ class Config:
                     if created:
                         with open(str(config_path), "r") as file:
                             cls._CONFIG = yaml.safe_load(file)
+                elif explicit_path:
+                    raise WizConfigurationError(f"Config file not found: {config_path}")
                 else:
-                    raise Exception(
-                        "Create config file at /var/task/.wiz for all Serverless executions"
-                    )
+                    # The read-only bundle has no wiz.config: run on the same
+                    # defaults a fresh install would get, in memory. Settings
+                    # can still come from `overrides`, and credentials from
+                    # WIZ_CLIENT_ID / WIZ_CLIENT_SECRET.
+                    cls._CONFIG = yaml.safe_load(_render_default_config())
 
             # Apply overrides via dot-notation keys
             for item in overrides or {}:
@@ -399,9 +404,15 @@ class Config:
 
         # Idempotent attach: copy handler refs and level from base (but not the name)
         if not getattr(logger, "_baselogger_initialized", False):
-            logger.handlers = list(base_logger.handlers)  # same handler objects
+            if base_logger.propagate:
+                # Bubble up through the base logger (its file handler, if
+                # any) to the host's root handlers.
+                logger.handlers = []
+                logger.propagate = True
+            else:
+                logger.handlers = list(base_logger.handlers)  # same handler objects
+                logger.propagate = False  # don’t bubble to root
             logger.setLevel(base_logger.level)
-            logger.propagate = False  # don’t bubble to root
             logger._baselogger_initialized = True  # type: ignore[attr-defined]
         else:
             # keep level in sync with base, in case config changed on a warm start
@@ -674,8 +685,16 @@ class Config:
     @classmethod
     @ensure_loaded
     def domain_enabled(cls, domain: str) -> bool:
-        """Return whether the specified domain is enabled in config."""
-        return _bool_setting(cls.get("domain", domain, "enabled", default=False), False)
+        """Return whether the specified domain is enabled in config.
+
+        A domain with no ``enabled`` setting is enabled only if it is the
+        default domain, so a fresh config (which omits the domain section)
+        can reach the domain it defaults to.
+        """
+        implicit = domain == cls.default_domain()
+        return _bool_setting(
+            cls.get("domain", domain, "enabled", default=implicit), implicit
+        )
 
     @classmethod
     @ensure_loaded
@@ -794,6 +813,18 @@ class Config:
     def logging_enabled(cls) -> bool:
         """Return whether logging is enabled."""
         return _bool_setting(cls.get("logging", "enabled", default=True), True)
+
+    @classmethod
+    @ensure_loaded
+    def logging_propagate(cls) -> bool:
+        """Return whether SDK records propagate to the host's root logger.
+
+        When True the SDK attaches no console handler of its own (the host
+        owns console output), so records land wherever the application's
+        logging goes: a script's log file, the Lambda runtime's CloudWatch
+        handler, pytest's caplog.
+        """
+        return _bool_setting(cls.get("logging", "propagate", default=False), False)
 
     @classmethod
     @ensure_loaded
@@ -1000,6 +1031,15 @@ class Config:
         return seconds if seconds > 0 else 10
 
 
+def _render_default_config() -> str:
+    """Return the bundled config template with its placeholders filled in."""
+    template_path = Path(__file__).parent / "wiz.config.template"
+    yaml_content = template_path.read_text(encoding="utf-8")
+    yaml_content = yaml_content.replace("${SDK_NAME}", LIBRARY_NAME)
+    yaml_content = yaml_content.replace("${SDK_VERSION}", CURRENT_VERSION)
+    return yaml_content.replace("${CONFIG_SCHEMA_VERSION}", str(CONFIG_SCHEMA_VERSION))
+
+
 def generate_default_config(
     file_path: Union[str, Path] = (DEFAULT_WIZ_DIR / "wiz.config"),
 ) -> bool:
@@ -1014,13 +1054,7 @@ def generate_default_config(
     if SERVERLESS:
         return False
 
-    template_path = Path(__file__).parent / "wiz.config.template"
-    yaml_content = template_path.read_text(encoding="utf-8")
-    yaml_content = yaml_content.replace("${SDK_NAME}", LIBRARY_NAME)
-    yaml_content = yaml_content.replace("${SDK_VERSION}", CURRENT_VERSION)
-    yaml_content = yaml_content.replace(
-        "${CONFIG_SCHEMA_VERSION}", str(CONFIG_SCHEMA_VERSION)
-    )
+    yaml_content = _render_default_config()
 
     if not DEFAULT_WIZ_DIR.exists():
         DEFAULT_WIZ_DIR.mkdir(parents=True, exist_ok=True)

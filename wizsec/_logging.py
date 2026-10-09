@@ -74,20 +74,25 @@ def _ensure_verbose_console_level(level: int, config: Any) -> int:
     return level
 
 
-def _init_lambda_logger(level: int) -> logging.Logger:
-    """Initialize a minimal stdout logger for serverless/Lambda environments."""
+def _init_lambda_logger(level: int, propagate: bool = False) -> logging.Logger:
+    """Initialize a minimal stdout logger for serverless/Lambda environments.
+
+    With ``propagate`` the SDK adds no handler and defers to the runtime's
+    root handler, which tags each record with the Lambda request id.
+    """
     logger = logging.getLogger(BASE_LOGGER_NAME)
     if getattr(logger, "_baselogger_initialized", False):
         logger.setLevel(level)
         return logger
 
     logger.handlers.clear()
-    h = logging.StreamHandler(sys.stdout)
-    h.setLevel(level)
-    h.setFormatter(logging.Formatter("[%(levelname)s] %(name)s: %(message)s"))
-    logger.addHandler(h)
+    if not propagate:
+        h = logging.StreamHandler(sys.stdout)
+        h.setLevel(level)
+        h.setFormatter(logging.Formatter("[%(levelname)s] %(name)s: %(message)s"))
+        logger.addHandler(h)
     logger.setLevel(level)
-    logger.propagate = False
+    logger.propagate = propagate
     logger._baselogger_initialized = True  # type: ignore[attr-defined]
     return logger
 
@@ -175,8 +180,10 @@ def logging_init(
     except Exception:
         base_level = logging.INFO
 
+    propagate = bool(config.logging_propagate())
+
     if config.serverless():
-        return _init_lambda_logger(base_level)
+        return _init_lambda_logger(base_level, propagate)
 
     logger = logging.getLogger(BASE_LOGGER_NAME)
 
@@ -197,8 +204,10 @@ def logging_init(
     if not getattr(logger, "_baselogger_initialized", False):
         logger.handlers.clear()
         logger.setLevel(base_level)
-        logger.propagate = False
-        _maybe_attach_console_handler(logger, config)
+        logger.propagate = propagate
+        # When propagating, the host's root handlers own console output.
+        if not propagate:
+            _maybe_attach_console_handler(logger, config)
         _maybe_attach_file_handler(logger, config, default_wiz_dir, parse_filepath_fn)
         logger._baselogger_initialized = True  # type: ignore[attr-defined]
     else:

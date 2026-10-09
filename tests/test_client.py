@@ -377,10 +377,14 @@ class TestCheckToken:
             mock_client._check_token()
         auth.assert_not_called()
 
-    def test_serverless_forces_fresh_auth(self, mock_client):
+    def test_serverless_reuses_valid_token(self, mock_client):
+        """A warm Lambda container reuses its token instead of paying an
+        extra OAuth round trip on every request."""
+        mock_client._profile_state.client_id = "cid"
         mock_client._profile_state.token_data = {
             "access_token": "tok",
             "time_received": time.time(),
+            "client_id": "cid",
         }
         with (
             patch.object(mock_client, "_authenticate") as auth,
@@ -388,8 +392,66 @@ class TestCheckToken:
             patch.object(Config, "serverless", return_value=True),
         ):
             mock_client._check_token()
-        # Called once for serverless, then token_data is truthy and not expired so no more
-        auth.assert_called_once()
+        auth.assert_not_called()
+
+    def test_token_for_other_client_id_reauthenticates(self, mock_client):
+        """Credentials rotated between warm invocations: the cached token
+        belongs to the old client and must not be reused."""
+        mock_client._profile_state.client_id = "new-cid"
+        mock_client._profile_state.token_data = {
+            "access_token": "tok",
+            "time_received": time.time(),
+            "client_id": "old-cid",
+        }
+        with (
+            patch.object(mock_client, "_authenticate") as auth,
+            patch.object(mock_client, "_token_expired", return_value=False),
+        ):
+            mock_client._check_token()
+        auth.assert_called_once_with()
+
+
+# ===================================================================
+# _get_headers
+# ===================================================================
+
+
+class TestGetHeaders:
+    def test_authorization_comes_from_profile_token(self, mock_client):
+        mock_client._env_state.headers = {"Content-Type": "application/json"}
+        mock_client._profile_state.token_data = {
+            "access_token": "tok",
+            "token_type": "Bearer",
+        }
+        assert mock_client._get_headers()["Authorization"] == "Bearer tok"
+
+    def test_no_token_no_authorization(self, mock_client):
+        mock_client._env_state.headers = {"Content-Type": "application/json"}
+        mock_client._profile_state.token_data = {}
+        assert "Authorization" not in mock_client._get_headers()
+
+    def test_profiles_on_same_environment_keep_their_own_tokens(self, mock_config):
+        """Profile state is per profile but headers were per environment, so
+        the last profile to authenticate used to sign every profile's
+        requests until the other token expired."""
+        from wizsec.client import WizClient
+
+        with (
+            patch("wizsec.client.WizClient._preload_credentials"),
+            patch("wizsec.client.WizClient._initialize_headers"),
+        ):
+            WizClient._clients.clear()
+            a = WizClient(environment="gov", profile="hdr_a")
+            b = WizClient(environment="gov", profile="hdr_b")
+        try:
+            a._profile_state.token_data = {"access_token": "tok-a"}
+            b._profile_state.token_data = {"access_token": "tok-b"}
+            assert a._get_headers()["Authorization"] == "Bearer tok-a"
+            assert b._get_headers()["Authorization"] == "Bearer tok-b"
+        finally:
+            WizClient._clients.clear()
+            ProfileRegistry.cleanup("gov", "hdr_a")
+            ProfileRegistry.cleanup("gov", "hdr_b")
 
 
 # ===================================================================
@@ -443,6 +505,48 @@ class TestCredentialLoading:
                 mock_client._load_credentials_from_env()
         assert mock_client._client_id == "pid"
         assert mock_client._client_secret == "psec"
+
+    @staticmethod
+    def _env_without_wiz_creds():
+        return {k: v for k, v in os.environ.items() if "WIZ_CLIENT_" not in k}
+
+    def test_profile_prefixed_wins_over_unprefixed(self, mock_client):
+        env = self._env_without_wiz_creds()
+        env.update(
+            {
+                "WIZ_CLIENT_ID": "generic-id",
+                "WIZ_CLIENT_SECRET": "generic-sec",
+                "test_WIZ_CLIENT_ID": "pid",
+                "test_WIZ_CLIENT_SECRET": "psec",
+            }
+        )
+        with patch.dict(os.environ, env, clear=True):
+            mock_client._load_credentials_from_env()
+        assert (mock_client._client_id, mock_client._client_secret) == ("pid", "psec")
+
+    def test_uppercase_profile_prefix(self, mock_client):
+        env = self._env_without_wiz_creds()
+        env.update({"TEST_WIZ_CLIENT_ID": "uid", "TEST_WIZ_CLIENT_SECRET": "usec"})
+        with patch.dict(os.environ, env, clear=True):
+            mock_client._load_credentials_from_env()
+        assert (mock_client._client_id, mock_client._client_secret) == ("uid", "usec")
+
+    def test_never_mixes_id_and_secret_from_different_sources(self, mock_client):
+        """A half-set prefixed pair must not borrow the generic secret."""
+        env = self._env_without_wiz_creds()
+        env.update(
+            {
+                "WIZ_CLIENT_ID": "generic-id",
+                "WIZ_CLIENT_SECRET": "generic-sec",
+                "test_WIZ_CLIENT_ID": "pid",
+            }
+        )
+        with patch.dict(os.environ, env, clear=True):
+            mock_client._load_credentials_from_env()
+        assert (mock_client._client_id, mock_client._client_secret) == (
+            "generic-id",
+            "generic-sec",
+        )
 
     def test_load_by_storage_env_falls_through(self, mock_client):
         mock_client.credential_storage = "env"
@@ -502,6 +606,45 @@ class TestValidateAndStoreCredentials:
         with pytest.raises(WizCredentialsError):
             mock_client._validate_and_store_credentials()
 
+    @pytest.mark.parametrize(
+        "storage, source, saved",
+        [
+            ("file", "direct", True),
+            ("file", "env", False),  # CI runners: never put an env secret on disk
+            ("file", "file", False),  # already there
+            ("env", "direct", False),
+            ("prompt", "prompt", False),
+        ],
+    )
+    def test_persists_only_direct_credentials_under_file_storage(
+        self, mock_client, storage, source, saved
+    ):
+        mock_client._client_id = "myid"
+        mock_client._client_secret = "mysec"
+        mock_client.serverless = False
+        mock_client.credential_storage = storage
+        mock_client._credential_source = source
+        with patch.object(mock_client, "_try_save_credentials_to_file") as save:
+            mock_client._validate_and_store_credentials()
+        assert save.called is saved
+
+    def test_env_credentials_not_written_under_default_storage(self, mock_client):
+        mock_client.credential_storage = "file"
+        mock_client.serverless = False
+        mock_client._client_id = ""
+        mock_client._client_secret = ""
+        with (
+            patch.object(mock_client, "_load_credentials_from_file"),
+            patch.dict(
+                os.environ, {"WIZ_CLIENT_ID": "eid", "WIZ_CLIENT_SECRET": "esec"}
+            ),
+            patch("wizsec.utils.write_credentials_to_file") as write,
+        ):
+            mock_client._load_credentials_by_storage_method()
+            mock_client._validate_and_store_credentials()
+        assert mock_client._credential_source == "env"
+        write.assert_not_called()
+
     def test_stores_credentials_in_profile_state(self, mock_client):
         mock_client._client_id = "myid"
         mock_client._client_secret = "mysec"
@@ -550,7 +693,8 @@ class TestAuthentication:
         assert result is True
         assert mock_client._profile_state.token_data["access_token"] == jwt
         assert mock_client.dc == "us35"
-        assert "Authorization" in mock_client._env_state.headers
+        assert mock_client._profile_state.token_data["client_id"] == "cid"
+        assert mock_client._get_headers()["Authorization"] == f"Bearer {jwt}"
 
     def test_client_credentials_non_200_raises(self, mock_client):
         mock_client._profile_state.client_id = "cid"

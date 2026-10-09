@@ -109,7 +109,60 @@ class TestLoggingInit:
         config.debug_mode.return_value = False
         config.file_logging_enabled.return_value = False
         config.console_handler_enabled.return_value = False
+        config.logging_propagate.return_value = False
         return config
+
+    def test_propagate_hands_records_to_the_host(self):
+        """logging.propagate: records reach the root logger (e.g. CloudWatch,
+        a host script's file handler) instead of the SDK's own console."""
+        config = self._make_mock_config(logging_enabled=True)
+        config.console_handler_enabled.return_value = True
+        config.console_handler_logging_level.return_value = "INFO"
+        config.logging_propagate.return_value = True
+
+        logger = logging_init(config, None, None)
+
+        assert logger.propagate is True
+        # The host owns console output; a second stdout handler would
+        # print every record twice.
+        assert not any(type(h) is logging.StreamHandler for h in logger.handlers)
+
+    def test_propagate_in_serverless_uses_runtime_handler(self):
+        config = self._make_mock_config(serverless=True)
+        config.logging_propagate.return_value = True
+
+        logger = logging_init(config, None, None)
+
+        assert logger.propagate is True
+        assert logger.handlers == []
+
+    def test_propagate_reaches_root_through_child_loggers(self, mock_config):
+        from wizsec.config import Config
+
+        mock_config._CONFIG.setdefault("logging", {})["propagate"] = True
+        mock_config._CONFIG["logging"]["enabled"] = True
+        Config._logger = None
+        child = logging.getLogger(f"{BASE_LOGGER_NAME}.test_logging")
+        child._baselogger_initialized = False
+
+        records = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        root = logging.getLogger()
+        capture = _Capture(level=logging.DEBUG)
+        root.addHandler(capture)
+        try:
+            Config.get_logger().warning("reaches the host")
+        finally:
+            root.removeHandler(capture)
+            child.handlers = []
+            child._baselogger_initialized = False
+            Config._logger = None
+
+        assert any(r.getMessage() == "reaches the host" for r in records)
 
     def test_logging_disabled_returns_null_handler(self):
         config = self._make_mock_config(logging_enabled=False)

@@ -75,7 +75,9 @@ export WIZ_CLIENT_ID="your-client-id"
 export WIZ_CLIENT_SECRET="your-client-secret"
 ```
 
-**Credentials file** at `~/.wiz/wiz.credentials`:
+For several profiles in one environment, prefix the pair with the profile name (`ADMIN_WIZ_CLIENT_ID` / `ADMIN_WIZ_CLIENT_SECRET`, or `admin_…`). A profile-prefixed pair wins over the generic `WIZ_CLIENT_*` pair, and the ID and secret always come from the same pair. Credentials read from environment variables are never written to disk.
+
+**Credentials file** at `~/.wiz/wiz.credentials` (manage it with `wizsec creds set`):
 
 ```ini
 [default]
@@ -92,6 +94,8 @@ from wizsec import WizClient, Config
 Config.load()
 client = WizClient(client_id="...", client_secret="...")
 ```
+
+With `storage_method: file` (the default), credentials passed this way are saved to the credentials file for the profile.
 
 #### Device Code (Interactive)
 
@@ -580,12 +584,15 @@ api:
 
 logging:
   enabled: false
+  propagate: false   # true: hand records to the host's root logger instead of printing them
   console_handler:
     enabled: true
     logging_level: INFO
 ```
 
-Blank proxy URLs use environment proxy variables. Config can also be set via `Config.load(overrides=["api.timeout=120"])`.
+Blank proxy URLs use environment proxy variables. A domain with no `enabled` setting is enabled only when it is `domain.default`.
+
+Set `logging.propagate: true` when the SDK runs inside an application that already configures logging (a script with its own log file, a Lambda writing to CloudWatch, pytest's `caplog`). SDK records then flow to the root logger like any other library's, and the SDK attaches no console handler of its own. The file handler, if enabled, still writes. Config can also be set via `Config.load(overrides=["api.timeout=120"])`.
 
 ## Multi-Environment & Multi-Profile
 
@@ -607,18 +614,17 @@ Requested environments must be enabled under `domain.<environment>.enabled`. Aut
 Set `WIZ_SERVERLESS=1` or deploy to an environment with `AWS_LAMBDA_FUNCTION_NAME` set. The SDK adapts automatically:
 
 - Disables background worker threads (executes inline)
-- Reads config from `/var/task/.wiz/`
-- Call `client.cleanup_for_lambda()` at the end of each invocation
+- Reads config from `/var/task/.wiz/wiz.config` if it exists, and otherwise runs on built-in defaults (pass settings with `Config.load(overrides=[...])`)
+- Takes credentials from `WIZ_CLIENT_ID` / `WIZ_CLIENT_SECRET`; credential files are never read or written
+- Reuses the access token across warm invocations until it nears expiry, re-authenticating if the client ID changes
+- Call `client.cleanup_for_lambda()` at the end of an invocation only to drop that token and start the next invocation cold
 
 ```python
 def handler(event, context):
     Config.load()
     client = WizClient(environment="app", serverless=True)
-    try:
-        result = client.create_request(query="...", vars={}).submit()
-        return result.data
-    finally:
-        client.cleanup_for_lambda()
+    result = client.create_request(query="...", vars={}).submit()
+    return result.data
 ```
 
 ## Error Handling
@@ -635,11 +641,12 @@ The SDK provides a structured exception hierarchy:
 | `WizRateLimitError`          | Rate limit exceeded (includes `retry_after`)                 |
 | `WizQueryError`              | Invalid GraphQL query (includes `query`, `errors`)           |
 | `WizSchemaValidationError`   | Query fails schema validation (includes `validation_errors`) |
+| `WizReportError`             | Report run failed or produced nothing (includes `report_id`, `status`) |
 | `WizTimeoutError`            | Operation timed out                                          |
 | `WizFileError`               | File I/O error                                               |
 | `WizServerlessError`         | Serverless-specific failure                                  |
 
-`WizReportError` is deprecated and no longer exported from `wizsec`. Nothing raises it — report failures surface as entries in `response.errors` and, where a typed error is set, as `WizTimeoutError` or `WizAPIError` on `response.error`. It remains importable from `wizsec.exceptions` so existing `except` clauses keep working, and will be removed in a future major release.
+A report run that ends in a failure status, completes without a download URL, or whose status polling keeps failing sets `response.error` to a `WizReportError`. A run that outlives `reports.timeout` is a `WizTimeoutError`.
 
 `submit()` never raises for API-level failures — inspect the response instead. Failed requests carry a typed exception on `response.error` (`WizRateLimitError` when the server rate limit won, `WizAPIError` with `status_code` otherwise), and `response.raise_on_error()` converts a failure into that exception:
 
