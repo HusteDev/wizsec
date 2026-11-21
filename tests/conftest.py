@@ -1,10 +1,7 @@
 """Shared fixtures for wizsec tests."""
 
 import logging
-import os
-import threading
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 

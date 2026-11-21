@@ -5,10 +5,9 @@ import base64
 import json
 import logging
 import os
-import queue
 import threading
 import time
-from unittest.mock import patch, MagicMock, PropertyMock, call
+from unittest.mock import patch, MagicMock, call
 
 import pytest
 
@@ -19,7 +18,6 @@ from wizsec.exceptions import (
     WizAPIError,
     WizConfigurationError,
     WizCredentialsError,
-    WizTimeoutError,
 )
 from wizsec._transport import TransportError
 
@@ -310,7 +308,7 @@ class TestRequestCreation:
             patch("wizsec._request.WizRequest") as MockReq,
             patch("wizsec._request.WizResponse") as MockResp,
         ):
-            result = mock_client.create_request(query="{ viewer { id } }")
+            mock_client.create_request(query="{ viewer { id } }")
         MockReq.assert_called_once()
         MockResp.assert_called_once()
 
@@ -334,7 +332,7 @@ class TestRequestCreation:
 
     def test_create_batch_request_returns_batch(self, mock_client):
         with patch("wizsec._request.WizBatchRequest") as MockBatch:
-            result = mock_client.create_batch_request()
+            mock_client.create_batch_request()
         MockBatch.assert_called_once_with(client=mock_client)
 
 
@@ -529,7 +527,7 @@ class TestCredentialLoading:
             patch.object(WizClient, "_validate_and_store_credentials") as validate,
         ):
             WizClient._clients.clear()
-            client = WizClient(environment="gov", profile="preload_test")
+            WizClient(environment="gov", profile="preload_test")
         load.assert_called_once()
         validate.assert_called_once()
         WizClient._clients.clear()
@@ -1036,7 +1034,7 @@ class TestProxyAndTls:
         mock_client._profile_state.client_secret = "secret"
         resp = MagicMock(status_code=500, text="nope")
         with patch("wizsec.client.transport_post", return_value=resp) as tp:
-            with pytest.raises(Exception):
+            with pytest.raises(WizAuthenticationError):
                 mock_client._authenticate_client_credentials()
         assert tp.call_args.kwargs["proxy"] == self.PROXY
         assert tp.call_args.kwargs["verify"] == "/corp/ca.pem"
@@ -1045,7 +1043,7 @@ class TestProxyAndTls:
         with patch(
             "wizsec.client.transport_post", side_effect=TransportError("x")
         ) as tp:
-            with pytest.raises(Exception):
+            with pytest.raises(WizAPIError):
                 mock_client._authenticate_device_code()
         assert tp.call_args.kwargs["proxy"] == self.PROXY
         assert tp.call_args.kwargs["verify"] == "/corp/ca.pem"

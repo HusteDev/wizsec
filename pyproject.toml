@@ -28,6 +28,12 @@ dependencies = [
 
 classifiers = [
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Operating System :: OS Independent",
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -46,6 +52,8 @@ dev = [
     "pytest>=7.0",
     "pytest-asyncio",
     "black",
+    "ruff",
+    "pytest-cov",
     "mypy",
     "types-PyYAML"
 ]
@@ -66,8 +74,21 @@ version_scheme = "post-release"
 local_scheme = "no-local-version"
 
 [tool.black]
-target-version = ["py39", "py310", "py311", "py312", "py313"]
+target-version = ["py310", "py311", "py312", "py313"]
 line-length = 88
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "B", "UP"]
+# Line length is black's job; long string literals are left alone.
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# Names are re-exported lazily via __getattr__ and listed in __all__.
+"wizsec/__init__.py" = ["F401"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

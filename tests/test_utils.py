@@ -1,15 +1,13 @@
 """Tests for utils.py — utility functions."""
 
 import configparser
-import csv
 import json
-import logging
 import os
 import pickle
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
@@ -1092,7 +1090,7 @@ class TestWriteCredentialsErrors:
         cred_file = tmp_path / "creds.ini"
 
         with patch.object(mock_config, "serverless", return_value=False):
-            with patch("builtins.open", side_effect=IOError("permission denied")):
+            with patch("builtins.open", side_effect=OSError("permission denied")):
                 with pytest.raises(WizFileError, match="Failed to write credentials"):
                     write_credentials_to_file("default", "id", "secret", str(cred_file))
 
@@ -1118,7 +1116,6 @@ class TestLoadFileIfInLastXIntervalOld:
 
         # Pretend the file is old (modified 10 days ago)
         old_time = (datetime.now() - timedelta(days=10)).timestamp()
-        import os
 
         os.utime(str(json_file), (old_time, old_time))
 

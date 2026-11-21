@@ -16,8 +16,8 @@ import os
 import base64
 import json
 import queue
-from typing import TYPE_CHECKING, Callable, Optional, Dict, Any, Iterator, Union
-import asyncio
+from typing import TYPE_CHECKING, Any
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from .config import Config
 from .version import __version__ as wizsec_version
@@ -27,9 +27,7 @@ from .exceptions import (
     WizAuthenticationError,
     WizAPIError,
     WizCredentialsError,
-    WizConfigurationError,
     WizTimeoutError,
-    WizError,
 )
 from ._registry import EnvironmentRegistry, ProfileRegistry
 from .utils import _resolve_query_collection
@@ -52,7 +50,7 @@ if TYPE_CHECKING:
 
 class WizClient:
     _headers_auth = {"Content-Type": "application/x-www-form-urlencoded"}
-    _clients: Dict[tuple, "WizClient"] = {}
+    _clients: dict[tuple, "WizClient"] = {}
     _clients_lock = threading.Lock()
 
     def __new__(
@@ -79,7 +77,7 @@ class WizClient:
         client_id: str = "",
         client_secret: str = "",
         grant_type: str = "",
-        log_lvl: Optional[Union[str, int]] = None,
+        log_lvl: str | int | None = None,
         serverless: bool = False,
         interactive: bool = False,
     ) -> None:
@@ -132,7 +130,7 @@ class WizClient:
         client_id: str,
         client_secret: str,
         grant_type: str,
-        log_lvl: Optional[Union[str, int]],
+        log_lvl: str | int | None,
         interactive: bool,
     ) -> None:
         """Apply or flag arguments passed when an existing instance is reused.
@@ -183,7 +181,7 @@ class WizClient:
     # ========== PROPERTIES ==========
 
     @property
-    def access_token(self) -> Optional[str]:
+    def access_token(self) -> str | None:
         return self._profile_state.token_data.get("access_token")
 
     @access_token.setter
@@ -200,7 +198,7 @@ class WizClient:
         self._is_service_account = value
 
     @property
-    def client_id(self) -> Optional[str]:
+    def client_id(self) -> str | None:
         """OAuth client ID from profile state."""
         return self._profile_state.client_id
 
@@ -209,7 +207,7 @@ class WizClient:
         self._profile_state.client_id = value
 
     @property
-    def client_secret(self) -> Optional[str]:
+    def client_secret(self) -> str | None:
         """OAuth client secret from profile state."""
         return self._profile_state.client_secret
 
@@ -218,7 +216,7 @@ class WizClient:
         self._profile_state.client_secret = value
 
     @property
-    def dc(self) -> Optional[str]:
+    def dc(self) -> str | None:
         """Data center identifier extracted from the JWT token."""
         return self._env_state.dc
 
@@ -306,11 +304,11 @@ class WizClient:
 
     def create_request(
         self,
-        query_collection: Optional[Union[str, Any]] = None,
-        query: Optional[str] = None,
-        vars: Optional[Dict[str, Any]] = None,
-        paginate: Optional[bool] = None,
-        queryCollection: Optional[Union[str, Any]] = None,
+        query_collection: str | Any | None = None,
+        query: str | None = None,
+        vars: dict[str, Any] | None = None,
+        paginate: bool | None = None,
+        queryCollection: str | Any | None = None,
         **kwargs,
     ) -> "WizResponse":
         """Create a synchronous request.
@@ -355,14 +353,14 @@ class WizClient:
 
     def iterate_nodes(
         self,
-        query_collection: Optional[Union[str, Any]] = None,
-        query: Optional[str] = None,
-        vars: Optional[Dict[str, Any]] = None,
-        page_size: Optional[int] = None,
-        stop_when: Optional[Callable[[Dict[str, Any]], bool]] = None,
-        stop_on_page: Optional[Callable[[Dict[str, Any]], bool]] = None,
-        queryCollection: Optional[Union[str, Any]] = None,
-    ) -> Iterator[Dict[str, Any]]:
+        query_collection: str | Any | None = None,
+        query: str | None = None,
+        vars: dict[str, Any] | None = None,
+        page_size: int | None = None,
+        stop_when: Callable[[dict[str, Any]], bool] | None = None,
+        stop_on_page: Callable[[dict[str, Any]], bool] | None = None,
+        queryCollection: str | Any | None = None,
+    ) -> Iterator[dict[str, Any]]:
         """Yield result nodes one page at a time without aggregating in memory.
 
         Unlike submit() with auto-pagination, this never holds more than one
@@ -433,13 +431,13 @@ class WizClient:
 
     async def iterate_nodes_async(
         self,
-        query_collection: Optional[Union[str, Any]] = None,
-        query: Optional[str] = None,
-        vars: Optional[Dict[str, Any]] = None,
-        page_size: Optional[int] = None,
-        stop_when: Optional[Callable[[Dict[str, Any]], bool]] = None,
-        stop_on_page: Optional[Callable[[Dict[str, Any]], bool]] = None,
-        queryCollection: Optional[Union[str, Any]] = None,
+        query_collection: str | Any | None = None,
+        query: str | None = None,
+        vars: dict[str, Any] | None = None,
+        page_size: int | None = None,
+        stop_when: Callable[[dict[str, Any]], bool] | None = None,
+        stop_on_page: Callable[[dict[str, Any]], bool] | None = None,
+        queryCollection: str | Any | None = None,
     ) -> Any:
         """Async counterpart of iterate_nodes; use within async_session().
 
@@ -522,11 +520,11 @@ class WizClient:
 
     async def create_async_request(
         self,
-        query_collection: Optional[Union[str, Any]] = None,
-        query: Optional[str] = None,
-        vars: Optional[Dict[str, Any]] = None,
-        paginate: Optional[bool] = None,
-        queryCollection: Optional[Union[str, Any]] = None,
+        query_collection: str | Any | None = None,
+        query: str | None = None,
+        vars: dict[str, Any] | None = None,
+        paginate: bool | None = None,
+        queryCollection: str | Any | None = None,
         **kwargs,
     ) -> "AsyncWizResponse":
         """
@@ -576,7 +574,7 @@ class WizClient:
 
         return AsyncWizBatchRequest(client=self)
 
-    def async_session(self, client: Optional[Any] = None) -> Any:
+    def async_session(self, client: Any | None = None) -> Any:
         """
         Context manager for async operations. Manages async HTTP client lifecycle.
 
@@ -588,7 +586,7 @@ class WizClient:
 
         class AsyncEnabledClient:
             def __init__(
-                self, sync_client: "WizClient", async_client: Optional[Any]
+                self, sync_client: "WizClient", async_client: Any | None
             ) -> None:
                 self._sync_client = sync_client
                 self._async_client = async_client
@@ -605,9 +603,9 @@ class WizClient:
 
             async def __aexit__(
                 self,
-                exc_type: Optional[type],
-                exc_val: Optional[BaseException],
-                exc_tb: Optional[Any],
+                exc_type: type | None,
+                exc_val: BaseException | None,
+                exc_tb: Any | None,
             ) -> None:
                 if self._owns_client and self._async_client:
                     await self._async_client.aclose()
@@ -625,7 +623,7 @@ class WizClient:
         self._logger.debug(f"API endpoint resolved: {endpoint}")
         return endpoint
 
-    def _get_headers(self) -> Dict[str, str]:
+    def _get_headers(self) -> dict[str, str]:
         headers = dict(self._env_state.headers)
         # Authorization is per profile: the environment's headers are shared
         # by every profile on that environment, so a token stored there would
@@ -642,7 +640,7 @@ class WizClient:
         self._logger.debug(f"Headers fetched: {safe_keys}")
         return headers
 
-    def _http_kwargs(self) -> Dict[str, Any]:
+    def _http_kwargs(self) -> dict[str, Any]:
         """Proxy and TLS settings shared by every HTTP call this client makes."""
         return {
             "proxy": self._proxies.get("https") or self._proxies.get("http"),
@@ -667,7 +665,7 @@ class WizClient:
 
     # ========== RATE LIMITING ==========
 
-    def _limiter_key(self, request: Optional[Any] = None) -> str:
+    def _limiter_key(self, request: Any | None = None) -> str:
         """Build the rate-limiter key based on request type and account type."""
         info = getattr(request, "_current_query_info", {}) or {}
         qtype = str(info.get("request_type", "query")).lower()
@@ -768,7 +766,7 @@ class WizClient:
                     f"No credentials for profile {self.profile} found in file: {path}."
                 )
 
-    def _validate_environment_match(self, creds: Dict[str, Optional[str]]) -> None:
+    def _validate_environment_match(self, creds: dict[str, str | None]) -> None:
         """Validate that the loaded credentials match the expected environment."""
         if creds.get("environment") and creds.get("environment") != self.environment:
             self._logger.warning(
@@ -903,10 +901,10 @@ class WizClient:
             )
             raise WizAPIError(
                 "Network error during device code authentication", original_error=e
-            )
+            ) from e
         except Exception as e:
             self._logger.error(f"Device code authentication failed: {e}", exc_info=True)
-            raise WizAuthenticationError("Device code authentication failed", e)
+            raise WizAuthenticationError("Device code authentication failed", e) from e
 
     def _authenticate_client_credentials(self) -> bool:
         """Authenticate using client_id and client_secret credentials."""
@@ -950,16 +948,20 @@ class WizClient:
             self._logger.error(
                 f"Network error during authentication: {e}", exc_info=True
             )
-            raise WizAPIError("Network error during authentication", original_error=e)
+            raise WizAPIError(
+                "Network error during authentication", original_error=e
+            ) from e
         except WizAuthenticationError:
             raise
         except Exception as e:
             self._logger.error(
                 f"Client credentials authentication error: {e}", exc_info=True
             )
-            raise WizAuthenticationError("Client credentials authentication failed", e)
+            raise WizAuthenticationError(
+                "Client credentials authentication failed", e
+            ) from e
 
-    def _decode_access_token(self, token: Optional[str]) -> bool:
+    def _decode_access_token(self, token: str | None) -> bool:
         """Decode a JWT access token to extract dc and service account info."""
         if token:
             self._logger.debug("Decoding access token")
@@ -1028,8 +1030,8 @@ class WizClient:
 
     def set_log_level(
         self,
-        level: Union[str, int],
-        handler_level: Optional[Union[str, int]] = None,
+        level: str | int,
+        handler_level: str | int | None = None,
         include_children: bool = True,
     ) -> None:
         """Update the SDK log level and refresh this client's logger reference."""

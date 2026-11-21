@@ -23,7 +23,7 @@ import contextlib
 import os
 import threading
 import httpx
-from typing import Optional, Dict, Any, Tuple
+from typing import Any
 
 # ── Exception ────────────────────────────────────────────────────────
 
@@ -31,9 +31,7 @@ from typing import Optional, Dict, Any, Tuple
 class TransportError(Exception):
     """Wraps the underlying HTTP library's errors."""
 
-    def __init__(
-        self, message: str, original_error: Optional[Exception] = None
-    ) -> None:
+    def __init__(self, message: str, original_error: Exception | None = None) -> None:
         super().__init__(message)
         self.original_error = original_error
 
@@ -57,11 +55,11 @@ def default_verify() -> Any:
 # One httpx.Client per (proxy, verify) pair, so repeated calls (pagination,
 # retries, auth) reuse TCP/TLS connections instead of reconnecting each time.
 
-_clients: Dict[Tuple[Optional[str], str], httpx.Client] = {}
+_clients: dict[tuple[str | None, str], httpx.Client] = {}
 _clients_lock = threading.Lock()
 
 
-def _sync_client(proxy: Optional[str], verify: Any) -> httpx.Client:
+def _sync_client(proxy: str | None, verify: Any) -> httpx.Client:
     key = (proxy, str(verify))
     with _clients_lock:
         client = _clients.get(key)
@@ -82,7 +80,7 @@ def close_clients() -> None:
 atexit.register(close_clients)
 
 
-def _timeout_arg(timeout: Optional[float]) -> Any:
+def _timeout_arg(timeout: float | None) -> Any:
     return httpx.USE_CLIENT_DEFAULT if timeout is None else timeout
 
 
@@ -92,12 +90,12 @@ def _timeout_arg(timeout: Optional[float]) -> Any:
 def post(
     url: str,
     *,
-    data: Optional[Dict[str, Any]] = None,
-    json: Optional[Dict[str, Any]] = None,
-    headers: Optional[Dict[str, str]] = None,
-    proxy: Optional[str] = None,
+    data: dict[str, Any] | None = None,
+    json: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    proxy: str | None = None,
     verify: Any = True,
-    timeout: Optional[float] = None,
+    timeout: float | None = None,
 ) -> httpx.Response:
     """Synchronous POST request over a pooled connection."""
     try:
@@ -115,9 +113,9 @@ def post(
 def get(
     url: str,
     *,
-    proxy: Optional[str] = None,
+    proxy: str | None = None,
     verify: Any = True,
-    timeout: Optional[float] = None,
+    timeout: float | None = None,
 ) -> httpx.Response:
     """Synchronous GET request over a pooled connection."""
     try:
@@ -129,9 +127,9 @@ def get(
 def stream_get(
     url: str,
     *,
-    proxy: Optional[str] = None,
+    proxy: str | None = None,
     verify: Any = True,
-    timeout: Optional[float] = None,
+    timeout: float | None = None,
 ) -> contextlib.AbstractContextManager[httpx.Response]:
     """Context manager for a streaming GET request."""
     return _sync_client(proxy, verify).stream("GET", url, timeout=_timeout_arg(timeout))
@@ -145,7 +143,7 @@ def create_async_client(
     timeout: float = 180,
     max_connections: int = 100,
     verify: Any = True,
-    proxy: Optional[str] = None,
+    proxy: str | None = None,
 ) -> httpx.AsyncClient:
     """Create a configured async HTTP client."""
     return httpx.AsyncClient(

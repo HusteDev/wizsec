@@ -1,15 +1,12 @@
 """Extended tests for _request.py — WizResponse, WizBatchResponse, query setter, and more."""
 
 import asyncio
-import logging
-import threading
-from unittest.mock import patch, MagicMock, PropertyMock
+from unittest.mock import patch, MagicMock
 
 import pytest
 
 from wizsec.config import Config
 from wizsec._request import (
-    _RequestBase,
     WizRequest,
     WizResponse,
     WizBatchRequest,
@@ -300,11 +297,9 @@ class TestQueryCollectionSetter:
 
     def test_set_query_collection_from_string_not_loaded(self, mock_wiz_client):
         """Setting query_collection with a module name string that is not yet loaded imports it."""
-        import sys
 
         req = _make_wiz_request(mock_wiz_client)
         # Use a module not yet in sys.modules by temporarily removing it
-        mod_name = "wizsec._request"  # already loaded, so use a unique fake
         fake_mod_name = "_test_fake_qc_module"
         import types
 
@@ -975,7 +970,7 @@ class TestAsyncWizRequest:
             req,
             "_execute_page",
             new_callable=lambda: lambda: MagicMock(return_value=None),
-        ) as mock_exec:
+        ):
             # Make _execute_page a proper coroutine
             async def fake_execute():
                 req.data = {"users": [{"id": "1"}]}
