@@ -13,7 +13,8 @@ import logging
 import sys
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Callable, Optional, Union
+from typing import Any
+from collections.abc import Callable
 
 VERBOSE_LEVEL = 15  # Between INFO (20) and DEBUG (10)
 BASE_LOGGER_NAME = "wizsec"
@@ -35,9 +36,7 @@ def _register_verbose_level() -> None:
 class CustomFormatter(logging.Formatter):
     """Formatter that uses datetime for microsecond-precision timestamps."""
 
-    def formatTime(
-        self, record: logging.LogRecord, datefmt: Optional[str] = None
-    ) -> str:
+    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
         """Format the record's creation time with microsecond precision."""
         ct = datetime.fromtimestamp(record.created)
         if datefmt:
@@ -224,7 +223,7 @@ def logging_init(
     return logger
 
 
-def parse_level(level: Union[int, str, None], default=logging.INFO) -> int:
+def parse_level(level: int | str | None, default=logging.INFO) -> int:
     """Parse a log level from int, string name, or None."""
     if level is None:
         return default

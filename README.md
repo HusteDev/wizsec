@@ -50,7 +50,7 @@ pip install -e ".[dev]"
 
 ## Requirements
 
-- Python >= 3.9
+- Python >= 3.10
 - `httpx`, `pyrate-limiter`, `python-dotenv`, `PyYAML`, `graphql-core`
 
 ## Quick Start
@@ -226,7 +226,7 @@ batch.add_request(query="...", vars={"type": "VM"})
 batch.add_request(query="...", vars={"type": "CONTAINER"})
 
 batch.set_progress_callback(lambda done, total: print(f"{done}/{total}"))
-results = batch.submit(max_concurrent=5)
+results = batch.submit(max_concurrent=5)  # up to 5 requests in flight; rate limits still apply
 
 print(f"{results.success_count()}/{results.total_count()} succeeded")
 

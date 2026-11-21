@@ -15,7 +15,7 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, cast
 
 from graphql import (
     parse as gql_parse,
@@ -119,9 +119,7 @@ class SchemaValidator:
     _fetch_failed: set[str] = set()  # avoids re-introspecting every request
 
     @classmethod
-    def get_schema(
-        cls, environment: str, client: Any = None
-    ) -> Optional[GraphQLSchema]:
+    def get_schema(cls, environment: str, client: Any = None) -> GraphQLSchema | None:
         """Load or fetch the GraphQL schema for a given environment."""
         if environment in cls._schemas:
             return cls._schemas[environment]
@@ -184,7 +182,7 @@ class SchemaValidator:
             )
 
     @classmethod
-    def clear(cls, environment: Optional[str] = None) -> None:
+    def clear(cls, environment: str | None = None) -> None:
         """Clear cached schema(s). If environment is None, clear all."""
         with cls._lock:
             if environment:
@@ -200,7 +198,7 @@ class SchemaValidator:
         return Config.wiz_dir() / f"schema_{environment}.json"
 
     @classmethod
-    def _load_from_cache(cls, environment: str) -> Optional[GraphQLSchema]:
+    def _load_from_cache(cls, environment: str) -> GraphQLSchema | None:
         """Load and build a GraphQL schema from the disk cache, or return None."""
         cache_path = cls.cache_path(environment)
         if not cache_path.exists():
@@ -222,7 +220,7 @@ class SchemaValidator:
             pass
 
         try:
-            with open(cache_path, "r") as f:
+            with open(cache_path) as f:
                 data = json.load(f)
             # Handle both {"__schema": {...}} and direct schema dict
             introspection = {"__schema": data} if "__schema" not in data else data
@@ -237,7 +235,7 @@ class SchemaValidator:
 
     @classmethod
     def refresh(
-        cls, environment: str, client: Any, output_path: Optional[Path] = None
+        cls, environment: str, client: Any, output_path: Path | None = None
     ) -> Path:
         """Introspect the API and write the schema to disk. Returns the path.
 
@@ -277,7 +275,7 @@ class SchemaValidator:
         return destination
 
     @classmethod
-    def _introspect(cls, environment: str, client: Any) -> Dict[str, Any]:
+    def _introspect(cls, environment: str, client: Any) -> dict[str, Any]:
         """Run the introspection query. Raises WizAPIError on any failure.
 
         Deliberately uses the client's raw transport instead of
@@ -316,12 +314,12 @@ class SchemaValidator:
                     f"Introspection response for '{environment}' contained no __schema"
                 )
 
-            return cast(Dict[str, Any], schema_data)
+            return cast(dict[str, Any], schema_data)
         finally:
             cls._fetching.discard(environment)
 
     @classmethod
-    def _fetch_and_cache(cls, environment: str, client: Any) -> Optional[GraphQLSchema]:
+    def _fetch_and_cache(cls, environment: str, client: Any) -> GraphQLSchema | None:
         """Fetch schema via introspection and cache to disk, or return None.
 
         The degrading counterpart to refresh(): this runs inside whatever

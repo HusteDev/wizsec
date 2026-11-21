@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Python 3.9+
+- Python 3.10+
 - A Wiz account with API credentials (client ID + secret)
 
 ## Installation

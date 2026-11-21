@@ -22,7 +22,7 @@ import configparser
 import getpass
 import sys
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any
 
 import yaml
 
@@ -41,7 +41,7 @@ def _fail(message: str) -> int:
 def _load_yaml_file(path: Path) -> Any:
     if not path.exists():
         return None
-    with open(path, "r", encoding="utf-8") as fh:
+    with open(path, encoding="utf-8") as fh:
         return yaml.safe_load(fh)
 
 
@@ -321,7 +321,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 
     # -- credentials file
     creds_path = Path(args.creds_file)
-    profiles: List[str] = []
+    profiles: list[str] = []
     if not creds_path.exists():
         report(
             "WARN", f"credentials file missing: {creds_path} (run 'wizsec creds set')"
@@ -524,7 +524,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     func = getattr(args, "func", None)

@@ -19,7 +19,8 @@ import logging
 import tempfile
 import inspect
 from functools import wraps
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any
+from collections.abc import Callable
 
 from .version import __version__ as wizsec_version
 from .exceptions import WizConfigurationError
@@ -37,9 +38,9 @@ CURRENT_VERSION = wizsec_version
 CONFIG_SCHEMA_VERSION = 2
 
 
-def _migrate_v1_to_v2(config: Dict[str, Any]) -> List[str]:
+def _migrate_v1_to_v2(config: dict[str, Any]) -> list[str]:
     """Populate v2 config defaults without overriding user-provided values."""
-    changes: List[str] = []
+    changes: list[str] = []
 
     app = config.setdefault("app", {})
     if "config_schema" not in app:
@@ -77,7 +78,7 @@ def _migrate_v1_to_v2(config: Dict[str, Any]) -> List[str]:
 
 # Keys are (from_schema, to_schema). Each function receives the in-memory config
 # dict, modifies it in place, and returns a list of human-readable change descriptions.
-_MIGRATIONS: Dict[Tuple[int, int], Callable[[Dict[str, Any]], List[str]]] = {
+_MIGRATIONS: dict[tuple[int, int], Callable[[dict[str, Any]], list[str]]] = {
     (1, 2): _migrate_v1_to_v2,
 }
 
@@ -157,14 +158,14 @@ def _update_config_v2_in_file(config_file_path: Path) -> bool:
 
 
 def _run_migrations(
-    config: Dict[str, Any], config_file_path: Optional[Path] = None
+    config: dict[str, Any], config_file_path: Path | None = None
 ) -> None:
     """Apply any pending config schema migrations and persist the updated file."""
     file_schema = int(config.get("app", {}).get("config_schema", 0))
     if file_schema >= CONFIG_SCHEMA_VERSION:
         return
 
-    all_changes: List[str] = []
+    all_changes: list[str] = []
     current = file_schema
     while current < CONFIG_SCHEMA_VERSION:
         next_ver = current + 1
@@ -272,10 +273,10 @@ class Config:
     @classmethod
     def load(
         cls,
-        config_path: Optional[str] = None,
-        overrides: Optional[Dict[str, str]] = None,
-        client_id: Optional[str] = None,
-        client_secret: Optional[str] = None,
+        config_path: str | None = None,
+        overrides: dict[str, str] | None = None,
+        client_id: str | None = None,
+        client_secret: str | None = None,
     ) -> None:
         """Load configuration from YAML file, applying overrides and credential env vars.
 
@@ -298,13 +299,13 @@ class Config:
                     os.path.exists(path / filename),  # type: ignore[operator]
                 ]
             ):
-                with open(path / filename, "r") as file:  # type: ignore[operator]
+                with open(path / filename) as file:  # type: ignore[operator]
                     cls._CONFIG = yaml.safe_load(file)
             else:
                 if not SERVERLESS:
                     created = generate_default_config(str(config_path))
                     if created:
-                        with open(str(config_path), "r") as file:
+                        with open(str(config_path)) as file:
                             cls._CONFIG = yaml.safe_load(file)
                 elif explicit_path:
                     raise WizConfigurationError(f"Config file not found: {config_path}")
@@ -490,9 +491,9 @@ class Config:
     @ensure_loaded
     def set_log_level(
         cls,
-        level: Union[int, str],
+        level: int | str,
         *,
-        handler_level: Optional[Union[int, str]] = None,
+        handler_level: int | str | None = None,
         include_children: bool = True,
     ) -> int:
         """
@@ -654,13 +655,13 @@ class Config:
 
     @classmethod
     @ensure_loaded
-    def get_proxies(cls) -> Dict[str, Optional[str]]:
+    def get_proxies(cls) -> dict[str, str | None]:
         """Return a dict of HTTP/HTTPS proxy URLs from config or environment."""
         if cls.serverless():
             return {"https": os.environ.get("HTTPS_PROXY")}
         proxy_config = cls.get("auth", "proxy", default={})
 
-        def _proxy_url(scheme: str, env_var: str) -> Optional[str]:
+        def _proxy_url(scheme: str, env_var: str) -> str | None:
             section = proxy_config.get(scheme, {}) if proxy_config else {}
             url = str(section.get("url", "") or "").strip()
             port = section.get("port")
@@ -714,7 +715,7 @@ class Config:
 
     @classmethod
     @ensure_loaded
-    def domain_root(cls, env: str) -> Optional[str]:
+    def domain_root(cls, env: str) -> str | None:
         """Return the root domain string for the given environment identifier."""
         root_domains = {
             "app": "app.wiz.io",
@@ -863,7 +864,7 @@ class Config:
 
     @classmethod
     @ensure_loaded
-    def file_handler_log_directory(cls) -> Union[str, Path]:
+    def file_handler_log_directory(cls) -> str | Path:
         """Return the resolved directory path for log file output."""
         if cls.serverless():
             return "/tmp"
@@ -985,7 +986,7 @@ class Config:
 
     @classmethod
     @ensure_loaded
-    def rate_limit_overrides(cls) -> Dict[str, float]:
+    def rate_limit_overrides(cls) -> dict[str, float]:
         """Return explicit requests-per-second overrides per limiter key.
 
         Keys are limiter names (query_user, query_service, mutation_user,
@@ -996,7 +997,7 @@ class Config:
         overrides = cls.get("rate_limit", "overrides", default={}) or {}
         if not isinstance(overrides, dict):
             return {}
-        result: Dict[str, float] = {}
+        result: dict[str, float] = {}
         for key, value in overrides.items():
             try:
                 rps = float(value)
@@ -1041,7 +1042,7 @@ def _render_default_config() -> str:
 
 
 def generate_default_config(
-    file_path: Union[str, Path] = (DEFAULT_WIZ_DIR / "wiz.config"),
+    file_path: str | Path = (DEFAULT_WIZ_DIR / "wiz.config"),
 ) -> bool:
     """Generate a default config file from the bundled template.
 
@@ -1081,7 +1082,7 @@ def expand_all_vars(path_str: str) -> str:
     return expanded
 
 
-def parse_filepath(path_str: Optional[str] = None) -> Tuple[Path, Optional[str]]:
+def parse_filepath(path_str: str | None = None) -> tuple[Path, str | None]:
     """Parse and resolve a path string into a directory and optional filename.
 
     Args:

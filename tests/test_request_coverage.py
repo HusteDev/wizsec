@@ -18,8 +18,7 @@ not compatible with Trio.
 
 import asyncio
 import threading
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -31,7 +30,6 @@ from wizsec._request import (
     WizBatchRequest,
     WizBatchResponse,
     WizRequest,
-    _RequestBase,
     _extract_totalcount,
     _merge_split_results,
     _schema_supports_totalcount,
@@ -1136,7 +1134,7 @@ class TestAsyncWizBatchRequest:
         """AsyncWizBatchRequest creates _async_semaphore on client if absent."""
         if hasattr(mock_client, "_async_semaphore"):
             del mock_client._async_semaphore
-        batch = AsyncWizBatchRequest(client=mock_client, max_concurrent=10)
+        AsyncWizBatchRequest(client=mock_client, max_concurrent=10)
         assert hasattr(mock_client, "_async_semaphore")
 
     @pytest.mark.asyncio
