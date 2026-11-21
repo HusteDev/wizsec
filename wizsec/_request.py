@@ -18,10 +18,12 @@ import csv
 import re
 import json
 import threading
+import warnings
 from typing import Optional, Dict, Any, List, Tuple, Union, Callable, Iterator
 
 from graphql import parse, GraphQLError
 import asyncio
+from .utils import _resolve_query_collection
 from .utils import (
     parse_query_metadata,
     ensure_pagination_variables,
@@ -206,7 +208,7 @@ def _merge_split_results(
     return {source: merged_connection}
 
 
-# Types rejected as queryCollection — anything else (including SimpleNamespace,
+# Types rejected as query_collection — anything else (including SimpleNamespace,
 # dataclasses, class instances) is accepted and resolved via getattr at use time.
 _REJECTED_QC_TYPES = (
     int,
@@ -229,7 +231,7 @@ class _RequestBase:
     def _init_common(
         self,
         client: "WizClient",
-        queryCollection: Optional[Union[str, Any]] = None,
+        query_collection: Optional[Union[str, Any]] = None,
         query: Optional[str] = None,
         vars: Optional[Dict[str, Any]] = None,
         paginate: Optional[bool] = None,
@@ -270,9 +272,9 @@ class _RequestBase:
                 "stop_when/stop_on_page have no effect with paginate=False"
             )
 
-        self._queryCollection: Optional[Any] = None
-        if queryCollection:
-            self.queryCollection = queryCollection
+        self._query_collection: Optional[Any] = None
+        if query_collection:
+            self.query_collection = query_collection
 
         if query is not None:
             self.query = query
@@ -280,16 +282,16 @@ class _RequestBase:
         self._limiter_key = self._client._limiter_key(self)
 
     @property
-    def queryCollection(self) -> Optional[Any]:
+    def query_collection(self) -> Optional[Any]:
         """Return the loaded query collection module, or None if unset."""
-        if hasattr(self, "_queryCollection") and self._queryCollection:
-            return self._queryCollection
+        if getattr(self, "_query_collection", None):
+            return self._query_collection
         else:
-            self._logger.debug("No queryCollection set")
+            self._logger.debug("No query_collection set")
             return None
 
-    @queryCollection.setter
-    def queryCollection(self, module: Union[str, Any]) -> None:
+    @query_collection.setter
+    def query_collection(self, module: Union[str, Any]) -> None:
         """Set the query collection.
 
         Accepts:
@@ -314,7 +316,7 @@ class _RequestBase:
                 self._logger.debug("Manually added [%s] to sys.modules", module_name)
         elif isinstance(module, _REJECTED_QC_TYPES):
             self._logger.warning(
-                "Unexpected type for queryCollection: %s", type(module)
+                "Unexpected type for query_collection: %s", type(module)
             )
             raise WizQueryError(
                 "QueryCollection must be a module, a module name string, "
@@ -324,7 +326,26 @@ class _RequestBase:
         # instance, etc.) — accepted as-is. Missing attributes fall back
         # gracefully via the existing AttributeError handling in `query.setter`.
 
-        self._queryCollection = module
+        self._query_collection = module
+
+    @property
+    def queryCollection(self) -> Optional[Any]:
+        """Deprecated alias for ``query_collection``."""
+        warnings.warn(
+            "'queryCollection' is deprecated; use 'query_collection'",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.query_collection
+
+    @queryCollection.setter
+    def queryCollection(self, module: Union[str, Any]) -> None:
+        warnings.warn(
+            "'queryCollection' is deprecated; use 'query_collection'",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        self.query_collection = module
 
     @property
     def query(self) -> str:
@@ -332,28 +353,30 @@ class _RequestBase:
         return self._query
 
     @query.setter
-    def query(self, QUERY: str) -> None:
+    def query(self, value: str) -> None:
         """Resolve, validate, and set the GraphQL query string."""
-        if not isinstance(QUERY, str):
-            self._logger.warning("Query must be a string, got: %s", type(QUERY))
-            raise WizQueryError(f"Query must be a string, got: {type(QUERY)}")
+        if not isinstance(value, str):
+            self._logger.warning("Query must be a string, got: %s", type(value))
+            raise WizQueryError(f"Query must be a string, got: {type(value)}")
 
         resolved = None
         try:
-            parse(QUERY)
-            resolved = QUERY
+            parse(value)
+            resolved = value
         except GraphQLError:
-            if self.queryCollection:
+            if self.query_collection:
                 try:
-                    resolved = getattr(self.queryCollection, QUERY)
-                    self._logger.debug(f"Resolved query '{QUERY}' from queryCollection")
+                    resolved = getattr(self.query_collection, value)
+                    self._logger.debug(
+                        f"Resolved query '{value}' from query_collection"
+                    )
                 except AttributeError:
                     self._logger.debug(
-                        f"Query '{QUERY}' not found in queryCollection. Using raw query."
+                        f"Query '{value}' not found in query_collection. Using raw query."
                     )
-                    resolved = QUERY
+                    resolved = value
             else:
-                resolved = QUERY
+                resolved = value
 
         if self._paginate:
             resolved = ensure_pagination_variables(resolved)
@@ -559,7 +582,7 @@ class WizRequest(_RequestBase):
     def __init__(
         self,
         client: "WizClient",
-        queryCollection: Optional[Union[str, Any]] = None,
+        query_collection: Optional[Union[str, Any]] = None,
         query: Optional[str] = None,
         vars: Optional[Dict[str, Any]] = None,
         paginate: Optional[bool] = None,
@@ -567,11 +590,13 @@ class WizRequest(_RequestBase):
         on_page_event: Optional[Callable] = None,
         stop_when: Optional[Callable[[Dict[str, Any]], bool]] = None,
         stop_on_page: Optional[Callable[[Dict[str, Any]], bool]] = None,
+        queryCollection: Optional[Union[str, Any]] = None,
     ) -> None:
         """Initialize a synchronous Wiz GraphQL request."""
+        query_collection = _resolve_query_collection(query_collection, queryCollection)
         self._init_common(
             client,
-            queryCollection,
+            query_collection,
             query,
             vars,
             paginate,
@@ -1332,8 +1357,9 @@ class WizBatchRequest:
         self,
         query: str,
         vars: Optional[Dict[str, Any]] = None,
-        queryCollection: Optional[Union[str, Any]] = None,
+        query_collection: Optional[Union[str, Any]] = None,
         paginate: Optional[bool] = None,
+        queryCollection: Optional[Union[str, Any]] = None,
         **kwargs,
     ) -> int:
         """
@@ -1344,9 +1370,10 @@ class WizBatchRequest:
         per-request: each request stops its own pagination, and one stopping
         does not stop the others.
         """
+        query_collection = _resolve_query_collection(query_collection, queryCollection)
         # Create the response object that users will interact with
         response = self._client.create_request(
-            queryCollection=queryCollection,
+            query_collection=query_collection,
             query=query,
             vars=vars,
             paginate=paginate,
@@ -1586,7 +1613,7 @@ class AsyncWizRequest(_RequestBase):
     def __init__(
         self,
         client: "WizClient",
-        queryCollection: Optional[Union[str, Any]] = None,
+        query_collection: Optional[Union[str, Any]] = None,
         query: Optional[str] = None,
         vars: Optional[Dict[str, Any]] = None,
         paginate: Optional[bool] = None,
@@ -1594,6 +1621,7 @@ class AsyncWizRequest(_RequestBase):
         on_page_event: Optional[Callable] = None,
         stop_when: Optional[Callable[[Dict[str, Any]], bool]] = None,
         stop_on_page: Optional[Callable[[Dict[str, Any]], bool]] = None,
+        queryCollection: Optional[Union[str, Any]] = None,
     ) -> None:
         """Initialize an asynchronous Wiz GraphQL request.
 
@@ -1601,6 +1629,7 @@ class AsyncWizRequest(_RequestBase):
             WizConfigurationError: If ``report_request`` is supplied. Reports
                 are sync-only by design; see the check below.
         """
+        query_collection = _resolve_query_collection(query_collection, queryCollection)
         # Reports are deliberately not available on the async path. The async
         # client exists to run many queries concurrently, and a report is not a
         # query -- it makes the Wiz backend generate and materialise a dataset.
@@ -1619,7 +1648,7 @@ class AsyncWizRequest(_RequestBase):
             )
         self._init_common(
             client,
-            queryCollection,
+            query_collection,
             query,
             vars,
             paginate,
@@ -2011,8 +2040,9 @@ class AsyncWizBatchRequest:
         self,
         query: str,
         vars: Optional[Dict[str, Any]] = None,
-        queryCollection: Optional[Union[str, Any]] = None,
+        query_collection: Optional[Union[str, Any]] = None,
         paginate: Optional[bool] = None,
+        queryCollection: Optional[Union[str, Any]] = None,
         **kwargs,
     ) -> int:
         """Add request to batch.
@@ -2022,9 +2052,10 @@ class AsyncWizBatchRequest:
         per-request: each request stops its own pagination, and one stopping
         does not stop the others.
         """
+        query_collection = _resolve_query_collection(query_collection, queryCollection)
         request = AsyncWizRequest(
             client=self._client,
-            queryCollection=queryCollection,
+            query_collection=query_collection,
             query=query,
             vars=vars,
             paginate=paginate,

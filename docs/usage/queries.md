@@ -119,13 +119,13 @@ LIST_PROJECTS = """
 import my_queries
 
 response = client.create_request(
-    queryCollection=my_queries,
+    query_collection=my_queries,
     query="LIST_PROJECTS",
     vars={"first": 100},
 )
 ```
 
-`queryCollection` accepts a module, a module name string (auto-imported), or any object whose attributes are the query strings. For one-off scripts where a dedicated `queries.py` module is overkill, a `types.SimpleNamespace` works just as well:
+`query_collection` accepts a module, a module name string (auto-imported), or any object whose attributes are the query strings. For one-off scripts where a dedicated `queries.py` module is overkill, a `types.SimpleNamespace` works just as well:
 
 ```python
 from types import SimpleNamespace
@@ -135,7 +135,7 @@ queries = SimpleNamespace(
 )
 
 response = client.create_request(
-    queryCollection=queries,
+    query_collection=queries,
     query="LIST_PROJECTS",
     vars={"first": 100},
 )

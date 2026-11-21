@@ -110,7 +110,10 @@ class TestWizClientCachedArgs:
         WizClient, c1 = cached
         with patch.object(WizClient, "_try_save_credentials_to_file"):
             c2 = WizClient(
-                environment="app", profile="default", client_id="id2", client_secret="s2"
+                environment="app",
+                profile="default",
+                client_id="id2",
+                client_secret="s2",
             )
         assert c2 is c1
         assert c1._profile_state.client_id == "id2"
@@ -1050,7 +1053,9 @@ class TestProxyAndTls:
     def test_async_session(self, mock_client):
         async def _run():
             with patch("wizsec.client.create_async_client") as cac:
-                cac.return_value.aclose = MagicMock(side_effect=lambda: asyncio.sleep(0))
+                cac.return_value.aclose = MagicMock(
+                    side_effect=lambda: asyncio.sleep(0)
+                )
                 async with mock_client.async_session():
                     pass
             return cac.call_args.kwargs
