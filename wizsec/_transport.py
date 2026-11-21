@@ -134,9 +134,7 @@ def stream_get(
     timeout: Optional[float] = None,
 ) -> contextlib.AbstractContextManager[httpx.Response]:
     """Context manager for a streaming GET request."""
-    return _sync_client(proxy, verify).stream(
-        "GET", url, timeout=_timeout_arg(timeout)
-    )
+    return _sync_client(proxy, verify).stream("GET", url, timeout=_timeout_arg(timeout))
 
 
 # ── Async client factory ─────────────────────────────────────────────

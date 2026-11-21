@@ -23,6 +23,7 @@ import os
 import logging
 import configparser
 import mimetypes
+import warnings
 from graphql import parse
 from graphql.language import print_ast
 from graphql.language.ast import (
@@ -838,3 +839,21 @@ def load_data(file_path: str) -> Any:
         message = f"Unable to open saved data due to error: {e1}"
         logging.error(message, exc_info=True)
         raise WizFileError(f"Failed to load data from {file_path}", e1)
+
+
+def _resolve_query_collection(
+    query_collection: Optional[Union[str, Any]],
+    queryCollection: Optional[Union[str, Any]],
+) -> Optional[Union[str, Any]]:
+    """Return the query collection, accepting the deprecated camelCase name."""
+    if queryCollection is None:
+        return query_collection
+    warnings.warn(
+        "'queryCollection' is deprecated and will be removed in wizsec 2.0; "
+        "use 'query_collection'",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+    if query_collection is not None:
+        raise TypeError("pass either query_collection or queryCollection, not both")
+    return queryCollection

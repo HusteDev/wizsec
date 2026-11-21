@@ -32,6 +32,7 @@ from .exceptions import (
     WizError,
 )
 from ._registry import EnvironmentRegistry, ProfileRegistry
+from .utils import _resolve_query_collection
 from ._transport import (
     post as transport_post,
     create_async_client,
@@ -305,10 +306,11 @@ class WizClient:
 
     def create_request(
         self,
-        queryCollection: Optional[str] = None,
+        query_collection: Optional[Union[str, Any]] = None,
         query: Optional[str] = None,
         vars: Optional[Dict[str, Any]] = None,
         paginate: Optional[bool] = None,
+        queryCollection: Optional[Union[str, Any]] = None,
         **kwargs,
     ) -> "WizResponse":
         """Create a synchronous request.
@@ -335,6 +337,7 @@ class WizClient:
         split sub-queries run concurrently over disjoint scopes, so "the first
         matching node" has no global ordering.
         """
+        query_collection = _resolve_query_collection(query_collection, queryCollection)
         self._logger.debug(
             f"Creating request with query: {query[:50] if query else 'None'}..."
         )
@@ -342,7 +345,7 @@ class WizClient:
 
         request = WizRequest(
             client=self,
-            queryCollection=queryCollection,
+            query_collection=query_collection,
             query=query,
             vars=vars,
             paginate=Config.api_auto_paginate() if paginate is None else paginate,
@@ -352,12 +355,13 @@ class WizClient:
 
     def iterate_nodes(
         self,
-        queryCollection: Optional[str] = None,
+        query_collection: Optional[Union[str, Any]] = None,
         query: Optional[str] = None,
         vars: Optional[Dict[str, Any]] = None,
         page_size: Optional[int] = None,
         stop_when: Optional[Callable[[Dict[str, Any]], bool]] = None,
         stop_on_page: Optional[Callable[[Dict[str, Any]], bool]] = None,
+        queryCollection: Optional[Union[str, Any]] = None,
     ) -> Iterator[Dict[str, Any]]:
         """Yield result nodes one page at a time without aggregating in memory.
 
@@ -377,6 +381,7 @@ class WizClient:
             for issue in client.iterate_nodes(query=ISSUES_QUERY, vars={"first": 100}):
                 handle(issue)
         """
+        query_collection = _resolve_query_collection(query_collection, queryCollection)
         from ._request import WizRequest
         from .utils import ensure_pagination_variables
         from .exceptions import WizQueryError
@@ -388,7 +393,7 @@ class WizClient:
         while True:
             request = WizRequest(
                 client=self,
-                queryCollection=queryCollection,
+                query_collection=query_collection,
                 query=query,
                 vars=dict(page_vars),
                 paginate=False,
@@ -428,12 +433,13 @@ class WizClient:
 
     async def iterate_nodes_async(
         self,
-        queryCollection: Optional[str] = None,
+        query_collection: Optional[Union[str, Any]] = None,
         query: Optional[str] = None,
         vars: Optional[Dict[str, Any]] = None,
         page_size: Optional[int] = None,
         stop_when: Optional[Callable[[Dict[str, Any]], bool]] = None,
         stop_on_page: Optional[Callable[[Dict[str, Any]], bool]] = None,
+        queryCollection: Optional[Union[str, Any]] = None,
     ) -> Any:
         """Async counterpart of iterate_nodes; use within async_session().
 
@@ -445,6 +451,7 @@ class WizClient:
                 async for issue in ac.iterate_nodes_async(query=ISSUES_QUERY):
                     handle(issue)
         """
+        query_collection = _resolve_query_collection(query_collection, queryCollection)
         from ._request import AsyncWizRequest
         from .utils import ensure_pagination_variables
         from .exceptions import WizQueryError
@@ -456,7 +463,7 @@ class WizClient:
         while True:
             request = AsyncWizRequest(
                 client=self,
-                queryCollection=queryCollection,
+                query_collection=query_collection,
                 query=query,
                 vars=dict(page_vars),
                 paginate=False,
@@ -515,10 +522,11 @@ class WizClient:
 
     async def create_async_request(
         self,
-        queryCollection: Optional[str] = None,
+        query_collection: Optional[Union[str, Any]] = None,
         query: Optional[str] = None,
         vars: Optional[Dict[str, Any]] = None,
         paginate: Optional[bool] = None,
+        queryCollection: Optional[Union[str, Any]] = None,
         **kwargs,
     ) -> "AsyncWizResponse":
         """
@@ -536,6 +544,7 @@ class WizClient:
                 response = await session_client.create_async_request(query="...", vars={})
                 result = await response.submit()
         """
+        query_collection = _resolve_query_collection(query_collection, queryCollection)
         self._logger.debug(
             f"Creating async request with query: {query[:50] if query else 'None'}..."
         )
@@ -543,7 +552,7 @@ class WizClient:
 
         request = AsyncWizRequest(
             client=self,
-            queryCollection=queryCollection,
+            query_collection=query_collection,
             query=query,
             vars=vars,
             paginate=Config.api_auto_paginate() if paginate is None else paginate,
