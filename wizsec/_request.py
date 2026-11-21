@@ -1166,7 +1166,11 @@ class WizRequest(_RequestBase):
     ) -> Iterator[Any]:
         """Yield report rows/records line-by-line from a streaming download."""
         self._logger.info(f"Streaming report: {report_name}")
-        with stream_get(download_url) as response:
+        with stream_get(
+            download_url,
+            timeout=Config.api_timeout(),
+            **self._client._http_kwargs(),
+        ) as response:
             if response.status_code == 200:
                 content_type = response.headers.get("Content-Type", "")
                 total_size = int(response.headers.get("content-length", 0))
@@ -1203,7 +1207,11 @@ class WizRequest(_RequestBase):
     def _download_report(self, download_url: str) -> Optional[bytes]:
         """Download a report file from the given URL."""
         try:
-            response = transport_get(download_url)
+            response = transport_get(
+                download_url,
+                timeout=Config.api_timeout(),
+                **self._client._http_kwargs(),
+            )
             response.raise_for_status()
             return response.content
         except Exception as e:

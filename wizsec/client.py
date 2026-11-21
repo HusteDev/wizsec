@@ -32,7 +32,12 @@ from .exceptions import (
     WizError,
 )
 from ._registry import EnvironmentRegistry, ProfileRegistry
-from ._transport import post as transport_post, create_async_client, TransportError
+from ._transport import (
+    post as transport_post,
+    create_async_client,
+    default_verify,
+    TransportError,
+)
 
 if TYPE_CHECKING:
     from ._request import (
@@ -514,11 +519,9 @@ class WizClient:
 
             async def __aenter__(self) -> "WizClient":
                 if self._owns_client:
-                    ca_bundle = os.environ.get("REQUESTS_CA_BUNDLE")
-                    verify = ca_bundle if ca_bundle else True
                     self._async_client = create_async_client(
                         timeout=Config.api_timeout(),
-                        verify=verify,
+                        **self._sync_client._http_kwargs(),
                     )
                 self._sync_client._async_session = self._async_client  # type: ignore[attr-defined]
                 return self._sync_client
@@ -561,17 +564,21 @@ class WizClient:
         self._logger.debug(f"Headers fetched: {safe_keys}")
         return headers
 
+    def _http_kwargs(self) -> Dict[str, Any]:
+        """Proxy and TLS settings shared by every HTTP call this client makes."""
+        return {
+            "proxy": self._proxies.get("https") or self._proxies.get("http"),
+            "verify": default_verify(),
+        }
+
     def _post(self, **kwargs: Any) -> Any:
         """Send a POST request to the Wiz GraphQL API endpoint."""
         self._logger.debug(f"POST to {self._api_endpoint()}")
         self._logger.debug(f"POST data: {kwargs.get('json', {})}")
         try:
-            ca_bundle = os.environ.get("REQUESTS_CA_BUNDLE")
-            verify = ca_bundle if ca_bundle else True
             response = transport_post(
-                proxy=self._proxies.get("https") or self._proxies.get("http"),
-                verify=verify,
                 timeout=Config.api_timeout(),
+                **self._http_kwargs(),
                 **kwargs,
             )
             self._logger.verbose(f"Response status code: {response.status_code}")
@@ -774,7 +781,9 @@ class WizClient:
         self._logger.verbose("Starting device code authentication")
         auth_url = f"https://auth.{self._domain}/api/token/device"
         try:
-            response = transport_post(url=auth_url, timeout=Config.api_timeout())
+            response = transport_post(
+                url=auth_url, timeout=Config.api_timeout(), **self._http_kwargs()
+            )
             response.raise_for_status()
             device_code_data = response.json()
             uri = device_code_data.get("verification_uri_complete")
@@ -793,6 +802,7 @@ class WizClient:
                     headers=self._headers_auth,
                     data={"device_code": device_code},
                     timeout=Config.api_timeout(),
+                    **self._http_kwargs(),
                 )
                 if token_response.status_code == 200:
                     token_data = token_response.json()
@@ -831,9 +841,12 @@ class WizClient:
             "client_secret": self._profile_state.client_secret,
         }
         try:
-            proxy = self._proxies.get("https") or self._proxies.get("http")
             response = transport_post(
-                auth_url, data=auth_payload, headers=self._headers_auth, proxy=proxy
+                auth_url,
+                data=auth_payload,
+                headers=self._headers_auth,
+                timeout=Config.api_timeout(),
+                **self._http_kwargs(),
             )
             if response.status_code != 200:
                 self._logger.error(

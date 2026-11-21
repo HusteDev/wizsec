@@ -662,7 +662,7 @@ class TestLoadFile:
         result = load_file(str(f))
         assert result == "hello world"
 
-    def test_dispatches_pickle(self, tmp_path):
+    def test_dispatches_pickle(self, tmp_path, pickle_enabled):
         f = tmp_path / "test.pkl"
         data = {"key": [1, 2, 3]}
         with open(f, "wb") as fh:
@@ -755,8 +755,33 @@ class TestLoadText:
 # ── load_data ──────────────────────────────────────────────────────
 
 
+@pytest.fixture()
+def pickle_enabled(mock_config):
+    mock_config._CONFIG["saved_data"] = {"pickle": True}
+    return mock_config
+
+
 class TestLoadData:
-    def test_loads_pickle(self, tmp_path):
+    def test_refuses_when_pickle_disabled(self, tmp_path, mock_config):
+        f = tmp_path / "test.pkl"
+        with open(f, "wb") as fh:
+            pickle.dump({"a": 1}, fh)
+        with pytest.raises(WizFileError, match="saved_data.pickle is disabled"):
+            load_data(str(f))
+
+    def test_default_order_skips_pickle_when_disabled(self, tmp_path, mock_config):
+        (tmp_path / "data.pkl").write_bytes(pickle.dumps({"src": "pkl"}))
+        (tmp_path / "data.json").write_text('{"src": "json"}')
+        result = load_file_if_in_last_x_interval(str(tmp_path / "data"))
+        assert result == {"src": "json"}
+
+    def test_default_order_prefers_pickle_when_enabled(self, tmp_path, pickle_enabled):
+        (tmp_path / "data.pkl").write_bytes(pickle.dumps({"src": "pkl"}))
+        (tmp_path / "data.json").write_text('{"src": "json"}')
+        result = load_file_if_in_last_x_interval(str(tmp_path / "data"))
+        assert result == {"src": "pkl"}
+
+    def test_loads_pickle(self, tmp_path, pickle_enabled):
         f = tmp_path / "test.pkl"
         data = {"nested": {"list": [1, 2, 3]}}
         with open(f, "wb") as fh:
@@ -764,13 +789,13 @@ class TestLoadData:
         result = load_data(str(f))
         assert result == data
 
-    def test_corrupt_pickle_raises(self, tmp_path):
+    def test_corrupt_pickle_raises(self, tmp_path, pickle_enabled):
         f = tmp_path / "bad.pkl"
         f.write_bytes(b"not a pickle")
         with pytest.raises(WizFileError, match="Failed to load data"):
             load_data(str(f))
 
-    def test_missing_file_raises(self, tmp_path):
+    def test_missing_file_raises(self, tmp_path, pickle_enabled):
         with pytest.raises(WizFileError, match="Failed to load data"):
             load_data(str(tmp_path / "nonexistent.pkl"))
 

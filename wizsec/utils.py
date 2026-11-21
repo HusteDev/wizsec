@@ -722,9 +722,18 @@ def load_file_if_in_last_x_interval(
     filepath: str,
     interval_value: Optional[int] = None,
     interval_type: str = "days",
-    extension_order: List[str] = [".pkl", ".json", ".csv"],
+    extension_order: Optional[List[str]] = None,
 ) -> Any:
-    """Load a file only if it was modified within the given interval."""
+    """Load a file only if it was modified within the given interval.
+
+    The default search order is ``.json`` then ``.csv``; ``.pkl`` is tried
+    first only when ``saved_data.pickle`` is enabled, so a stray pickle file
+    cannot shadow the JSON cache when pickle loading is off.
+    """
+    if extension_order is None:
+        extension_order = [".json", ".csv"]
+        if Config.saved_data_pickle_enabled():
+            extension_order.insert(0, ".pkl")
 
     if interval_value:
         if interval_value < 0:
@@ -808,7 +817,16 @@ def load_text(full_path: str) -> str:
 
 
 def load_data(file_path: str) -> Any:
-    """Load a pickled data file from disk."""
+    """Load a pickled data file from disk.
+
+    Unpickling executes arbitrary code, so this refuses unless
+    ``saved_data.pickle`` is enabled in the configuration.
+    """
+    if not Config.saved_data_pickle_enabled():
+        raise WizFileError(
+            f"Refusing to load pickle file {file_path}: "
+            "saved_data.pickle is disabled in the configuration"
+        )
     try:
         with open(file_path, "rb") as pickled_data:
             dataFile = pickle.load(pickled_data)
