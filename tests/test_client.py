@@ -87,6 +87,56 @@ class TestWizClientSingleton:
             WizClient._clients.clear()
 
 
+class TestWizClientCachedArgs:
+    @pytest.fixture()
+    def cached(self, mock_config):
+        with patch("wizsec.client.WizClient._initialize_headers"):
+            from wizsec.client import WizClient
+
+            WizClient._clients.clear()
+            mock_config._CONFIG.setdefault("credentials", {})
+            with patch.object(WizClient, "_try_save_credentials_to_file"):
+                c1 = WizClient(
+                    environment="app",
+                    profile="default",
+                    client_id="id1",
+                    client_secret="s1",
+                    grant_type="client_credentials",
+                )
+                yield WizClient, c1
+            WizClient._clients.clear()
+
+    def test_new_credentials_are_applied(self, cached):
+        WizClient, c1 = cached
+        with patch.object(WizClient, "_try_save_credentials_to_file"):
+            c2 = WizClient(
+                environment="app", profile="default", client_id="id2", client_secret="s2"
+            )
+        assert c2 is c1
+        assert c1._profile_state.client_id == "id2"
+        assert c1._profile_state.client_secret == "s2"
+
+    def test_partial_credentials_raise(self, cached):
+        from wizsec.exceptions import WizCredentialsError
+
+        WizClient, _ = cached
+        with pytest.raises(WizCredentialsError):
+            WizClient(environment="app", profile="default", client_id="only-id")
+
+    def test_different_grant_type_warns(self, cached, caplog):
+        WizClient, c1 = cached
+        with caplog.at_level(logging.WARNING, logger="wizsec"):
+            WizClient(environment="app", profile="default", grant_type="device_code")
+        assert c1._grant_type == "client_credentials"
+        assert "grant_type='device_code' ignored" in caplog.text
+
+    def test_serverless_kwarg_bypasses_cache(self, cached):
+        WizClient, c1 = cached
+        with patch("wizsec.client.WizClient._preload_credentials"):
+            c2 = WizClient(environment="app", profile="default", serverless=True)
+        assert c2 is not c1
+
+
 class TestWizClientProperties:
     def test_environment_set(self, mock_client):
         assert mock_client.environment == "gov"
@@ -915,3 +965,96 @@ class TestAsyncSession:
             provided.aclose.assert_not_awaited()
 
         asyncio.run(_run())
+
+
+class TestConcurrentWorkers:
+    def test_start_worker_count(self, mock_client):
+        env = mock_client._env_state
+        mock_client._start_worker(3)
+        try:
+            alive = [t for t in [env.worker_thread, *env.extra_workers] if t.is_alive()]
+            assert len(alive) == 3
+            # Asking for fewer never shrinks the pool.
+            mock_client._start_worker(1)
+            assert len(env.extra_workers) == 2
+        finally:
+            mock_client.stop_worker()
+        assert env.extra_workers == []
+
+    def test_batch_runs_requests_in_parallel(self, mock_client):
+        from wizsec._request import WizBatchRequest, WizRequest
+
+        def slow_page(self):
+            time.sleep(0.3)
+            self.data = {"ok": True}
+            self._done_event.set()
+
+        with (
+            patch.object(Config, "validate_queries", return_value=False),
+            patch.object(WizRequest, "_execute_page", slow_page),
+        ):
+            batch = WizBatchRequest(mock_client)
+            for _ in range(4):
+                batch.add_request(query="query Q { users { id } }", paginate=False)
+            start = time.monotonic()
+            result = batch.submit(max_concurrent=4)
+            elapsed = time.monotonic() - start
+        mock_client.stop_worker()
+
+        assert result.total_count() == 4
+        # Serial execution would take >= 1.2s.
+        assert elapsed < 0.9
+
+    def test_batch_rejects_zero_concurrency(self, mock_client):
+        from wizsec._request import WizBatchRequest
+
+        with pytest.raises(ValueError):
+            WizBatchRequest(mock_client).submit(max_concurrent=0)
+
+
+class TestProxyAndTls:
+    """Every outbound call carries the configured proxy and CA bundle."""
+
+    PROXY = "http://proxy.internal:3128"
+
+    @pytest.fixture(autouse=True)
+    def _env(self, mock_client, monkeypatch):
+        mock_client._proxies = {"https": self.PROXY}
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/corp/ca.pem")
+
+    def test_http_kwargs(self, mock_client):
+        assert mock_client._http_kwargs() == {
+            "proxy": self.PROXY,
+            "verify": "/corp/ca.pem",
+        }
+
+    def test_client_credentials_auth(self, mock_client):
+        mock_client._profile_state.client_id = "id"
+        mock_client._profile_state.client_secret = "secret"
+        resp = MagicMock(status_code=500, text="nope")
+        with patch("wizsec.client.transport_post", return_value=resp) as tp:
+            with pytest.raises(Exception):
+                mock_client._authenticate_client_credentials()
+        assert tp.call_args.kwargs["proxy"] == self.PROXY
+        assert tp.call_args.kwargs["verify"] == "/corp/ca.pem"
+
+    def test_device_code_auth(self, mock_client):
+        with patch(
+            "wizsec.client.transport_post", side_effect=TransportError("x")
+        ) as tp:
+            with pytest.raises(Exception):
+                mock_client._authenticate_device_code()
+        assert tp.call_args.kwargs["proxy"] == self.PROXY
+        assert tp.call_args.kwargs["verify"] == "/corp/ca.pem"
+
+    def test_async_session(self, mock_client):
+        async def _run():
+            with patch("wizsec.client.create_async_client") as cac:
+                cac.return_value.aclose = MagicMock(side_effect=lambda: asyncio.sleep(0))
+                async with mock_client.async_session():
+                    pass
+            return cac.call_args.kwargs
+
+        kwargs = asyncio.run(_run())
+        assert kwargs["proxy"] == self.PROXY
+        assert kwargs["verify"] == "/corp/ca.pem"

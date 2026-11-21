@@ -1376,11 +1376,16 @@ class WizBatchRequest:
         Submit all requests in the batch with controlled concurrency.
 
         Args:
-            max_concurrent: Maximum number of requests to process concurrently
+            max_concurrent: Maximum number of requests executing at once
+                (queue workers for this environment). The environment's rate
+                limiter still caps requests per second. Ignored in serverless
+                mode, where requests run sequentially.
 
         Returns:
             WizBatchResponse containing all results
         """
+        if max_concurrent < 1:
+            raise ValueError("max_concurrent must be at least 1")
         if not self._requests:
             self._logger.warning("No requests in batch to submit")
             return WizBatchResponse({})
@@ -1429,8 +1434,10 @@ class WizBatchRequest:
                 request._original_done_event = original_done_event  # type: ignore[attr-defined]
             request._done_event = threading.Event()
 
-        # Submit requests to the queue (rate limiting happens in the client)
-        for i, request in enumerate(self._requests):
+        # Run up to max_concurrent queue workers, then enqueue. Rate limiting
+        # happens per page in the client, shared by all workers.
+        self._client._start_worker(max_concurrent)
+        for request in self._requests:
             self._client._enqueue_request(request)
 
         # Wait for all requests to complete
@@ -1440,12 +1447,13 @@ class WizBatchRequest:
 
     def _wait_for_completion(self) -> None:
         """Wait for all batch requests to complete."""
-        timeout = Config.api_timeout() * len(
-            self._requests
-        )  # Scale timeout with batch size
+        # One deadline for the whole batch, scaled with its size. Waiting the
+        # full budget per request made the worst case O(N^2 * timeout).
+        deadline = time.monotonic() + Config.api_timeout() * len(self._requests)
 
         for i, request in enumerate(self._requests):
-            if request._done_event.wait(timeout=timeout):
+            remaining = max(0.0, deadline - time.monotonic())
+            if request._done_event.wait(timeout=remaining):
                 self._results[i] = self._responses[i]  # Store WizResponse
                 with self._lock:
                     self._completed_count += 1
@@ -1753,7 +1761,12 @@ class AsyncWizRequest(_RequestBase):
             )
 
         client = self._client._async_session  # type: ignore[attr-defined]
-        semaphore = getattr(self._client, "_async_semaphore", asyncio.Semaphore(10))
+        # Shared across every request on this client so the cap actually holds;
+        # a per-request fallback would give each request its own semaphore.
+        semaphore = getattr(self._client, "_async_semaphore", None)
+        if semaphore is None:
+            semaphore = asyncio.Semaphore(10)
+            self._client._async_semaphore = semaphore  # type: ignore[attr-defined]
         limiter = self._client._get_limiter(self._limiter_key)
 
         while True:

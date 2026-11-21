@@ -2024,3 +2024,32 @@ class TestAsyncWizResponseStopSurface:
         req._stop_next_cursor = "c2"
         assert resp.stopped_early is True
         assert resp.stop_info["reason"] == "page"
+
+
+class TestReportDownloadTransport:
+    """Report downloads use the client's proxy/TLS settings and a timeout."""
+
+    SETTINGS = {"proxy": "http://proxy:3128", "verify": "/ca.pem"}
+
+    def test_download_report(self, mock_client):
+        mock_client._http_kwargs.return_value = dict(self.SETTINGS)
+        req = _make_req(mock_client)
+        resp = MagicMock(content=b"data")
+        with (
+            patch("wizsec._request.transport_get", return_value=resp) as tg,
+            patch.object(Config, "api_timeout", return_value=42),
+        ):
+            assert req._download_report("https://s3/report") == b"data"
+        assert tg.call_args.kwargs == {**self.SETTINGS, "timeout": 42}
+
+    def test_stream_report(self, mock_client):
+        mock_client._http_kwargs.return_value = dict(self.SETTINGS)
+        req = _make_req(mock_client)
+        cm = MagicMock()
+        cm.__enter__.return_value = MagicMock(status_code=404)
+        with (
+            patch("wizsec._request.stream_get", return_value=cm) as sg,
+            patch.object(Config, "api_timeout", return_value=42),
+        ):
+            list(req._stream_report_generator("https://s3/report", "r"))
+        assert sg.call_args.kwargs == {**self.SETTINGS, "timeout": 42}

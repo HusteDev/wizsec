@@ -61,7 +61,7 @@ class WizClient:
         profile = profile or "default"
         key = (environment, profile)
 
-        if Config.serverless():
+        if Config.serverless() or kwargs.get("serverless"):
             return super().__new__(cls)
 
         with cls._clients_lock:
@@ -83,6 +83,13 @@ class WizClient:
         interactive: bool = False,
     ) -> None:
         if getattr(self, "_initialized", False):
+            self._reconcile_cached_args(
+                client_id=client_id,
+                client_secret=client_secret,
+                grant_type=grant_type,
+                log_lvl=log_lvl,
+                interactive=interactive,
+            )
             return
 
         if log_lvl:
@@ -118,6 +125,59 @@ class WizClient:
         self._initialize_headers()
         self._preload_credentials()
         self._initialized = True
+
+    def _reconcile_cached_args(
+        self,
+        client_id: str,
+        client_secret: str,
+        grant_type: str,
+        log_lvl: Optional[Union[str, int]],
+        interactive: bool,
+    ) -> None:
+        """Apply or flag arguments passed when an existing instance is reused.
+
+        Clients are cached per (environment, profile), so a second
+        ``WizClient(...)`` call returns the first instance. Arguments that can
+        be applied safely are applied; the rest are logged instead of being
+        dropped silently.
+        """
+        if log_lvl:
+            Config.set_log_level(log_lvl)
+
+        if client_id or client_secret:
+            if not (client_id and client_secret):
+                raise WizCredentialsError(
+                    "client_id and client_secret must be passed together"
+                )
+            if (client_id, client_secret) != (self._client_id, self._client_secret):
+                self._logger.info(
+                    "New credentials passed for cached client %s/%s; applying them",
+                    self.environment,
+                    self.profile,
+                )
+                self._client_id = client_id
+                self._client_secret = client_secret
+                self._credential_source = "direct"
+                # A token minted for the old client_id is refreshed by
+                # _check_token on the next request.
+                self._validate_and_store_credentials()
+
+        if grant_type and grant_type != self._grant_type:
+            self._logger.warning(
+                "grant_type=%r ignored: cached client %s/%s already uses %r. "
+                "Use a different profile for a different grant type.",
+                grant_type,
+                self.environment,
+                self.profile,
+                self._grant_type,
+            )
+        if interactive and self.credential_storage != "prompt":
+            self._logger.warning(
+                "interactive=True ignored: cached client %s/%s was created "
+                "without it.",
+                self.environment,
+                self.profile,
+            )
 
     # ========== PROPERTIES ==========
 
@@ -197,17 +257,26 @@ class WizClient:
         self._env_state.queue.put(request)
         self._start_worker()
 
-    def _start_worker(self) -> None:
-        """Start the background worker thread if not already running."""
+    def _start_worker(self, count: int = 1) -> None:
+        """Ensure at least ``count`` background queue workers are running.
+
+        One worker is the default. Concurrent batches raise the count so
+        their requests execute in parallel; the shared per-environment rate
+        limiter still governs how fast requests reach the API.
+        """
         env = self._env_state
         with env.queue_lock:
-            if env.worker_thread and env.worker_thread.is_alive():
-                return
-            env.stop_event.clear()
-            env.worker_thread = threading.Thread(
-                target=self._process_queue, daemon=True
-            )
-            env.worker_thread.start()
+            if not (env.worker_thread and env.worker_thread.is_alive()):
+                env.stop_event.clear()
+                env.worker_thread = threading.Thread(
+                    target=self._process_queue, daemon=True
+                )
+                env.worker_thread.start()
+            env.extra_workers = [t for t in env.extra_workers if t.is_alive()]
+            while 1 + len(env.extra_workers) < count:
+                thread = threading.Thread(target=self._process_queue, daemon=True)
+                thread.start()
+                env.extra_workers.append(thread)
 
     def _process_queue(self) -> None:
         """Drain the request queue, executing each request in sequence."""
@@ -229,8 +298,7 @@ class WizClient:
         """Stop the background queue worker for this environment."""
         env = self._env_state
         env.stop_event.set()
-        if env.worker_thread:
-            env.worker_thread.join(timeout=1)
+        env.join_workers()
         env.worker_thread = None
 
     # ========== REQUEST CREATION ==========
@@ -534,8 +602,9 @@ class WizClient:
             ) -> None:
                 if self._owns_client and self._async_client:
                     await self._async_client.aclose()
-                if hasattr(self._sync_client, "_async_session"):
-                    delattr(self._sync_client, "_async_session")
+                for attr in ("_async_session", "_async_semaphore"):
+                    if hasattr(self._sync_client, attr):
+                        delattr(self._sync_client, attr)
 
         return AsyncEnabledClient(self, client)
 

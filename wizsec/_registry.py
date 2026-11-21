@@ -53,6 +53,9 @@ class EnvironmentState:
         self.environment = environment
         self.queue: queue.Queue[Any] = queue.Queue()
         self.worker_thread: Optional[threading.Thread] = None
+        # Additional queue workers started for concurrent batches. All workers
+        # drain the same queue and share the same rate limiters.
+        self.extra_workers: List[threading.Thread] = []
         self.stop_event: threading.Event = threading.Event()
         self.queue_lock: threading.Lock = threading.Lock()
         self.headers: Dict[str, str] = {"Content-Type": "application/json"}
@@ -64,6 +67,13 @@ class EnvironmentState:
         self._split_entities_lock: threading.Lock = threading.Lock()
         self._rate_backoff_lock: threading.Lock = threading.Lock()
         self._rate_backoff_until: float = 0.0
+
+    def join_workers(self, timeout: float = 1) -> None:
+        """Wait briefly for every queue worker to exit (stop_event must be set)."""
+        for thread in [self.worker_thread, *self.extra_workers]:
+            if thread and thread.is_alive():
+                thread.join(timeout=timeout)
+        self.extra_workers = []
 
     @property
     def limiters(self) -> Dict[str, Limiter]:
@@ -129,8 +139,7 @@ class EnvironmentRegistry:
             state = cls._environments.pop(environment, None)
             if state:
                 state.stop_event.set()
-                if state.worker_thread and state.worker_thread.is_alive():
-                    state.worker_thread.join(timeout=1)
+                state.join_workers()
 
     @classmethod
     def cleanup_all(cls) -> None:
@@ -138,8 +147,7 @@ class EnvironmentRegistry:
         with cls._lock:
             for state in cls._environments.values():
                 state.stop_event.set()
-                if state.worker_thread and state.worker_thread.is_alive():
-                    state.worker_thread.join(timeout=1)
+                state.join_workers()
             cls._environments.clear()
 
 
