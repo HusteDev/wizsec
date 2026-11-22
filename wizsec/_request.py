@@ -576,6 +576,240 @@ class _RequestBase:
         """Return True if the request completed with data and no errors."""
         return self.data is not None and not self.errors
 
+    # ========== SHARED PAGE-EXECUTION LOGIC ==========
+    # The sync and async request classes differ only in how they wait and how
+    # they send the HTTP request. Every decision about a response lives here so
+    # a fix cannot land on one side only.
+
+    def _graphql_rate_limited(self, response: Any) -> bool:
+        """Return True if a 200 response carries a GraphQL-level rate-limit error."""
+        try:
+            body = response.json()
+        except Exception:
+            return False
+        return _is_rate_limit_graphql_error((body or {}).get("errors", []))
+
+    def _rate_limit_wait_seconds(self, response: Any) -> int | None:
+        """Seconds to back off if the response is a rate limit, else None.
+
+        Covers HTTP 429 (honouring Retry-After) and a 200 whose GraphQL errors
+        report rate limiting.
+        """
+        if response.status_code == 429:
+            return _parse_retry_after(response.headers.get("Retry-After"))
+        if response.status_code == 200 and self._graphql_rate_limited(response):
+            return int(Config.rate_limit_default_retry_after())
+        return None
+
+    def _rate_limit_give_up(self, waits_so_far: int, wait_s: int) -> bool:
+        """Return True (recording the failure) once the backoff-wait cap is hit.
+
+        Rate-limit waits never consume API retries; this cap is what stops a
+        saturated tenant from looping forever.
+        """
+        max_waits = Config.rate_limit_max_backoff_waits()
+        if waits_so_far <= max_waits:
+            self._logger.warning(
+                "Rate limited by server — backing off %ds (wait %d/%d)",
+                wait_s,
+                waits_so_far,
+                max_waits,
+            )
+            return False
+        message = f"Rate limited by server; gave up after {max_waits} backoff waits"
+        self.errors.append({"message": message})
+        self.error = WizRateLimitError(message, retry_after=wait_s)
+        self._logger.error(message)
+        return True
+
+    def _absorb_response(self, response: Any) -> dict[str, Any]:
+        """Record a 200 response's errors and merge its page. Returns the page."""
+        self._response = response.json()
+        assert self._response is not None
+        resp_errors = self._response.get("errors", [])
+        if not resp_errors and self.errors:
+            # Earlier attempts failed transiently but this one succeeded —
+            # those errors must not poison success() for the final result.
+            self._logger.debug(
+                "Clearing %d transient retry error(s) after successful attempt",
+                len(self.errors),
+            )
+            self.errors = []
+        self.errors.extend(resp_errors)
+        page_data = self._response.get("data", {})
+        if self._paginate:
+            page_data = self._apply_stop_predicates(page_data)
+        self._merge_page(page_data)
+        return page_data
+
+    def _handle_failed_response(self, response: Any) -> bool:
+        """Record a non-200, non-rate-limit response. Returns True if non-retryable (4xx)."""
+        self.errors.append({"message": response.text})
+        self._logger.warning(
+            "Query failed with status %s: %s", response.status_code, response.text
+        )
+        # 4xx errors are client-side — retrying will never help.
+        return 400 <= response.status_code < 500
+
+    def _handle_network_error(
+        self, e: Exception, attempt: int = 0, max_retries: int = 0
+    ) -> None:
+        """Record a transport error. The final result is logged by _record_final_failure."""
+        self.errors.append({"message": str(e), "trace": traceback.format_exc()})
+        self._logger.warning(
+            "Network error (attempt %d/%d): %s", attempt + 1, max_retries + 1, e
+        )
+
+    def _handle_unexpected_error(self, e: Exception) -> None:
+        """Record an unexpected error raised while executing a page."""
+        self.errors.append({"message": str(e), "trace": traceback.format_exc()})
+        self._logger.error(f"Unexpected error executing query: {e}", exc_info=True)
+
+    def _retry_delay(self, retries: int) -> float:
+        """Linear backoff with jitter: retry_time * attempt * [1, 1.5)."""
+        delay = self._client._query_retry_time * retries * (1 + random.uniform(0, 0.5))
+        self._logger.debug(f"Retrying in {delay:.2f}s (Attempt {retries})")
+        return float(delay)
+
+    def _record_final_failure(self) -> None:
+        """Set the request's error after retries are exhausted or a 4xx."""
+        last_error = self.errors[-1]["message"] if self.errors else "unknown error"
+        if self.error is None:
+            self.error = WizAPIError(
+                f"Query failed after {self._client._max_retries} retries: {last_error}",
+                status_code=self._status_code,
+            )
+        self._logger.error(
+            "Query failed after %d retries: %s", self._client._max_retries, last_error
+        )
+
+    def _trigger_page_event(self, page_data: dict[str, Any]) -> None:
+        """Trigger the page event callback if configured.
+
+        The callback sees the page as merged — truncated when a stop_when
+        predicate cut it short — so a running node tally stays accurate.
+        """
+        if self._page_event:
+            self._logger.debug(f"on_page_event [Page {self._page}]")
+            self._page += 1
+            page_info = {"per_page": self.vars.get("first", 0), "page": self._page}
+            self._page_event(
+                {
+                    "page_data": page_data,
+                    "page_info": page_info,
+                    "errors": self.errors,
+                    "stopped": self._stopped_early,
+                }
+            )
+
+    def _advance_cursor(self, page_data: dict[str, Any] | None) -> bool:
+        """Point vars at the next page. Returns False when pagination is finished."""
+        info = self._page_info(page_data)
+        if info and info.get("hasNextPage") and not self._stopped_early:
+            self.vars["after"] = info.get("endCursor")
+            return True
+        return False
+
+    # ========== SHARED QUERY-SPLITTING LOGIC ==========
+
+    def _split_plan(self) -> tuple[str, str] | None:
+        """Return (source, probe_query) if this request is a split candidate.
+
+        Splitting is permanently disabled in serverless mode — that check is
+        first and unconditional regardless of any config setting.
+        """
+        # Hard guard: splitting relies on asyncio and threading patterns that
+        # are unsafe in serverless (Lambda) environments.
+        if Config.serverless():
+            return None
+        if not Config.query_splitting_enabled():
+            return None
+        # Prevent recursive probing on sub-requests fired by the splitter itself.
+        if getattr(self, "_is_sub_request", False):
+            return None
+        if self._stop_when or self._stop_on_page:
+            self._logger.debug(
+                "query_splitting: disabled — stop predicates are set on this request"
+            )
+            return None
+        if self._current_query_info.get("request_type", "").lower() != "query":
+            return None
+        source = self._current_query_info.get("source", "")
+        if not source:
+            return None
+
+        # Detection: check whether this query supports totalCount
+        if Config.query_splitting_detection_mode() == "schema":
+            if not _schema_supports_totalcount(source, self._client):
+                return None
+        elif not has_totalcount_field(self._current_query_info.get("fields", {})):
+            return None
+
+        # The probe is a totalCount-only version of the original query.
+        probe_query = build_totalcount_probe_query(self._query)
+        if probe_query is None:
+            return None
+        return source, probe_query
+
+    def _split_filter_path(self, probe: "_RequestBase", source: str) -> str | None:
+        """Decide from the probe whether to split. Returns the filter path or None."""
+        if not probe.success():
+            self._logger.debug("query_splitting: probe failed, skipping split")
+            return None
+        total = _extract_totalcount(probe.data, source)
+        threshold = Config.query_splitting_threshold()
+        self._logger.info(
+            "query_splitting: probe totalCount=%d (threshold=%d)", total, threshold
+        )
+        if total <= threshold:
+            return None
+        filter_path = Config.query_splitting_filter_path()
+        if not filter_path:
+            self._logger.warning(
+                "query_splitting: totalCount=%d exceeds threshold but query_splitting.filter_path "
+                "is not configured; running original query without splitting",
+                total,
+            )
+            return None
+        return filter_path
+
+    def _split_entities_ok(self, entities: list[dict[str, Any]]) -> bool:
+        """Log and return False when there is nothing to split across."""
+        if not entities:
+            self._logger.warning(
+                "query_splitting: no entities returned for split_by=%s; running original query",
+                Config.query_splitting_split_by(),
+            )
+            return False
+        self._logger.info(
+            "query_splitting: splitting query across %d entities (max_concurrent=%d)",
+            len(entities),
+            Config.query_splitting_max_concurrent(),
+        )
+        return True
+
+    def _add_split_requests(
+        self,
+        batch: "AsyncWizBatchRequest",
+        entities: list[dict[str, Any]],
+        filter_path: str,
+    ) -> None:
+        """Add one entity-scoped sub-request per entity to the batch."""
+        for entity in entities:
+            entity_id = entity.get("id")
+            if not entity_id:
+                continue
+            scoped_vars = inject_subscription_filter(
+                self.vars, filter_path, [entity_id]
+            )
+            req_id = batch.add_request(
+                query=self._query,
+                vars=scoped_vars,
+                paginate=self._paginate,
+            )
+            # Mark the internal request as a sub-request to skip recursive probing
+            batch._requests[req_id]._is_sub_request = True  # type: ignore[attr-defined]
+
 
 class WizRequest(_RequestBase):
     """Synchronous GraphQL request with pagination, retry, and report support."""
@@ -627,49 +861,12 @@ class WizRequest(_RequestBase):
         """Run a pre-emptive totalCount probe and split across entities if over threshold.
 
         Returns True if splitting took over (self.data is populated); False to proceed normally.
-        Splitting is permanently disabled in serverless mode — that check is first and
-        unconditional regardless of any config setting.
         """
-        # Hard guard: splitting relies on asyncio and threading patterns that are
-        # unsafe in serverless (Lambda) environments.
-        if Config.serverless():
+        plan = self._split_plan()
+        if plan is None:
             return False
+        source, probe_query = plan
 
-        if not Config.query_splitting_enabled():
-            return False
-
-        # Prevent recursive probing on sub-requests fired by the splitter itself.
-        if getattr(self, "_is_sub_request", False):
-            return False
-
-        if self._stop_when or self._stop_on_page:
-            self._logger.debug(
-                "query_splitting: disabled — stop predicates are set on this request"
-            )
-            return False
-
-        if self._current_query_info.get("request_type", "").lower() != "query":
-            return False
-
-        source = self._current_query_info.get("source", "")
-        if not source:
-            return False
-
-        # Detection: check whether this query supports totalCount
-        detection_mode = Config.query_splitting_detection_mode()
-        if detection_mode == "schema":
-            if not _schema_supports_totalcount(source, self._client):
-                return False
-        else:  # static
-            if not has_totalcount_field(self._current_query_info.get("fields", {})):
-                return False
-
-        # Build the probe query (totalCount-only version of the original)
-        probe_query = build_totalcount_probe_query(self._query)
-        if probe_query is None:
-            return False
-
-        # Run the probe
         probe = WizRequest(
             client=self._client,
             query=probe_query,
@@ -681,42 +878,13 @@ class WizRequest(_RequestBase):
         self._client._enqueue_request(probe)
         probe._done_event.wait()
 
-        if not probe.success():
-            self._logger.debug("query_splitting: probe failed, skipping split")
-            return False
-
-        total = _extract_totalcount(probe.data, source)
-        threshold = Config.query_splitting_threshold()
-        self._logger.info(
-            "query_splitting: probe totalCount=%d (threshold=%d)", total, threshold
-        )
-
-        if total <= threshold:
-            return False
-
-        # Over threshold — attempt to split
-        filter_path = Config.query_splitting_filter_path()
-        if not filter_path:
-            self._logger.warning(
-                "query_splitting: totalCount=%d exceeds threshold but query_splitting.filter_path "
-                "is not configured; running original query without splitting",
-                total,
-            )
+        filter_path = self._split_filter_path(probe, source)
+        if filter_path is None:
             return False
 
         entities = _get_cached_or_fetch_entities(self._client)
-        if not entities:
-            self._logger.warning(
-                "query_splitting: no entities returned for split_by=%s; running original query",
-                Config.query_splitting_split_by(),
-            )
+        if not self._split_entities_ok(entities):
             return False
-
-        self._logger.info(
-            "query_splitting: splitting query across %d entities (max_concurrent=%d)",
-            len(entities),
-            Config.query_splitting_max_concurrent(),
-        )
 
         # Fire async sub-queries, one per entity
         results = asyncio.run(self._run_split_async(entities, filter_path))
@@ -733,21 +901,7 @@ class WizRequest(_RequestBase):
                 client=async_client,
                 max_concurrent=Config.query_splitting_max_concurrent(),
             )
-            for entity in entities:
-                entity_id = entity.get("id")
-                if not entity_id:
-                    continue
-                scoped_vars = inject_subscription_filter(
-                    self.vars, filter_path, [entity_id]
-                )
-                req_id = batch.add_request(
-                    query=self._query,
-                    vars=scoped_vars,
-                    paginate=self._paginate,
-                )
-                # Mark the internal request as a sub-request to skip recursive probing
-                batch._requests[req_id]._is_sub_request = True  # type: ignore[attr-defined]
-
+            self._add_split_requests(batch, entities, filter_path)
             batch_response = await batch.submit()
 
         return [resp for _, resp in batch_response]
@@ -764,49 +918,24 @@ class WizRequest(_RequestBase):
         rate_limit_waits = 0
         while retries <= self._client._max_retries:
             try:
-                # Wait for any environment-wide server 429 backoff to clear,
-                # then acquire a local rate-limit slot. pyrate-limiter v4's
-                # try_acquire blocks until a slot is free and returns a bool.
-                # Neither wait consumes API retry attempts.
-                while True:
-                    remaining = self._client._env_state.rate_backoff_remaining()
-                    if remaining > 0:
-                        time.sleep(remaining)
-                        continue
-                    if not limiter.try_acquire(self._limiter_key):
-                        time.sleep(_LIMITER_SPIN_SECONDS)
-                        continue
-                    # A server backoff may have started while we were waiting
-                    # on the local limiter — never fire into that window.
-                    if self._client._env_state.rate_backoff_remaining() > 0:
-                        continue
-                    break
+                self._acquire_slot(limiter)
                 response = self._client._post(url=url, headers=headers, json=payload)
                 self._status_code = response.status_code
 
-                if response.status_code == 200:
-                    if self._graphql_rate_limited(response):
-                        wait_s = Config.rate_limit_default_retry_after()
-                        self._client._env_state.set_rate_backoff(wait_s)
-                        rate_limit_waits += 1
-                        if not self._wait_for_rate_limit(rate_limit_waits, wait_s):
-                            return
-                        continue
-                    if self._process_successful_response(response, url, headers):
-                        return
-                elif response.status_code == 429:
-                    wait_s = _parse_retry_after(response.headers.get("Retry-After"))
+                wait_s = self._rate_limit_wait_seconds(response)
+                if wait_s is not None:
                     self._client._env_state.set_rate_backoff(wait_s)
                     rate_limit_waits += 1
                     if not self._wait_for_rate_limit(rate_limit_waits, wait_s):
                         return
                     continue
-                else:
-                    non_retryable = self._handle_failed_response(response)
-                    self._logger.debug(f"Payload: {payload}")
-                    if non_retryable:
-                        self._handle_final_failure()
+                if response.status_code == 200:
+                    if self._process_successful_response(response, url, headers):
                         return
+                elif self._handle_failed_response(response):
+                    self._logger.debug(f"Payload: {payload}")
+                    self._handle_final_failure()
+                    return
 
             except TransportError as e:
                 self._handle_network_error(
@@ -820,26 +949,31 @@ class WizRequest(_RequestBase):
 
         self._handle_final_failure()
 
+    def _acquire_slot(self, limiter: Any) -> None:
+        """Block until the shared server backoff clears and a local rate slot is free.
+
+        pyrate-limiter v4's try_acquire blocks until a slot is free and returns
+        a bool. Neither wait consumes API retry attempts.
+        """
+        while True:
+            remaining = self._client._env_state.rate_backoff_remaining()
+            if remaining > 0:
+                time.sleep(remaining)
+                continue
+            if not limiter.try_acquire(self._limiter_key):
+                time.sleep(_LIMITER_SPIN_SECONDS)
+                continue
+            # A server backoff may have started while we were waiting on the
+            # local limiter — never fire into that window.
+            if self._client._env_state.rate_backoff_remaining() > 0:
+                continue
+            return
+
     def _process_successful_response(
         self, response: Any, url: str, headers: dict[str, str]
     ) -> bool:
         """Process a successful HTTP response. Returns True if processing is complete."""
-        self._response = response.json()
-        assert self._response is not None
-        resp_errors = self._response.get("errors", [])
-        if not resp_errors and self.errors:
-            # Earlier attempts failed transiently but this one succeeded —
-            # those errors must not poison success() for the final result.
-            self._logger.debug(
-                "Clearing %d transient retry error(s) after successful attempt",
-                len(self.errors),
-            )
-            self.errors = []
-        self.errors.extend(resp_errors)
-        page_data = self._response.get("data", {})
-        if self._paginate:
-            page_data = self._apply_stop_predicates(page_data)
-        self._merge_page(page_data)
+        page_data = self._absorb_response(response)
 
         if self.errors:
             self._set_done_event()
@@ -866,30 +1000,19 @@ class WizRequest(_RequestBase):
         if self._paginate and not self.errors:
             if page_data is None:
                 page_data = self._response.get("data", {})
-            info = self._page_info(page_data)
-            while (
-                info
-                and info.get("hasNextPage")
-                and not self.errors
-                and not self._stopped_early
-            ):
-                self.vars["after"] = info.get("endCursor")
+            while not self.errors and self._advance_cursor(page_data):
                 # Execute next page immediately
                 response = self._client._post(
                     url=url,
                     headers=headers,
                     json={"query": self.query, "variables": self.vars},
                 )
-                if response.status_code == 200:
-                    next_response = response.json()
-                    self.errors.extend(next_response.get("errors", []))
-                    next_page_data = self._apply_stop_predicates(
-                        next_response.get("data", {})
-                    )
-                    self._merge_page(next_page_data)
-                    info = self._page_info(next_page_data)
-                else:
+                if response.status_code != 200:
                     break
+                next_response = response.json()
+                self.errors.extend(next_response.get("errors", []))
+                page_data = self._apply_stop_predicates(next_response.get("data", {}))
+                self._merge_page(page_data)
 
             self._finalize_aggregate()
         else:
@@ -902,111 +1025,37 @@ class WizRequest(_RequestBase):
             self.data = page_data
             self._set_done_event()
             return True
+        self._trigger_page_event(page_data)
+        if self._advance_cursor(page_data):
+            self._client._enqueue_request(self)
         else:
-            self._trigger_page_event(page_data)
-            info = self._page_info(page_data)
-            if info and info.get("hasNextPage") and not self._stopped_early:
-                self.vars["after"] = info.get("endCursor")
-                self._client._enqueue_request(self)
-            else:
-                self._finalize_pagination()
-            return True
-
-    def _trigger_page_event(self, page_data: dict[str, Any]) -> None:
-        """Trigger the page event callback if configured.
-
-        The callback sees the page as merged — truncated when a stop_when
-        predicate cut it short — so a running node tally stays accurate.
-        """
-        if self._page_event:
-            self._logger.debug(f"on_page_event [Page {self._page}]")
-            self._page += 1
-            page_info = {"per_page": self.vars.get("first", 0), "page": self._page}
-            self._page_event(
-                {
-                    "page_data": page_data,
-                    "page_info": page_info,
-                    "errors": self.errors,
-                    "stopped": self._stopped_early,
-                }
-            )
+            self._finalize_pagination()
+        return True
 
     def _finalize_pagination(self) -> None:
         """Finalize pagination by setting final data and marking as done."""
         self._finalize_aggregate()
         self._set_done_event()
 
-    def _graphql_rate_limited(self, response: Any) -> bool:
-        """Return True if a 200 response carries a GraphQL-level rate-limit error."""
-        try:
-            body = response.json()
-        except Exception:
-            return False
-        return _is_rate_limit_graphql_error((body or {}).get("errors", []))
-
     def _wait_for_rate_limit(self, waits_so_far: int, wait_s: int) -> bool:
         """Sleep out a server rate-limit window without consuming retries.
 
         Returns False (and finalizes the request as failed) once the cap on
-        consecutive waits is exceeded, so a saturated tenant can't loop forever.
+        consecutive waits is exceeded.
         """
-        max_waits = Config.rate_limit_max_backoff_waits()
-        if waits_so_far > max_waits:
-            message = f"Rate limited by server; gave up after {max_waits} backoff waits"
-            self.errors.append({"message": message})
-            self.error = WizRateLimitError(message, retry_after=wait_s)
-            self._handle_final_failure()
+        if self._rate_limit_give_up(waits_so_far, wait_s):
+            self._set_done_event()
             return False
-        self._logger.warning(
-            "Rate limited by server — backing off %ds (wait %d/%d)",
-            wait_s,
-            waits_so_far,
-            max_waits,
-        )
         time.sleep(wait_s)
         return True
 
-    def _handle_failed_response(self, response: Any) -> bool:
-        """Handle failed HTTP response. Returns True for non-retryable errors (4xx)."""
-        error_msg = f"Query failed with status {response.status_code}: {response.text}"
-        self.errors.append({"message": response.text})
-        self._logger.warning(error_msg)
-        # 4xx errors are client-side — retrying will never help.
-        # 429 never reaches here; it is handled as a backoff in _execute_page.
-        return 400 <= response.status_code < 500
-
-    def _handle_network_error(
-        self, e: TransportError, attempt: int = 0, max_retries: int = 0
-    ) -> None:
-        """Handle network-related errors. Logs a clean warning per attempt; final result logged by _handle_final_failure."""
-        self.errors.append({"message": str(e), "trace": traceback.format_exc()})
-        self._logger.warning(
-            "Network error (attempt %d/%d): %s", attempt + 1, max_retries + 1, e
-        )
-
-    def _handle_unexpected_error(self, e: Exception) -> None:
-        """Handle unexpected errors."""
-        error_msg = f"Unexpected error executing query: {e}"
-        self.errors.append({"message": str(e), "trace": traceback.format_exc()})
-        self._logger.error(error_msg, exc_info=True)
-
     def _wait_before_retry(self, retries: int) -> None:
-        """Wait before retrying with jitter."""
-        sleep_time = self._client._query_retry_time * (1 + random.uniform(0, 0.5))
-        self._logger.debug(f"Retrying in {sleep_time:.2f}s (Attempt {retries})")
-        time.sleep(sleep_time)
+        """Wait before retrying (linear backoff with jitter)."""
+        time.sleep(self._retry_delay(retries))
 
     def _handle_final_failure(self) -> None:
         """Handle final failure after all retries exhausted."""
-        last_error = self.errors[-1]["message"] if self.errors else "unknown error"
-        if self.error is None:
-            self.error = WizAPIError(
-                f"Query failed after {self._client._max_retries} retries: {last_error}",
-                status_code=self._status_code,
-            )
-        self._logger.error(
-            "Query failed after %d retries: %s", self._client._max_retries, last_error
-        )
+        self._record_final_failure()
         self._set_done_event()
 
     def _set_done_event(self) -> None:
@@ -1669,45 +1718,11 @@ class AsyncWizRequest(_RequestBase):
         return self
 
     async def _maybe_split_async(self) -> bool:
-        """Async counterpart of WizRequest._maybe_split().
-
-        Identical logic but uses await throughout — no asyncio.run() needed
-        since we are already in an async context.
-        Splitting is permanently disabled in serverless mode.
-        """
-        if Config.serverless():
+        """Async counterpart of WizRequest._maybe_split(); shares its decisions."""
+        plan = self._split_plan()
+        if plan is None:
             return False
-
-        if not Config.query_splitting_enabled():
-            return False
-
-        if getattr(self, "_is_sub_request", False):
-            return False
-
-        if self._stop_when or self._stop_on_page:
-            self._logger.debug(
-                "query_splitting: disabled — stop predicates are set on this request"
-            )
-            return False
-
-        if self._current_query_info.get("request_type", "").lower() != "query":
-            return False
-
-        source = self._current_query_info.get("source", "")
-        if not source:
-            return False
-
-        detection_mode = Config.query_splitting_detection_mode()
-        if detection_mode == "schema":
-            if not _schema_supports_totalcount(source, self._client):
-                return False
-        else:
-            if not has_totalcount_field(self._current_query_info.get("fields", {})):
-                return False
-
-        probe_query = build_totalcount_probe_query(self._query)
-        if probe_query is None:
-            return False
+        source, probe_query = plan
 
         probe = AsyncWizRequest(
             client=self._client,
@@ -1718,72 +1733,28 @@ class AsyncWizRequest(_RequestBase):
         probe._is_sub_request = True  # type: ignore[attr-defined]
         await probe.submit()
 
-        if not probe.success():
-            self._logger.debug("query_splitting: async probe failed, skipping split")
+        filter_path = self._split_filter_path(probe, source)
+        if filter_path is None:
             return False
 
-        total = _extract_totalcount(probe.data, source)
-        threshold = Config.query_splitting_threshold()
-        self._logger.info(
-            "query_splitting: async probe totalCount=%d (threshold=%d)",
-            total,
-            threshold,
-        )
-
-        if total <= threshold:
+        # Run the blocking sync entity fetch in a thread to avoid stalling the
+        # event loop while it waits on the sync queue.
+        entities = await asyncio.to_thread(_get_cached_or_fetch_entities, self._client)
+        if not self._split_entities_ok(entities):
             return False
-
-        filter_path = Config.query_splitting_filter_path()
-        if not filter_path:
-            self._logger.warning(
-                "query_splitting: totalCount=%d exceeds threshold but query_splitting.filter_path "
-                "is not configured; running original query without splitting",
-                total,
-            )
-            return False
-
-        # Run the blocking sync entity fetch in a thread executor to avoid
-        # stalling the event loop while waiting on _done_event.wait().
-        loop = asyncio.get_event_loop()
-        entities = await loop.run_in_executor(
-            None, _get_cached_or_fetch_entities, self._client
-        )
-        if not entities:
-            self._logger.warning(
-                "query_splitting: no entities for split_by=%s; running original query",
-                Config.query_splitting_split_by(),
-            )
-            return False
-
-        self._logger.info(
-            "query_splitting: async splitting across %d entities", len(entities)
-        )
 
         batch = AsyncWizBatchRequest(
             client=self._client,
             max_concurrent=Config.query_splitting_max_concurrent(),
         )
-        for entity in entities:
-            entity_id = entity.get("id")
-            if not entity_id:
-                continue
-            scoped_vars = inject_subscription_filter(
-                self.vars, filter_path, [entity_id]
-            )
-            req_id = batch.add_request(
-                query=self._query,
-                vars=scoped_vars,
-                paginate=self._paginate,
-            )
-            batch._requests[req_id]._is_sub_request = True  # type: ignore[attr-defined]
-
+        self._add_split_requests(batch, entities, filter_path)
         batch_response = await batch.submit()
         responses = [resp for _, resp in batch_response]
         self.data = _merge_split_results(responses, source, self._logger)
         return True
 
     async def _execute_page(self) -> None:
-        """Async version of page execution — iterative pagination (no recursion)."""
+        """Async page execution — iterative pagination (no recursion)."""
         if not hasattr(self._client, "_async_session"):
             raise RuntimeError(
                 "Async session not initialized. Use client.async_session() context manager."
@@ -1798,7 +1769,13 @@ class AsyncWizRequest(_RequestBase):
             self._client._async_semaphore = semaphore  # type: ignore[attr-defined]
         limiter = self._client._get_limiter(self._limiter_key)
 
+        first_page = True
         while True:
+            if not first_page:
+                # Long paginations can outlive the token; submit() checked it
+                # for the first page. Refresh is blocking I/O, so use a thread.
+                await asyncio.to_thread(self._client._check_token)
+            first_page = False
             url = self._client._api_endpoint()
             headers = self._client._get_headers()
             payload = {"query": self.query, "variables": self.vars}
@@ -1808,150 +1785,75 @@ class AsyncWizRequest(_RequestBase):
 
             while retries <= self._client._max_retries:
                 try:
-                    # Wait for any environment-wide server 429 backoff to
-                    # clear, then acquire a local rate-limit slot. The
-                    # non-blocking acquire keeps the event loop free (no
-                    # thread-pool workers parked inside the limiter) and
-                    # re-checks the shared backoff window on every spin.
-                    # Neither wait consumes API retry attempts.
-                    while True:
-                        remaining = self._client._env_state.rate_backoff_remaining()
-                        if remaining > 0:
-                            await asyncio.sleep(remaining)
-                            continue
-                        if not limiter.try_acquire(self._limiter_key, blocking=False):
-                            await asyncio.sleep(_LIMITER_SPIN_SECONDS)
-                            continue
-                        if self._client._env_state.rate_backoff_remaining() > 0:
-                            continue
-                        break
-
+                    await self._acquire_slot(limiter)
                     async with semaphore:
                         response = await client.post(
                             url=url, json=payload, headers=headers
                         )
-                        self._status_code = response.status_code
-                        if response.status_code == 200:
-                            response_data = response.json()
-                            resp_errors = response_data.get("errors", [])
-                            if resp_errors and _is_rate_limit_graphql_error(
-                                resp_errors
-                            ):
-                                wait_s = Config.rate_limit_default_retry_after()
-                                self._client._env_state.set_rate_backoff(wait_s)
-                                rate_limit_waits += 1
-                                if not await self._async_wait_for_rate_limit(
-                                    rate_limit_waits, wait_s
-                                ):
-                                    return
-                                continue
-                            if not resp_errors and self.errors:
-                                # Transient retry errors from earlier
-                                # attempts; this attempt succeeded.
-                                self.errors = []
-                            self.errors.extend(resp_errors)
-                            page_data = response_data.get("data", {})
-                            if self._paginate:
-                                page_data = self._apply_stop_predicates(page_data)
-                            self._merge_page(page_data)
-                            break
-                        elif response.status_code == 429:
-                            retry_after = _parse_retry_after(
-                                response.headers.get("Retry-After")
-                            )
-                            self._client._env_state.set_rate_backoff(retry_after)
-                            rate_limit_waits += 1
-                            if not await self._async_wait_for_rate_limit(
-                                rate_limit_waits, retry_after
-                            ):
-                                return
-                            continue
-                        else:
-                            error_msg = (
-                                f"Query failed with status {response.status_code}"
-                            )
-                            self.errors.append({"message": response.text})
-                            self._logger.warning(error_msg)
+                    self._status_code = response.status_code
 
-                except asyncio.TimeoutError:
-                    self._logger.error("Request timed out")
-                    self.errors.append({"message": "Request timed out"})
+                    wait_s = self._rate_limit_wait_seconds(response)
+                    if wait_s is not None:
+                        self._client._env_state.set_rate_backoff(wait_s)
+                        rate_limit_waits += 1
+                        if self._rate_limit_give_up(rate_limit_waits, wait_s):
+                            return
+                        await asyncio.sleep(wait_s)
+                        continue
+                    if response.status_code == 200:
+                        page_data = self._absorb_response(response)
+                        break
+                    if self._handle_failed_response(response):
+                        self._record_final_failure()
+                        return
+
+                except asyncio.TimeoutError as e:
+                    self._handle_network_error(
+                        e, attempt=retries, max_retries=self._client._max_retries
+                    )
+                    self.errors[-1]["message"] = "Request timed out"
                 except Exception as e:
-                    error_msg = f"Async request error: {e}"
-                    self.errors.append({"message": str(e)})
-                    self._logger.error(error_msg)
+                    self._handle_unexpected_error(e)
 
                 retries += 1
                 if retries <= self._client._max_retries:
-                    await asyncio.sleep(self._client._query_retry_time * retries)
+                    await asyncio.sleep(self._retry_delay(retries))
             else:
                 # All retries exhausted for this page
-                if self.error is None:
-                    last = (
-                        self.errors[-1]["message"] if self.errors else "unknown error"
-                    )
-                    self.error = WizAPIError(
-                        f"Query failed after {self._client._max_retries} "
-                        f"retries: {last}",
-                        status_code=self._status_code,
-                    )
+                self._record_final_failure()
                 return
 
             # If errors occurred, stop paginating
             if self.errors:
                 return
 
-            # Handle pagination decision
             if not self._paginate:
                 self.data = page_data
                 return
 
-            if self._page_event:
-                self._page_event(
-                    {
-                        "page_data": page_data,
-                        "page_info": {
-                            "per_page": self.vars.get("first", 0),
-                            "page": self._page,
-                        },
-                        "errors": self.errors,
-                        "stopped": self._stopped_early,
-                    }
-                )
-
-            page_info = self._page_info(page_data)
-            if page_info and page_info.get("hasNextPage") and not self._stopped_early:
-                self.vars["after"] = page_info.get("endCursor")
-                self._page += 1
-            else:
+            self._trigger_page_event(page_data)
+            if not self._advance_cursor(page_data):
                 self._finalize_aggregate()
                 return
 
-    async def _async_wait_for_rate_limit(self, waits_so_far: int, wait_s: int) -> bool:
-        """Async counterpart of WizRequest._wait_for_rate_limit.
+    async def _acquire_slot(self, limiter: Any) -> None:
+        """Wait for the shared server backoff and a local rate slot without blocking the loop.
 
-        Sleeps out a server rate-limit window without consuming retries;
-        returns False (recording an error) once the cap on consecutive waits
-        is exceeded.
+        The non-blocking acquire keeps the event loop free (no thread-pool
+        workers parked inside the limiter) and re-checks the shared backoff
+        window on every spin. Neither wait consumes API retry attempts.
         """
-        max_waits = Config.rate_limit_max_backoff_waits()
-        if waits_so_far > max_waits:
-            message = f"Rate limited by server; gave up after {max_waits} backoff waits"
-            self.errors.append({"message": message})
-            self.error = WizRateLimitError(message, retry_after=wait_s)
-            self._logger.error(
-                "Rate limited by server; gave up after %d backoff waits",
-                max_waits,
-            )
-            return False
-        self._logger.warning(
-            "Rate limited by server — backing off %ds (wait %d/%d)",
-            wait_s,
-            waits_so_far,
-            max_waits,
-        )
-        await asyncio.sleep(wait_s)
-        return True
+        while True:
+            remaining = self._client._env_state.rate_backoff_remaining()
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+                continue
+            if not limiter.try_acquire(self._limiter_key, blocking=False):
+                await asyncio.sleep(_LIMITER_SPIN_SECONDS)
+                continue
+            if self._client._env_state.rate_backoff_remaining() > 0:
+                continue
+            return
 
 
 class AsyncWizResponse:
