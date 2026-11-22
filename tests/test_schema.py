@@ -4,11 +4,10 @@ import json
 import os
 import threading
 import time
-from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
-from graphql import build_client_schema, introspection_from_schema, build_schema
+from graphql import introspection_from_schema, build_schema
 
 from wizsec._schema import SCHEMA_STALE_DAYS, SchemaValidator, INTROSPECTION_QUERY
 from wizsec.config import Config
@@ -404,7 +403,7 @@ class TestRefresh:
         client = self._client(body={"data": {"__schema": {"bogus": True}}})
 
         with patch.object(Config, "wiz_dir", return_value=tmp_path):
-            with pytest.raises(Exception):
+            with pytest.raises(Exception):  # noqa: B017 - any failure is fine here
                 SchemaValidator.refresh("refresh-env", client)
 
         assert not (tmp_path / "schema_refresh-env.json").exists()

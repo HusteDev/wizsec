@@ -1,7 +1,5 @@
 """Tests for _RequestBase shared logic."""
 
-import pytest
-
 
 class TestMergePage:
     """Test the _merge_page logic used by both sync and async requests."""

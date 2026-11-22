@@ -23,6 +23,7 @@ import os
 import logging
 import configparser
 import mimetypes
+import warnings
 from graphql import parse
 from graphql.language import print_ast
 from graphql.language.ast import (
@@ -38,16 +39,16 @@ from datetime import datetime, timedelta, timezone
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from functools import wraps
-from typing import Callable, Optional, Dict, Any, List, Union, Tuple, TypeVar
+from typing import Any, TypeVar
+from collections.abc import Callable
 from .config import Config, parse_filepath, DEFAULT_TEMP_FOLDER
 from ._logging import logging_init
+from .exceptions import WizFileError
 
 import pickle
 
 mimetypes.add_type("application/python-pickle", ".pkl")
 mimetypes.add_type("application/python-pickle", ".pickle")
-
-from .exceptions import WizFileError, WizConfigurationError
 
 
 def disable_in_serverless(func: Callable[..., Any]) -> Callable[..., Any]:
@@ -74,7 +75,7 @@ def safe_write_json(
     data: Any,
     filename: str,
     save_path: Path,
-    temp_path: Union[str, Path] = DEFAULT_TEMP_FOLDER,
+    temp_path: str | Path = DEFAULT_TEMP_FOLDER,
 ) -> None:
     """Write data as JSON atomically via a temp file, then move into place."""
     logger = Config.get_logger()
@@ -93,7 +94,7 @@ def safe_write_json(
         with open(temp_file, "w+") as file:
             json.dump(data, file, indent=2, default=serialize_object)
         shutil.move(temp_file, save_path / filename)
-    except Exception as e:
+    except Exception:
         _, exc_value, exc_traceback = sys.exc_info()
         tb = traceback.extract_tb(exc_traceback)
         last_call = tb[-1]
@@ -108,8 +109,8 @@ def safe_write_json(
 @disable_in_serverless
 def dump_to_json(
     data: Any,
-    filename: Optional[str] = None,
-    filepath: Optional[str] = None,
+    filename: str | None = None,
+    filepath: str | None = None,
     retry: bool = True,
 ) -> None:
     """Serialize data to a JSON (or pickle) file if saved_data is enabled."""
@@ -173,7 +174,7 @@ def dump_to_json(
                             if all([isinstance(row, list) for row in data]) and (
                                 len(data[0]) < len(set(data[0]))
                             ):
-                                header_count: Dict[Any, int] = {}
+                                header_count: dict[Any, int] = {}
                                 unique_headers = [
                                     (
                                         header
@@ -212,17 +213,21 @@ def dump_to_json(
                     logger.error(
                         f"Permission denied writing to {file_name}: {pe}", exc_info=True
                     )
-                    raise WizFileError(f"Permission denied writing to {file_name}", pe)
+                    raise WizFileError(
+                        f"Permission denied writing to {file_name}", pe
+                    ) from pe
 
-                except (IOError, OSError) as e:
+                except OSError as e:
                     logger.error(f"I/O error writing {file_name}: {e}", exc_info=True)
-                    raise WizFileError(f"Failed to write {file_name}", e)
+                    raise WizFileError(f"Failed to write {file_name}", e) from e
 
                 except Exception as e:
                     logger.error(
                         f"Unexpected error writing {file_name}: {e}", exc_info=True
                     )
-                    raise WizFileError(f"Unexpected error writing {file_name}", e)
+                    raise WizFileError(
+                        f"Unexpected error writing {file_name}", e
+                    ) from e
 
             duration = return_formatted_duration(time.perf_counter() - start)
             logger.debug(f"{file_name} export completed (Duration: {duration})")
@@ -232,7 +237,7 @@ def dump_to_json(
         logger.debug("No Data to save")
 
 
-def store_data(data: Any, file_path: Union[str, Path, None] = None) -> Any:
+def store_data(data: Any, file_path: str | Path | None = None) -> Any:
     """Pickle data to disk and return it."""
     import pickle
     import mimetypes
@@ -251,7 +256,7 @@ def store_data(data: Any, file_path: Union[str, Path, None] = None) -> Any:
 
 def return_formatted_duration(duration: float) -> str:
     """Convert a duration in seconds to a human-readable string (e.g. '2 hours, 3 minutes')."""
-    formatted_duration: Dict[str, Union[str, int]] = {
+    formatted_duration: dict[str, str | int] = {
         "hour": "",
         "minute": "",
         "second": "",
@@ -283,9 +288,9 @@ def return_formatted_duration(duration: float) -> str:
     return ", ".join(formatted_parts)
 
 
-def extract_fields(selection_set: Any) -> Dict[str, Any]:
+def extract_fields(selection_set: Any) -> dict[str, Any]:
     """Recursively extract fields from a GraphQL selection set."""
-    fields: Dict[str, Any] = {}
+    fields: dict[str, Any] = {}
     for selection in selection_set.selections:
         if selection.kind == "field":
             name = selection.name.value
@@ -304,12 +309,12 @@ def extract_fields(selection_set: Any) -> Dict[str, Any]:
     return fields
 
 
-def parse_query_metadata(query: str) -> Dict[str, Any]:
+def parse_query_metadata(query: str) -> dict[str, Any]:
     """Parse a GraphQL query string and return its type, name, fields, and source."""
     document = parse(query)
     request_type = ""
     request_name = ""
-    fields: Dict[str, Any] = {}
+    fields: dict[str, Any] = {}
 
     for definition in document.definitions:
         if definition.kind == "operation_definition":
@@ -390,7 +395,7 @@ def ensure_pagination_variables(query: str) -> str:
             return query
 
         # Find the paginated field (has both 'nodes' and 'pageInfo' subfields)
-        paginated_field: Optional[FieldNode] = None
+        paginated_field: FieldNode | None = None
         for selection in definition.selection_set.selections:
             if not isinstance(selection, FieldNode) or not selection.selection_set:
                 continue
@@ -438,7 +443,7 @@ def ensure_pagination_variables(query: str) -> str:
     return query
 
 
-def has_totalcount_field(query_fields: Dict[str, Any]) -> bool:
+def has_totalcount_field(query_fields: dict[str, Any]) -> bool:
     """Return True if the root connection field in parsed query metadata includes totalCount.
 
     Expects the 'fields' dict from parse_query_metadata() — a single top-level key
@@ -452,7 +457,7 @@ def has_totalcount_field(query_fields: Dict[str, Any]) -> bool:
     return "totalCount" in root_children
 
 
-def build_totalcount_probe_query(query: str) -> Optional[str]:
+def build_totalcount_probe_query(query: str) -> str | None:
     """AST-transform a query to select only { totalCount } on the root connection field.
 
     Preserves all variable definitions and field arguments (filterBy, first, etc.) so
@@ -474,7 +479,7 @@ def build_totalcount_probe_query(query: str) -> Optional[str]:
             return None  # mutations and subscriptions are never split
 
         # Find the root connection field — must have a totalCount child
-        connection_field: Optional[FieldNode] = None
+        connection_field: FieldNode | None = None
         for selection in definition.selection_set.selections:
             if not isinstance(selection, FieldNode) or not selection.selection_set:
                 continue
@@ -525,8 +530,8 @@ def build_totalcount_probe_query(query: str) -> Optional[str]:
 
 
 def inject_subscription_filter(
-    vars: Dict[str, Any], filter_path: str, ids: List[str]
-) -> Dict[str, Any]:
+    vars: dict[str, Any], filter_path: str, ids: list[str]
+) -> dict[str, Any]:
     """Return a deep copy of vars with filter_path set to ids.
 
     filter_path uses dot-notation, e.g. 'filterBy.subscriptionId'.
@@ -551,7 +556,7 @@ def inject_subscription_filter(
 @disable_in_serverless
 def load_credentials_from_file(
     profile: str, credentials_file: str
-) -> Dict[str, Optional[str]]:
+) -> dict[str, str | None]:
     """Load client_id, client_secret, and environment from an INI credentials file."""
     logger = Config.get_logger()
     config = configparser.ConfigParser()
@@ -580,7 +585,7 @@ def write_credentials_to_file(
     client_id: str,
     client_secret: str,
     credentials_file: str,
-    environment: Optional[str] = None,
+    environment: str | None = None,
 ) -> None:
     """Write credentials for a profile to an INI credentials file."""
     config = configparser.ConfigParser()
@@ -599,11 +604,13 @@ def write_credentials_to_file(
         Config.get_logger().debug(
             f"Credentials for profile {profile} written to {credentials_file}"
         )
-    except (IOError, OSError) as e:
+    except OSError as e:
         Config.get_logger().error(
             f"Failed to write credentials to {credentials_file}: {e}", exc_info=True
         )
-        raise WizFileError(f"Failed to write credentials to {credentials_file}", e)
+        raise WizFileError(
+            f"Failed to write credentials to {credentials_file}", e
+        ) from e
     except Exception as e:
         Config.get_logger().error(
             f"Unexpected error writing credentials to {credentials_file}: {e}",
@@ -611,11 +618,11 @@ def write_credentials_to_file(
         )
         raise WizFileError(
             f"Unexpected error writing credentials to {credentials_file}", e
-        )
+        ) from e
 
 
 def is_in_last_x_intervals(
-    timestamp_str: Union[str, datetime],
+    timestamp_str: str | datetime,
     interval_value: int = 1,
     interval_type: str = "days",
 ) -> bool:
@@ -647,7 +654,7 @@ def is_in_last_x_intervals(
     return given_time >= (current_time - time_difference)
 
 
-def determine_time_format(date_str: str) -> Optional[str]:
+def determine_time_format(date_str: str) -> str | None:
     """Return the matching strptime format string for the given date, or None."""
     possible_formats = [
         # ISO 8601 with microseconds
@@ -701,7 +708,7 @@ def determine_time_format(date_str: str) -> Optional[str]:
     return None
 
 
-def find_file_with_extension(filepath: str, extension_order: List[str]) -> str:
+def find_file_with_extension(filepath: str, extension_order: list[str]) -> str:
     """Finds the first existing file with the specified extensions."""
     path_dir, file_name = os.path.split(filepath)
     filename, extension = os.path.splitext(file_name)
@@ -720,11 +727,20 @@ def find_file_with_extension(filepath: str, extension_order: List[str]) -> str:
 
 def load_file_if_in_last_x_interval(
     filepath: str,
-    interval_value: Optional[int] = None,
+    interval_value: int | None = None,
     interval_type: str = "days",
-    extension_order: List[str] = [".pkl", ".json", ".csv"],
+    extension_order: list[str] | None = None,
 ) -> Any:
-    """Load a file only if it was modified within the given interval."""
+    """Load a file only if it was modified within the given interval.
+
+    The default search order is ``.json`` then ``.csv``; ``.pkl`` is tried
+    first only when ``saved_data.pickle`` is enabled, so a stray pickle file
+    cannot shadow the JSON cache when pickle loading is off.
+    """
+    if extension_order is None:
+        extension_order = [".json", ".csv"]
+        if Config.saved_data_pickle_enabled():
+            extension_order.insert(0, ".pkl")
 
     if interval_value:
         if interval_value < 0:
@@ -769,7 +785,7 @@ def load_file(full_path: str) -> Any:
 
 def load_json(full_path: str) -> Any:
     """Load and normalize a JSON file."""
-    with open(full_path, "r") as f:
+    with open(full_path) as f:
         file_data = json.load(f)
 
         if (
@@ -788,9 +804,9 @@ def load_json(full_path: str) -> Any:
         return file_data
 
 
-def load_csv(full_path: str) -> List[Dict[str, str]]:
+def load_csv(full_path: str) -> list[dict[str, str]]:
     """Load a CSV file into a list of dictionaries."""
-    with open(full_path, "r") as f:
+    with open(full_path) as f:
         reader = csv.DictReader(f)
         return list(reader)
 
@@ -803,12 +819,21 @@ def load_xml(full_path: str) -> ET.Element:
 
 def load_text(full_path: str) -> str:
     """Load a plain text file and return its contents."""
-    with open(full_path, "r") as f:
+    with open(full_path) as f:
         return f.read()
 
 
 def load_data(file_path: str) -> Any:
-    """Load a pickled data file from disk."""
+    """Load a pickled data file from disk.
+
+    Unpickling executes arbitrary code, so this refuses unless
+    ``saved_data.pickle`` is enabled in the configuration.
+    """
+    if not Config.saved_data_pickle_enabled():
+        raise WizFileError(
+            f"Refusing to load pickle file {file_path}: "
+            "saved_data.pickle is disabled in the configuration"
+        )
     try:
         with open(file_path, "rb") as pickled_data:
             dataFile = pickle.load(pickled_data)
@@ -816,7 +841,25 @@ def load_data(file_path: str) -> Any:
                 f"Data dated {datetime.fromtimestamp(os.path.getmtime(file_path))} loaded."
             )
         return dataFile
-    except (IOError, OSError, pickle.PickleError) as e1:
+    except (OSError, pickle.PickleError) as e1:
         message = f"Unable to open saved data due to error: {e1}"
         logging.error(message, exc_info=True)
-        raise WizFileError(f"Failed to load data from {file_path}", e1)
+        raise WizFileError(f"Failed to load data from {file_path}", e1) from e1
+
+
+def _resolve_query_collection(
+    query_collection: str | Any | None,
+    queryCollection: str | Any | None,
+) -> str | Any | None:
+    """Return the query collection, accepting the deprecated camelCase name."""
+    if queryCollection is None:
+        return query_collection
+    warnings.warn(
+        "'queryCollection' is deprecated and will be removed in wizsec 2.0; "
+        "use 'query_collection'",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+    if query_collection is not None:
+        raise TypeError("pass either query_collection or queryCollection, not both")
+    return queryCollection
