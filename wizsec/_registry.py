@@ -12,7 +12,7 @@
 import queue
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 from pyrate_limiter import Limiter, Rate
 
 # Wiz's published per-tenant rate limits (requests/second) by request type
@@ -20,7 +20,7 @@ from pyrate_limiter import Limiter, Rate
 # (rate_limit.headroom, default 0.8) so normal operation stays clear of
 # server-side 429s; explicit per-key rate_limit.overrides win over the
 # headroom scaling.
-PUBLISHED_RATE_LIMITS: Dict[str, float] = {
+PUBLISHED_RATE_LIMITS: dict[str, float] = {
     "query_user": 100.0,
     "query_service": 10.0,
     "mutation_user": 10.0,
@@ -28,7 +28,7 @@ PUBLISHED_RATE_LIMITS: Dict[str, float] = {
 }
 
 
-def _build_rates(rps: float) -> List[Rate]:
+def _build_rates(rps: float) -> list[Rate]:
     """Build the Rate list for a requests-per-second budget.
 
     A single spacing rate (1 request per interval) both enforces the
@@ -52,21 +52,31 @@ class EnvironmentState:
     def __init__(self, environment: str) -> None:
         self.environment = environment
         self.queue: queue.Queue[Any] = queue.Queue()
-        self.worker_thread: Optional[threading.Thread] = None
+        self.worker_thread: threading.Thread | None = None
+        # Additional queue workers started for concurrent batches. All workers
+        # drain the same queue and share the same rate limiters.
+        self.extra_workers: list[threading.Thread] = []
         self.stop_event: threading.Event = threading.Event()
         self.queue_lock: threading.Lock = threading.Lock()
-        self.headers: Dict[str, str] = {"Content-Type": "application/json"}
-        self.dc: Optional[str] = None
-        self._limiters: Optional[Dict[str, Limiter]] = None
+        self.headers: dict[str, str] = {"Content-Type": "application/json"}
+        self.dc: str | None = None
+        self._limiters: dict[str, Limiter] | None = None
         # Cached split entities (cloud accounts or projects) for query splitting.
         # None = not yet fetched; [] = fetch returned empty; list = cached results.
-        self._cached_split_entities: Optional[List[Dict[str, Any]]] = None
+        self._cached_split_entities: list[dict[str, Any]] | None = None
         self._split_entities_lock: threading.Lock = threading.Lock()
         self._rate_backoff_lock: threading.Lock = threading.Lock()
         self._rate_backoff_until: float = 0.0
 
+    def join_workers(self, timeout: float = 1) -> None:
+        """Wait briefly for every queue worker to exit (stop_event must be set)."""
+        for thread in [self.worker_thread, *self.extra_workers]:
+            if thread and thread.is_alive():
+                thread.join(timeout=timeout)
+        self.extra_workers = []
+
     @property
-    def limiters(self) -> Dict[str, Limiter]:
+    def limiters(self) -> dict[str, Limiter]:
         """Lazily initialize and return the per-request-type rate limiters.
 
         Effective budgets are the published Wiz limits scaled by the
@@ -111,7 +121,7 @@ class EnvironmentRegistry:
     EnvironmentState for a given environment name.
     """
 
-    _environments: Dict[str, EnvironmentState] = {}
+    _environments: dict[str, EnvironmentState] = {}
     _lock = threading.Lock()
 
     @classmethod
@@ -129,8 +139,7 @@ class EnvironmentRegistry:
             state = cls._environments.pop(environment, None)
             if state:
                 state.stop_event.set()
-                if state.worker_thread and state.worker_thread.is_alive():
-                    state.worker_thread.join(timeout=1)
+                state.join_workers()
 
     @classmethod
     def cleanup_all(cls) -> None:
@@ -138,8 +147,7 @@ class EnvironmentRegistry:
         with cls._lock:
             for state in cls._environments.values():
                 state.stop_event.set()
-                if state.worker_thread and state.worker_thread.is_alive():
-                    state.worker_thread.join(timeout=1)
+                state.join_workers()
             cls._environments.clear()
 
 
@@ -148,13 +156,13 @@ class ProfileState:
 
     def __init__(self, profile: str) -> None:
         self.profile = profile
-        self.token_data: Dict[str, Any] = {}
-        self.client_id: Optional[str] = None
-        self.client_secret: Optional[str] = None
+        self.token_data: dict[str, Any] = {}
+        self.client_id: str | None = None
+        self.client_secret: str | None = None
         self.auth_lock: threading.Lock = threading.Lock()
 
     @property
-    def access_token(self) -> Optional[str]:
+    def access_token(self) -> str | None:
         """Return the current access token, or None if not authenticated."""
         return self.token_data.get("access_token")
 
@@ -176,7 +184,7 @@ class ProfileRegistry:
     ProfileState for a given profile name.
     """
 
-    _profiles: Dict[Tuple[str, str], ProfileState] = {}
+    _profiles: dict[tuple[str, str], ProfileState] = {}
     _lock = threading.Lock()
 
     @classmethod

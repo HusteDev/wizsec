@@ -3,12 +3,12 @@
 import logging
 import os
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 import yaml
 
-from wizsec.config import Config, generate_default_config, DEFAULT_WIZ_DIR
+from wizsec.config import Config, generate_default_config
 from wizsec.exceptions import WizConfigurationError
 
 

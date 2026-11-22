@@ -10,7 +10,7 @@ app:
 #   enabled: true                     # Allows application save data locally | default = true
 #   directory: ""                     # Custom directory to save non-report exports | default = $CWD/saved-data
 #   temp: ""                          # Custom directory for Temp Files | default = tempfile.gettempdir()
-#   pickle: false                     # Allow use of pickle files for storing larger files | default = false
+#   pickle: false                     # Allow saving AND loading pickle files (loading runs code; only trust your own files) | default = false
 
 # auth:
 #   grant_type: client_credentials    # Options [device_code, client_credentials] | NOTE: device_code requires WizCode license

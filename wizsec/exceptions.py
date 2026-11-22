@@ -10,15 +10,12 @@
 ##
 
 # exceptions.py
-from typing import Optional, List
 
 
 class WizError(Exception):
     """Base exception class for all Wiz SDK errors."""
 
-    def __init__(
-        self, message: str, original_error: Optional[Exception] = None
-    ) -> None:
+    def __init__(self, message: str, original_error: Exception | None = None) -> None:
         super().__init__(message)
         self.original_error = original_error
 
@@ -35,9 +32,9 @@ class WizAPIError(WizError):
     def __init__(
         self,
         message: str,
-        status_code: Optional[int] = None,
-        response_text: Optional[str] = None,
-        original_error: Optional[Exception] = None,
+        status_code: int | None = None,
+        response_text: str | None = None,
+        original_error: Exception | None = None,
     ) -> None:
         super().__init__(message, original_error)
         self.status_code = status_code
@@ -62,8 +59,8 @@ class WizRateLimitError(WizError):
     def __init__(
         self,
         message: str,
-        retry_after: Optional[int] = None,
-        original_error: Optional[Exception] = None,
+        retry_after: int | None = None,
+        original_error: Exception | None = None,
     ) -> None:
         super().__init__(message, original_error)
         self.retry_after = retry_after
@@ -75,9 +72,9 @@ class WizQueryError(WizError):
     def __init__(
         self,
         message: str,
-        query: Optional[str] = None,
-        errors: Optional[List[dict]] = None,
-        original_error: Optional[Exception] = None,
+        query: str | None = None,
+        errors: list[dict] | None = None,
+        original_error: Exception | None = None,
     ) -> None:
         super().__init__(message, original_error)
         self.query = query
@@ -97,10 +94,10 @@ class WizReportError(WizError):
     def __init__(
         self,
         message: str,
-        report_id: Optional[str] = None,
-        report_name: Optional[str] = None,
-        original_error: Optional[Exception] = None,
-        status: Optional[str] = None,
+        report_id: str | None = None,
+        report_name: str | None = None,
+        original_error: Exception | None = None,
+        status: str | None = None,
     ) -> None:
         super().__init__(message, original_error)
         self.report_id = report_id
@@ -126,9 +123,9 @@ class WizSchemaValidationError(WizQueryError):
     def __init__(
         self,
         message: str,
-        query: Optional[str] = None,
-        validation_errors: Optional[List[str]] = None,
-        original_error: Optional[Exception] = None,
+        query: str | None = None,
+        validation_errors: list[str] | None = None,
+        original_error: Exception | None = None,
     ) -> None:
         super().__init__(
             message, query=query, errors=None, original_error=original_error

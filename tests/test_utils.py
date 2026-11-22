@@ -1,15 +1,13 @@
 """Tests for utils.py — utility functions."""
 
 import configparser
-import csv
 import json
-import logging
 import os
 import pickle
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
@@ -662,7 +660,7 @@ class TestLoadFile:
         result = load_file(str(f))
         assert result == "hello world"
 
-    def test_dispatches_pickle(self, tmp_path):
+    def test_dispatches_pickle(self, tmp_path, pickle_enabled):
         f = tmp_path / "test.pkl"
         data = {"key": [1, 2, 3]}
         with open(f, "wb") as fh:
@@ -755,8 +753,33 @@ class TestLoadText:
 # ── load_data ──────────────────────────────────────────────────────
 
 
+@pytest.fixture()
+def pickle_enabled(mock_config):
+    mock_config._CONFIG["saved_data"] = {"pickle": True}
+    return mock_config
+
+
 class TestLoadData:
-    def test_loads_pickle(self, tmp_path):
+    def test_refuses_when_pickle_disabled(self, tmp_path, mock_config):
+        f = tmp_path / "test.pkl"
+        with open(f, "wb") as fh:
+            pickle.dump({"a": 1}, fh)
+        with pytest.raises(WizFileError, match="saved_data.pickle is disabled"):
+            load_data(str(f))
+
+    def test_default_order_skips_pickle_when_disabled(self, tmp_path, mock_config):
+        (tmp_path / "data.pkl").write_bytes(pickle.dumps({"src": "pkl"}))
+        (tmp_path / "data.json").write_text('{"src": "json"}')
+        result = load_file_if_in_last_x_interval(str(tmp_path / "data"))
+        assert result == {"src": "json"}
+
+    def test_default_order_prefers_pickle_when_enabled(self, tmp_path, pickle_enabled):
+        (tmp_path / "data.pkl").write_bytes(pickle.dumps({"src": "pkl"}))
+        (tmp_path / "data.json").write_text('{"src": "json"}')
+        result = load_file_if_in_last_x_interval(str(tmp_path / "data"))
+        assert result == {"src": "pkl"}
+
+    def test_loads_pickle(self, tmp_path, pickle_enabled):
         f = tmp_path / "test.pkl"
         data = {"nested": {"list": [1, 2, 3]}}
         with open(f, "wb") as fh:
@@ -764,13 +787,13 @@ class TestLoadData:
         result = load_data(str(f))
         assert result == data
 
-    def test_corrupt_pickle_raises(self, tmp_path):
+    def test_corrupt_pickle_raises(self, tmp_path, pickle_enabled):
         f = tmp_path / "bad.pkl"
         f.write_bytes(b"not a pickle")
         with pytest.raises(WizFileError, match="Failed to load data"):
             load_data(str(f))
 
-    def test_missing_file_raises(self, tmp_path):
+    def test_missing_file_raises(self, tmp_path, pickle_enabled):
         with pytest.raises(WizFileError, match="Failed to load data"):
             load_data(str(tmp_path / "nonexistent.pkl"))
 
@@ -1067,7 +1090,7 @@ class TestWriteCredentialsErrors:
         cred_file = tmp_path / "creds.ini"
 
         with patch.object(mock_config, "serverless", return_value=False):
-            with patch("builtins.open", side_effect=IOError("permission denied")):
+            with patch("builtins.open", side_effect=OSError("permission denied")):
                 with pytest.raises(WizFileError, match="Failed to write credentials"):
                     write_credentials_to_file("default", "id", "secret", str(cred_file))
 
@@ -1093,7 +1116,6 @@ class TestLoadFileIfInLastXIntervalOld:
 
         # Pretend the file is old (modified 10 days ago)
         old_time = (datetime.now() - timedelta(days=10)).timestamp()
-        import os
 
         os.utime(str(json_file), (old_time, old_time))
 

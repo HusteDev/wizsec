@@ -50,7 +50,7 @@ pip install -e ".[dev]"
 
 ## Requirements
 
-- Python >= 3.9
+- Python >= 3.10
 - `httpx`, `pyrate-limiter`, `python-dotenv`, `PyYAML`, `graphql-core`
 
 ## Quick Start
@@ -191,7 +191,7 @@ import queries
 
 # Resolve by attribute name from the collection
 response = client.create_request(
-    queryCollection=queries,
+    query_collection=queries,
     query="ListUsers",  # resolves to queries.ListUsers
     vars={"first": 50}
 )
@@ -204,7 +204,7 @@ response = client.create_request(
 )
 ```
 
-`queryCollection` accepts a module, a module name string (auto-imported), or any object whose attributes are the query strings — for example a `types.SimpleNamespace` for one-off scripts that don't warrant a separate `queries.py`:
+`query_collection` accepts a module, a module name string (auto-imported), or any object whose attributes are the query strings — for example a `types.SimpleNamespace` for one-off scripts that don't warrant a separate `queries.py`:
 
 ```python
 from types import SimpleNamespace
@@ -213,7 +213,7 @@ queries = SimpleNamespace(
     ListUsers="query ListUsers($first: Int) { users(first: $first) { nodes { id } } }",
 )
 
-response = client.create_request(queryCollection=queries, query="ListUsers", vars={"first": 50})
+response = client.create_request(query_collection=queries, query="ListUsers", vars={"first": 50})
 ```
 
 See [`examples/query_collection/`](examples/query_collection/) for a complete working example.
@@ -226,7 +226,7 @@ batch.add_request(query="...", vars={"type": "VM"})
 batch.add_request(query="...", vars={"type": "CONTAINER"})
 
 batch.set_progress_callback(lambda done, total: print(f"{done}/{total}"))
-results = batch.submit(max_concurrent=5)
+results = batch.submit(max_concurrent=5)  # up to 5 requests in flight; rate limits still apply
 
 print(f"{results.success_count()}/{results.total_count()} succeeded")
 

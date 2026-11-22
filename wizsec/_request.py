@@ -13,15 +13,16 @@
 import time
 import traceback
 import random
-import codecs
 import csv
-import re
 import json
 import threading
-from typing import Optional, Dict, Any, List, Tuple, Union, Callable, Iterator
+import warnings
+from typing import Optional, Any
+from collections.abc import Callable, Iterator
 
 from graphql import parse, GraphQLError
 import asyncio
+from .utils import _resolve_query_collection
 from .utils import (
     parse_query_metadata,
     ensure_pagination_variables,
@@ -95,7 +96,7 @@ def _parse_retry_after(value: Any) -> int:
         return Config.rate_limit_default_retry_after()
 
 
-def _is_rate_limit_graphql_error(errors: List[Any]) -> bool:
+def _is_rate_limit_graphql_error(errors: list[Any]) -> bool:
     """Return True if any GraphQL error in the list indicates rate limiting."""
     for err in errors or []:
         if not isinstance(err, dict):
@@ -108,7 +109,7 @@ def _is_rate_limit_graphql_error(errors: List[Any]) -> bool:
     return False
 
 
-def _extract_totalcount(data: Optional[Dict[str, Any]], source: str) -> int:
+def _extract_totalcount(data: dict[str, Any] | None, source: str) -> int:
     """Extract the totalCount integer from a probe response."""
     if not data:
         return 0
@@ -137,7 +138,7 @@ def _schema_supports_totalcount(source: str, client: Any) -> bool:
         return False
 
 
-def _get_cached_or_fetch_entities(client: Any) -> List[Dict[str, Any]]:
+def _get_cached_or_fetch_entities(client: Any) -> list[dict[str, Any]]:
     """Return the session-cached split entities, fetching and caching them if needed."""
     env_state = client._env_state
     split_by = Config.query_splitting_split_by()
@@ -168,7 +169,7 @@ def _get_cached_or_fetch_entities(client: Any) -> List[Dict[str, Any]]:
             # silently disable splitting for the rest of the session.
             return []
 
-        entities: List[Dict[str, Any]] = (fetch_req.data.get(node_key) or {}).get(
+        entities: list[dict[str, Any]] = (fetch_req.data.get(node_key) or {}).get(
             "nodes", []
         )
         if cache_enabled:
@@ -178,14 +179,14 @@ def _get_cached_or_fetch_entities(client: Any) -> List[Dict[str, Any]]:
 
 
 def _merge_split_results(
-    responses: List[Any],
+    responses: list[Any],
     source: str,
     logger: Any,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Merge nodes from multiple per-entity responses into a single data dict."""
-    all_nodes: List[Any] = []
+    all_nodes: list[Any] = []
     total_count = 0
-    sample_structure: Optional[Dict[str, Any]] = None
+    sample_structure: dict[str, Any] | None = None
 
     for resp in responses:
         if not resp.success or resp.data is None:
@@ -199,14 +200,14 @@ def _merge_split_results(
         if sample_structure is None:
             sample_structure = {k: v for k, v in connection.items() if k != "nodes"}
 
-    merged_connection: Dict[str, Any] = dict(sample_structure or {})
+    merged_connection: dict[str, Any] = dict(sample_structure or {})
     merged_connection["nodes"] = all_nodes
     merged_connection["totalCount"] = total_count
     merged_connection.pop("pageInfo", None)
     return {source: merged_connection}
 
 
-# Types rejected as queryCollection — anything else (including SimpleNamespace,
+# Types rejected as query_collection — anything else (including SimpleNamespace,
 # dataclasses, class instances) is accepted and resolved via getattr at use time.
 _REJECTED_QC_TYPES = (
     int,
@@ -229,39 +230,39 @@ class _RequestBase:
     def _init_common(
         self,
         client: "WizClient",
-        queryCollection: Optional[Union[str, Any]] = None,
-        query: Optional[str] = None,
-        vars: Optional[Dict[str, Any]] = None,
-        paginate: Optional[bool] = None,
-        report_request: Optional[Dict[str, Any]] = None,
-        on_page_event: Optional[Callable] = None,
-        stop_when: Optional[Callable[[Dict[str, Any]], bool]] = None,
-        stop_on_page: Optional[Callable[[Dict[str, Any]], bool]] = None,
+        query_collection: str | Any | None = None,
+        query: str | None = None,
+        vars: dict[str, Any] | None = None,
+        paginate: bool | None = None,
+        report_request: dict[str, Any] | None = None,
+        on_page_event: Callable | None = None,
+        stop_when: Callable[[dict[str, Any]], bool] | None = None,
+        stop_on_page: Callable[[dict[str, Any]], bool] | None = None,
     ) -> None:
         """Initialize common state shared by sync and async request classes."""
         self._logger = Config.get_logger()
         self._client = client
         self.vars = vars or {}
-        self._response: Optional[Dict[str, Any]] = None
-        self.errors: List[Dict[str, Any]] = []
-        self.error: Optional[WizError] = None
-        self.data: Optional[Dict[str, Any]] = None
+        self._response: dict[str, Any] | None = None
+        self.errors: list[dict[str, Any]] = []
+        self.error: WizError | None = None
+        self.data: dict[str, Any] | None = None
         self._status_code = None
         use_pagination = Config.api_auto_paginate() if paginate is None else paginate
         self._paginate = use_pagination and not Config.serverless()
         self._report_request = report_request or {}
         self._page_event = on_page_event
         self._page = 0
-        self._aggregated_data: Optional[Dict[str, Any]] = None
+        self._aggregated_data: dict[str, Any] | None = None
 
         # Early-stop predicates. Both are optional; see _apply_stop_predicates.
         self._stop_when = stop_when
         self._stop_on_page = stop_on_page
         self._stopped_early = False
-        self._stop_reason: Optional[str] = None  # "node" | "page"
+        self._stop_reason: str | None = None  # "node" | "page"
         self._stop_page = 0  # 1-based index of the page that triggered the stop
-        self._stop_cursor: Optional[str] = None  # `after` used to FETCH that page
-        self._stop_next_cursor: Optional[str] = None  # that page's endCursor
+        self._stop_cursor: str | None = None  # `after` used to FETCH that page
+        self._stop_next_cursor: str | None = None  # that page's endCursor
         # Independent of self._page, which only advances when on_page_event is
         # set and is numbered differently by the sync and async paths.
         self._pages_scanned = 0
@@ -270,9 +271,9 @@ class _RequestBase:
                 "stop_when/stop_on_page have no effect with paginate=False"
             )
 
-        self._queryCollection: Optional[Any] = None
-        if queryCollection:
-            self.queryCollection = queryCollection
+        self._query_collection: Any | None = None
+        if query_collection:
+            self.query_collection = query_collection
 
         if query is not None:
             self.query = query
@@ -280,16 +281,16 @@ class _RequestBase:
         self._limiter_key = self._client._limiter_key(self)
 
     @property
-    def queryCollection(self) -> Optional[Any]:
+    def query_collection(self) -> Any | None:
         """Return the loaded query collection module, or None if unset."""
-        if hasattr(self, "_queryCollection") and self._queryCollection:
-            return self._queryCollection
+        if getattr(self, "_query_collection", None):
+            return self._query_collection
         else:
-            self._logger.debug("No queryCollection set")
+            self._logger.debug("No query_collection set")
             return None
 
-    @queryCollection.setter
-    def queryCollection(self, module: Union[str, Any]) -> None:
+    @query_collection.setter
+    def query_collection(self, module: str | Any) -> None:
         """Set the query collection.
 
         Accepts:
@@ -302,7 +303,9 @@ class _RequestBase:
         Primitive and container types (int, float, bool, bytes, list, tuple,
         set, dict, None) are rejected with WizQueryError.
         """
-        import importlib, sys, types
+        import importlib
+        import sys
+        import types
 
         if isinstance(module, str):
             if module not in sys.modules:
@@ -314,7 +317,7 @@ class _RequestBase:
                 self._logger.debug("Manually added [%s] to sys.modules", module_name)
         elif isinstance(module, _REJECTED_QC_TYPES):
             self._logger.warning(
-                "Unexpected type for queryCollection: %s", type(module)
+                "Unexpected type for query_collection: %s", type(module)
             )
             raise WizQueryError(
                 "QueryCollection must be a module, a module name string, "
@@ -324,7 +327,26 @@ class _RequestBase:
         # instance, etc.) — accepted as-is. Missing attributes fall back
         # gracefully via the existing AttributeError handling in `query.setter`.
 
-        self._queryCollection = module
+        self._query_collection = module
+
+    @property
+    def queryCollection(self) -> Any | None:
+        """Deprecated alias for ``query_collection``."""
+        warnings.warn(
+            "'queryCollection' is deprecated; use 'query_collection'",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.query_collection
+
+    @queryCollection.setter
+    def queryCollection(self, module: str | Any) -> None:
+        warnings.warn(
+            "'queryCollection' is deprecated; use 'query_collection'",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        self.query_collection = module
 
     @property
     def query(self) -> str:
@@ -332,28 +354,30 @@ class _RequestBase:
         return self._query
 
     @query.setter
-    def query(self, QUERY: str) -> None:
+    def query(self, value: str) -> None:
         """Resolve, validate, and set the GraphQL query string."""
-        if not isinstance(QUERY, str):
-            self._logger.warning("Query must be a string, got: %s", type(QUERY))
-            raise WizQueryError(f"Query must be a string, got: {type(QUERY)}")
+        if not isinstance(value, str):
+            self._logger.warning("Query must be a string, got: %s", type(value))
+            raise WizQueryError(f"Query must be a string, got: {type(value)}")
 
         resolved = None
         try:
-            parse(QUERY)
-            resolved = QUERY
+            parse(value)
+            resolved = value
         except GraphQLError:
-            if self.queryCollection:
+            if self.query_collection:
                 try:
-                    resolved = getattr(self.queryCollection, QUERY)
-                    self._logger.debug(f"Resolved query '{QUERY}' from queryCollection")
+                    resolved = getattr(self.query_collection, value)
+                    self._logger.debug(
+                        f"Resolved query '{value}' from query_collection"
+                    )
                 except AttributeError:
                     self._logger.debug(
-                        f"Query '{QUERY}' not found in queryCollection. Using raw query."
+                        f"Query '{value}' not found in query_collection. Using raw query."
                     )
-                    resolved = QUERY
+                    resolved = value
             else:
-                resolved = QUERY
+                resolved = value
 
         if self._paginate:
             resolved = ensure_pagination_variables(resolved)
@@ -376,7 +400,7 @@ class _RequestBase:
             self._logger.debug("__current_query = %s", self._current_query_info)
             self._report = True
 
-    def _merge_page(self, page_data: Optional[Dict[str, Any]]) -> None:
+    def _merge_page(self, page_data: dict[str, Any] | None) -> None:
         """Merge a page of data into the aggregated results."""
         if self._aggregated_data is None:
             self._aggregated_data = page_data or {}
@@ -398,7 +422,7 @@ class _RequestBase:
             else:
                 self._aggregated_data[key] = value
 
-    def _page_info(self, data: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    def _page_info(self, data: dict[str, Any] | None) -> dict[str, Any] | None:
         """Extract pageInfo from the first field that has it."""
         for _, value in (data or {}).items():
             if isinstance(value, dict) and "pageInfo" in value:
@@ -435,7 +459,7 @@ class _RequestBase:
     # caller forever.
     # ──────────────────────────────────────────────────────────────────────
 
-    def _connection_key(self, data: Optional[Dict[str, Any]]) -> Optional[str]:
+    def _connection_key(self, data: dict[str, Any] | None) -> str | None:
         """Return the key of the Relay connection dict (the one holding "nodes")."""
         if not data:
             return None
@@ -448,7 +472,7 @@ class _RequestBase:
         return None
 
     def _call_stop_predicate(
-        self, predicate: Callable[[Dict[str, Any]], bool], arg: Any, label: str
+        self, predicate: Callable[[dict[str, Any]], bool], arg: Any, label: str
     ) -> bool:
         """Call a user stop predicate, converting any exception into a query error.
 
@@ -473,8 +497,8 @@ class _RequestBase:
             return False
 
     def _apply_stop_predicates(
-        self, page_data: Optional[Dict[str, Any]]
-    ) -> Optional[Dict[str, Any]]:
+        self, page_data: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
         """Evaluate the stop predicates against one freshly fetched page.
 
         Returns the page data that should be merged: ``page_data`` itself when
@@ -496,7 +520,7 @@ class _RequestBase:
         connection = (page_data.get(key) or {}) if key else {}
         nodes = connection.get("nodes") or []
 
-        match_index: Optional[int] = None
+        match_index: int | None = None
         if self._stop_when and key:
             for index, node in enumerate(nodes):
                 if self._call_stop_predicate(self._stop_when, node, "stop_when"):
@@ -537,7 +561,7 @@ class _RequestBase:
         return {**page_data, key: truncated}
 
     @property
-    def stop_info(self) -> Optional[Dict[str, Any]]:
+    def stop_info(self) -> dict[str, Any] | None:
         """Where pagination stopped, or None if it ran to completion."""
         if not self._stopped_early:
             return None
@@ -559,19 +583,21 @@ class WizRequest(_RequestBase):
     def __init__(
         self,
         client: "WizClient",
-        queryCollection: Optional[Union[str, Any]] = None,
-        query: Optional[str] = None,
-        vars: Optional[Dict[str, Any]] = None,
-        paginate: Optional[bool] = None,
-        report_request: Optional[Dict[str, Any]] = None,
-        on_page_event: Optional[Callable] = None,
-        stop_when: Optional[Callable[[Dict[str, Any]], bool]] = None,
-        stop_on_page: Optional[Callable[[Dict[str, Any]], bool]] = None,
+        query_collection: str | Any | None = None,
+        query: str | None = None,
+        vars: dict[str, Any] | None = None,
+        paginate: bool | None = None,
+        report_request: dict[str, Any] | None = None,
+        on_page_event: Callable | None = None,
+        stop_when: Callable[[dict[str, Any]], bool] | None = None,
+        stop_on_page: Callable[[dict[str, Any]], bool] | None = None,
+        queryCollection: str | Any | None = None,
     ) -> None:
         """Initialize a synchronous Wiz GraphQL request."""
+        query_collection = _resolve_query_collection(query_collection, queryCollection)
         self._init_common(
             client,
-            queryCollection,
+            query_collection,
             query,
             vars,
             paginate,
@@ -699,8 +725,8 @@ class WizRequest(_RequestBase):
         return True
 
     async def _run_split_async(
-        self, entities: List[Dict[str, Any]], filter_path: str
-    ) -> List[Any]:
+        self, entities: list[dict[str, Any]], filter_path: str
+    ) -> list[Any]:
         """Run one async sub-query per entity and return all responses."""
         async with self._client.async_session() as async_client:
             batch = AsyncWizBatchRequest(
@@ -795,7 +821,7 @@ class WizRequest(_RequestBase):
         self._handle_final_failure()
 
     def _process_successful_response(
-        self, response: Any, url: str, headers: Dict[str, str]
+        self, response: Any, url: str, headers: dict[str, str]
     ) -> bool:
         """Process a successful HTTP response. Returns True if processing is complete."""
         self._response = response.json()
@@ -832,8 +858,8 @@ class WizRequest(_RequestBase):
     def _handle_serverless_pagination(
         self,
         url: str,
-        headers: Dict[str, str],
-        page_data: Optional[Dict[str, Any]] = None,
+        headers: dict[str, str],
+        page_data: dict[str, Any] | None = None,
     ) -> bool:
         """Handle pagination in serverless mode."""
         assert self._response is not None
@@ -870,7 +896,7 @@ class WizRequest(_RequestBase):
             self.data = self._response.get("data", {})
         return True
 
-    def _handle_standard_pagination(self, page_data: Dict[str, Any]) -> bool:
+    def _handle_standard_pagination(self, page_data: dict[str, Any]) -> bool:
         """Handle pagination in standard (non-serverless) mode."""
         if not self._paginate:
             self.data = page_data
@@ -886,7 +912,7 @@ class WizRequest(_RequestBase):
                 self._finalize_pagination()
             return True
 
-    def _trigger_page_event(self, page_data: Dict[str, Any]) -> None:
+    def _trigger_page_event(self, page_data: dict[str, Any]) -> None:
         """Trigger the page event callback if configured.
 
         The callback sees the page as merged — truncated when a stop_when
@@ -1036,8 +1062,8 @@ class WizRequest(_RequestBase):
     def _report_error(
         self,
         message: str,
-        status: Optional[str],
-        original_error: Optional[Exception] = None,
+        status: str | None,
+        original_error: Exception | None = None,
     ) -> WizReportError:
         return WizReportError(
             message,
@@ -1140,11 +1166,11 @@ class WizRequest(_RequestBase):
     def _stream_report(
         self,
         download_url: str,
-        report_name: Optional[str],
+        report_name: str | None,
         as_generator: bool = False,
-        on_page_event: Optional[Callable] = None,
+        on_page_event: Callable | None = None,
         chunk_size: int = 8192,
-    ) -> Union[Iterator[Any], List[Any]]:
+    ) -> Iterator[Any] | list[Any]:
         """Stream or fully download a report from the given URL."""
         if as_generator:
             return self._stream_report_generator(
@@ -1160,13 +1186,17 @@ class WizRequest(_RequestBase):
     def _stream_report_generator(
         self,
         download_url: str,
-        report_name: Optional[str],
-        on_page_event: Optional[Callable] = None,
+        report_name: str | None,
+        on_page_event: Callable | None = None,
         chunk_size: int = 8192,
     ) -> Iterator[Any]:
         """Yield report rows/records line-by-line from a streaming download."""
         self._logger.info(f"Streaming report: {report_name}")
-        with stream_get(download_url) as response:
+        with stream_get(
+            download_url,
+            timeout=Config.api_timeout(),
+            **self._client._http_kwargs(),
+        ) as response:
             if response.status_code == 200:
                 content_type = response.headers.get("Content-Type", "")
                 total_size = int(response.headers.get("content-length", 0))
@@ -1200,10 +1230,14 @@ class WizRequest(_RequestBase):
                     f"Failed to retrieve report: HTTP {response.status_code}"
                 )
 
-    def _download_report(self, download_url: str) -> Optional[bytes]:
+    def _download_report(self, download_url: str) -> bytes | None:
         """Download a report file from the given URL."""
         try:
-            response = transport_get(download_url)
+            response = transport_get(
+                download_url,
+                timeout=Config.api_timeout(),
+                **self._client._http_kwargs(),
+            )
             response.raise_for_status()
             return response.content
         except Exception as e:
@@ -1219,7 +1253,7 @@ class WizRequest(_RequestBase):
 class WizResponse:
     """Protective wrapper for WizRequest that exposes only public attributes."""
 
-    _EXPOSED_FIELDS: List[str] = [
+    _EXPOSED_FIELDS: list[str] = [
         "query",
         "vars",
         "paginate",
@@ -1237,17 +1271,17 @@ class WizResponse:
                     setattr(self, attr, getattr(request, attr))
 
     @property
-    def data(self) -> Optional[Dict[str, Any]]:
+    def data(self) -> dict[str, Any] | None:
         """Return the response data from the underlying request."""
         return self._request.data
 
     @property
-    def errors(self) -> List[Dict[str, Any]]:
+    def errors(self) -> list[dict[str, Any]]:
         """Return the list of errors from the underlying request."""
         return self._request.errors
 
     @property
-    def error(self) -> Optional[WizError]:
+    def error(self) -> WizError | None:
         """Return the typed exception recorded at final failure, if any."""
         return self._request.error
 
@@ -1257,7 +1291,7 @@ class WizResponse:
         return self._request.success()
 
     @property
-    def node_type(self) -> Optional[str]:
+    def node_type(self) -> str | None:
         """Return the GraphQL source/node type of the query."""
         return self._request._current_query_info.get("source", None)
 
@@ -1270,7 +1304,7 @@ class WizResponse:
         return self._request._stopped_early
 
     @property
-    def stop_info(self) -> Optional[Dict[str, Any]]:
+    def stop_info(self) -> dict[str, Any] | None:
         """Return where pagination stopped, or None if it ran to completion.
 
         Keys: ``reason`` ("node" or "page"), ``page`` (1-based index of the
@@ -1296,7 +1330,7 @@ class WizResponse:
         """Submit the underlying request and return it."""
         return self._request.submit()
 
-    def __dir__(self) -> List[str]:
+    def __dir__(self) -> list[str]:
         """Return only public attribute names."""
         return [attr for attr in super().__dir__() if not attr.startswith("_")]
 
@@ -1311,21 +1345,22 @@ class WizBatchRequest:
         """Initialize a batch request manager for the given client."""
         self._client = client
         self._logger = Config.get_logger()
-        self._requests: List[WizRequest] = []
-        self._responses: List["WizResponse"] = []  # Keep track of WizResponse objects
-        self._results: Dict[int, "WizResponse"] = {}
+        self._requests: list[WizRequest] = []
+        self._responses: list[WizResponse] = []  # Keep track of WizResponse objects
+        self._results: dict[int, WizResponse] = {}
         self._completed_count = 0
         self._total_count = 0
         self._batch_event = threading.Event()
         self._lock = threading.Lock()
-        self._progress_callback: Optional[Callable] = None
+        self._progress_callback: Callable | None = None
 
     def add_request(
         self,
         query: str,
-        vars: Optional[Dict[str, Any]] = None,
-        queryCollection: Optional[Union[str, Any]] = None,
-        paginate: Optional[bool] = None,
+        vars: dict[str, Any] | None = None,
+        query_collection: str | Any | None = None,
+        paginate: bool | None = None,
+        queryCollection: str | Any | None = None,
         **kwargs,
     ) -> int:
         """
@@ -1336,9 +1371,10 @@ class WizBatchRequest:
         per-request: each request stops its own pagination, and one stopping
         does not stop the others.
         """
+        query_collection = _resolve_query_collection(query_collection, queryCollection)
         # Create the response object that users will interact with
         response = self._client.create_request(
-            queryCollection=queryCollection,
+            query_collection=query_collection,
             query=query,
             vars=vars,
             paginate=paginate,
@@ -1368,11 +1404,16 @@ class WizBatchRequest:
         Submit all requests in the batch with controlled concurrency.
 
         Args:
-            max_concurrent: Maximum number of requests to process concurrently
+            max_concurrent: Maximum number of requests executing at once
+                (queue workers for this environment). The environment's rate
+                limiter still caps requests per second. Ignored in serverless
+                mode, where requests run sequentially.
 
         Returns:
             WizBatchResponse containing all results
         """
+        if max_concurrent < 1:
+            raise ValueError("max_concurrent must be at least 1")
         if not self._requests:
             self._logger.warning("No requests in batch to submit")
             return WizBatchResponse({})
@@ -1421,8 +1462,10 @@ class WizBatchRequest:
                 request._original_done_event = original_done_event  # type: ignore[attr-defined]
             request._done_event = threading.Event()
 
-        # Submit requests to the queue (rate limiting happens in the client)
-        for i, request in enumerate(self._requests):
+        # Run up to max_concurrent queue workers, then enqueue. Rate limiting
+        # happens per page in the client, shared by all workers.
+        self._client._start_worker(max_concurrent)
+        for request in self._requests:
             self._client._enqueue_request(request)
 
         # Wait for all requests to complete
@@ -1432,12 +1475,13 @@ class WizBatchRequest:
 
     def _wait_for_completion(self) -> None:
         """Wait for all batch requests to complete."""
-        timeout = Config.api_timeout() * len(
-            self._requests
-        )  # Scale timeout with batch size
+        # One deadline for the whole batch, scaled with its size. Waiting the
+        # full budget per request made the worst case O(N^2 * timeout).
+        deadline = time.monotonic() + Config.api_timeout() * len(self._requests)
 
         for i, request in enumerate(self._requests):
-            if request._done_event.wait(timeout=timeout):
+            remaining = max(0.0, deadline - time.monotonic())
+            if request._done_event.wait(timeout=remaining):
                 self._results[i] = self._responses[i]  # Store WizResponse
                 with self._lock:
                     self._completed_count += 1
@@ -1485,7 +1529,7 @@ class WizBatchResponse:
     Provides convenient access to individual results and batch statistics.
     """
 
-    def __init__(self, results: Dict[int, "WizResponse"]) -> None:
+    def __init__(self, results: dict[int, "WizResponse"]) -> None:
         """Initialize batch response with a mapping of request IDs to responses."""
         self._results = results
         self._logger = Config.get_logger()
@@ -1494,11 +1538,11 @@ class WizBatchResponse:
         """Get result for a specific request ID."""
         return self._results.get(request_id)
 
-    def get_successful_results(self) -> Dict[int, "WizResponse"]:
+    def get_successful_results(self) -> dict[int, "WizResponse"]:
         """Get all successful results."""
         return {id: resp for id, resp in self._results.items() if resp.success}
 
-    def get_failed_results(self) -> Dict[int, "WizResponse"]:
+    def get_failed_results(self) -> dict[int, "WizResponse"]:
         """Get all failed results."""
         return {id: resp for id, resp in self._results.items() if not resp.success}
 
@@ -1524,13 +1568,13 @@ class WizBatchResponse:
             return 0.0
         return (self.success_count() / self.total_count()) * 100
 
-    def get_all_data(self) -> List[Any]:
+    def get_all_data(self) -> list[Any]:
         """Get data from all successful requests."""
         return [
             resp.data for resp in self._results.values() if resp.success and resp.data
         ]
 
-    def get_all_errors(self) -> List[Dict[str, Any]]:
+    def get_all_errors(self) -> list[dict[str, Any]]:
         """Get all errors from failed requests."""
         errors = []
         for id, resp in self._results.items():
@@ -1538,10 +1582,9 @@ class WizBatchResponse:
                 errors.extend([{**error, "request_id": id} for error in resp.errors])
         return errors
 
-    def iterate_results(self) -> Iterator[Tuple[int, "WizResponse"]]:
+    def iterate_results(self) -> Iterator[tuple[int, "WizResponse"]]:
         """Iterate over all results as (request_id, response) pairs."""
-        for id, resp in self._results.items():
-            yield id, resp
+        yield from self._results.items()
 
     def __getitem__(self, request_id: int) -> Optional["WizResponse"]:
         """Get a result by request ID using bracket notation."""
@@ -1551,7 +1594,7 @@ class WizBatchResponse:
         """Return the total number of results."""
         return len(self._results)
 
-    def __iter__(self) -> Iterator[Tuple[int, "WizResponse"]]:
+    def __iter__(self) -> Iterator[tuple[int, "WizResponse"]]:
         """Iterate over all results as (request_id, response) pairs."""
         return iter(self._results.items())
 
@@ -1570,14 +1613,15 @@ class AsyncWizRequest(_RequestBase):
     def __init__(
         self,
         client: "WizClient",
-        queryCollection: Optional[Union[str, Any]] = None,
-        query: Optional[str] = None,
-        vars: Optional[Dict[str, Any]] = None,
-        paginate: Optional[bool] = None,
-        report_request: Optional[Dict[str, Any]] = None,
-        on_page_event: Optional[Callable] = None,
-        stop_when: Optional[Callable[[Dict[str, Any]], bool]] = None,
-        stop_on_page: Optional[Callable[[Dict[str, Any]], bool]] = None,
+        query_collection: str | Any | None = None,
+        query: str | None = None,
+        vars: dict[str, Any] | None = None,
+        paginate: bool | None = None,
+        report_request: dict[str, Any] | None = None,
+        on_page_event: Callable | None = None,
+        stop_when: Callable[[dict[str, Any]], bool] | None = None,
+        stop_on_page: Callable[[dict[str, Any]], bool] | None = None,
+        queryCollection: str | Any | None = None,
     ) -> None:
         """Initialize an asynchronous Wiz GraphQL request.
 
@@ -1585,6 +1629,7 @@ class AsyncWizRequest(_RequestBase):
             WizConfigurationError: If ``report_request`` is supplied. Reports
                 are sync-only by design; see the check below.
         """
+        query_collection = _resolve_query_collection(query_collection, queryCollection)
         # Reports are deliberately not available on the async path. The async
         # client exists to run many queries concurrently, and a report is not a
         # query -- it makes the Wiz backend generate and materialise a dataset.
@@ -1603,7 +1648,7 @@ class AsyncWizRequest(_RequestBase):
             )
         self._init_common(
             client,
-            queryCollection,
+            query_collection,
             query,
             vars,
             paginate,
@@ -1745,7 +1790,12 @@ class AsyncWizRequest(_RequestBase):
             )
 
         client = self._client._async_session  # type: ignore[attr-defined]
-        semaphore = getattr(self._client, "_async_semaphore", asyncio.Semaphore(10))
+        # Shared across every request on this client so the cap actually holds;
+        # a per-request fallback would give each request its own semaphore.
+        semaphore = getattr(self._client, "_async_semaphore", None)
+        if semaphore is None:
+            semaphore = asyncio.Semaphore(10)
+            self._client._async_semaphore = semaphore  # type: ignore[attr-defined]
         limiter = self._client._get_limiter(self._limiter_key)
 
         while True:
@@ -1922,17 +1972,17 @@ class AsyncWizResponse:
         return self._request.success()
 
     @property
-    def data(self) -> Optional[Dict[str, Any]]:
+    def data(self) -> dict[str, Any] | None:
         """Return the response data from the underlying request."""
         return self._request.data
 
     @property
-    def errors(self) -> List[Dict[str, Any]]:
+    def errors(self) -> list[dict[str, Any]]:
         """Return the list of errors from the underlying request."""
         return self._request.errors
 
     @property
-    def error(self) -> Optional[WizError]:
+    def error(self) -> WizError | None:
         """Return the typed exception recorded at final failure, if any."""
         return self._request.error
 
@@ -1945,7 +1995,7 @@ class AsyncWizResponse:
         return self._request._stopped_early
 
     @property
-    def stop_info(self) -> Optional[Dict[str, Any]]:
+    def stop_info(self) -> dict[str, Any] | None:
         """Return where pagination stopped, or None if it ran to completion.
 
         Keys: ``reason`` ("node" or "page"), ``page`` (1-based index of the
@@ -1978,9 +2028,9 @@ class AsyncWizBatchRequest:
         """Initialize an async batch request manager."""
         self._client = client
         self._logger = Config.get_logger()
-        self._requests: List[AsyncWizRequest] = []
+        self._requests: list[AsyncWizRequest] = []
         self._max_concurrent = max_concurrent
-        self._progress_callback: Optional[Callable] = None
+        self._progress_callback: Callable | None = None
 
         # Ensure we have an async semaphore on the client
         if not hasattr(client, "_async_semaphore"):
@@ -1989,9 +2039,10 @@ class AsyncWizBatchRequest:
     def add_request(
         self,
         query: str,
-        vars: Optional[Dict[str, Any]] = None,
-        queryCollection: Optional[Union[str, Any]] = None,
-        paginate: Optional[bool] = None,
+        vars: dict[str, Any] | None = None,
+        query_collection: str | Any | None = None,
+        paginate: bool | None = None,
+        queryCollection: str | Any | None = None,
         **kwargs,
     ) -> int:
         """Add request to batch.
@@ -2001,9 +2052,10 @@ class AsyncWizBatchRequest:
         per-request: each request stops its own pagination, and one stopping
         does not stop the others.
         """
+        query_collection = _resolve_query_collection(query_collection, queryCollection)
         request = AsyncWizRequest(
             client=self._client,
-            queryCollection=queryCollection,
+            query_collection=query_collection,
             query=query,
             vars=vars,
             paginate=paginate,
@@ -2019,7 +2071,7 @@ class AsyncWizBatchRequest:
         """Set progress callback"""
         self._progress_callback = callback
 
-    async def submit(self, max_concurrent: Optional[int] = None) -> WizBatchResponse:
+    async def submit(self, max_concurrent: int | None = None) -> WizBatchResponse:
         """Submit all requests with high concurrency"""
         if not self._requests:
             return WizBatchResponse({})
@@ -2029,7 +2081,7 @@ class AsyncWizBatchRequest:
 
         async def execute_request(
             index: int, request: AsyncWizRequest
-        ) -> Tuple[int, AsyncWizResponse]:
+        ) -> tuple[int, AsyncWizResponse]:
             async with semaphore:
                 try:
                     await request.submit()
@@ -2047,7 +2099,7 @@ class AsyncWizBatchRequest:
         tasks = [execute_request(i, req) for i, req in enumerate(self._requests)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        response_map: Dict[int, "AsyncWizResponse"] = {}
+        response_map: dict[int, AsyncWizResponse] = {}
         for result in results:
             if isinstance(result, BaseException):
                 self._logger.error(f"Batch request failed: {result}")

@@ -2,7 +2,7 @@
 Reusable GraphQL query collection.
 
 Define your team's standard queries as module-level constants.
-The SDK resolves them by name when passed via queryCollection.
+The SDK resolves them by name when passed via query_collection.
 """
 
 # ─── User queries ───────────────────────────────────────────────────

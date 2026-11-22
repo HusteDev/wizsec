@@ -1,15 +1,12 @@
 """Extended tests for _request.py — WizResponse, WizBatchResponse, query setter, and more."""
 
 import asyncio
-import logging
-import threading
-from unittest.mock import patch, MagicMock, PropertyMock
+from unittest.mock import patch, MagicMock
 
 import pytest
 
 from wizsec.config import Config
 from wizsec._request import (
-    _RequestBase,
     WizRequest,
     WizResponse,
     WizBatchRequest,
@@ -289,31 +286,29 @@ class TestWizRequestRepr:
 
 class TestQueryCollectionSetter:
     def test_set_query_collection_from_module(self, mock_wiz_client):
-        """Setting queryCollection with a module object stores it."""
+        """Setting query_collection with a module object stores it."""
         import types
 
         mod = types.ModuleType("fake_queries")
         mod.GET_USERS = "query GetUsers { users { id } }"
         req = _make_wiz_request(mock_wiz_client)
-        req.queryCollection = mod
-        assert req.queryCollection is mod
+        req.query_collection = mod
+        assert req.query_collection is mod
 
     def test_set_query_collection_from_string_not_loaded(self, mock_wiz_client):
-        """Setting queryCollection with a module name string that is not yet loaded imports it."""
-        import sys
+        """Setting query_collection with a module name string that is not yet loaded imports it."""
 
         req = _make_wiz_request(mock_wiz_client)
         # Use a module not yet in sys.modules by temporarily removing it
-        mod_name = "wizsec._request"  # already loaded, so use a unique fake
         fake_mod_name = "_test_fake_qc_module"
         import types
 
         fake_mod = types.ModuleType(fake_mod_name)
         # Patch importlib.import_module to return our fake module
         with patch("importlib.import_module", return_value=fake_mod) as mock_import:
-            req.queryCollection = fake_mod_name
+            req.query_collection = fake_mod_name
             mock_import.assert_called_once_with(fake_mod_name)
-        assert req.queryCollection is fake_mod
+        assert req.query_collection is fake_mod
 
     @pytest.mark.parametrize(
         "bad_value", [42, 3.14, True, None, b"x", [], (), set(), frozenset(), {}]
@@ -322,21 +317,21 @@ class TestQueryCollectionSetter:
         """Primitive and container types are rejected with WizQueryError."""
         req = _make_wiz_request(mock_wiz_client)
         with pytest.raises(WizQueryError, match="QueryCollection must be a module"):
-            req.queryCollection = bad_value
+            req.query_collection = bad_value
 
     def test_query_collection_getter_returns_none_when_unset(self, mock_wiz_client):
-        """queryCollection returns None when not set."""
+        """query_collection returns None when not set."""
         req = _make_wiz_request(mock_wiz_client)
-        assert req.queryCollection is None
+        assert req.query_collection is None
 
     def test_query_resolved_from_collection(self, mock_wiz_client):
-        """When query string is not valid GraphQL, resolve from queryCollection attribute."""
+        """When query string is not valid GraphQL, resolve from query_collection attribute."""
         import types
 
         mod = types.ModuleType("fake_queries")
         mod.MY_QUERY = "query MyQuery { users { id } }"
         req = _make_wiz_request(mock_wiz_client, paginate=False)
-        req.queryCollection = mod
+        req.query_collection = mod
         req.query = "MY_QUERY"
         assert "users" in req.query
 
@@ -346,8 +341,8 @@ class TestQueryCollectionSetter:
 
         ns = SimpleNamespace(MY_QUERY="query MyQuery { users { id } }")
         req = _make_wiz_request(mock_wiz_client, paginate=False)
-        req.queryCollection = ns
-        assert req.queryCollection is ns
+        req.query_collection = ns
+        assert req.query_collection is ns
         req.query = "MY_QUERY"
         assert "users" in req.query
 
@@ -359,8 +354,8 @@ class TestQueryCollectionSetter:
 
         qc = Queries()
         req = _make_wiz_request(mock_wiz_client, paginate=False)
-        req.queryCollection = qc
-        assert req.queryCollection is qc
+        req.query_collection = qc
+        assert req.query_collection is qc
         req.query = "MY_QUERY"
         assert "users" in req.query
 
@@ -975,7 +970,7 @@ class TestAsyncWizRequest:
             req,
             "_execute_page",
             new_callable=lambda: lambda: MagicMock(return_value=None),
-        ) as mock_exec:
+        ):
             # Make _execute_page a proper coroutine
             async def fake_execute():
                 req.data = {"users": [{"id": "1"}]}
@@ -1361,3 +1356,34 @@ class TestWizResponseStopSurface:
             "cursor": None,
             "next_cursor": "c9",
         }
+
+
+class TestQueryCollectionDeprecation:
+    """The camelCase spelling still works but warns."""
+
+    def test_property_alias_warns(self, mock_wiz_client):
+        from types import SimpleNamespace
+
+        ns = SimpleNamespace(Q="query Q { users { id } }")
+        req = _make_wiz_request(mock_wiz_client, query="query Q { users { id } }")
+        with pytest.warns(DeprecationWarning, match="query_collection"):
+            req.queryCollection = ns
+        assert req.query_collection is ns
+
+    def test_kwarg_alias_warns(self):
+        from wizsec.utils import _resolve_query_collection
+
+        with pytest.warns(DeprecationWarning):
+            assert _resolve_query_collection(None, "mod") == "mod"
+
+    def test_both_spellings_rejected(self):
+        from wizsec.utils import _resolve_query_collection
+
+        with pytest.warns(DeprecationWarning), pytest.raises(TypeError):
+            _resolve_query_collection("a", "b")
+
+    def test_new_name_does_not_warn(self, recwarn):
+        from wizsec.utils import _resolve_query_collection
+
+        assert _resolve_query_collection("a", None) == "a"
+        assert not [w for w in recwarn if w.category is DeprecationWarning]
